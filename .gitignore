@@ -147,6 +147,9 @@ activemq-data/
 # SageMath parsed files
 *.sage.py
 
+# Local object store (LOCAL_STORAGE_PATH) - runtime data, never committed
+.data/
+
 # Environments
 .env
 .envrc

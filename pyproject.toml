@@ -1,0 +1,83 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "llmwiki"
+description = "Cost-effective multimodal research knowledge base: immutable raw/ sources compiled into an interlinked wiki/, with hybrid wiki-first + RAG retrieval."
+dynamic = ["version"]
+# The library targets 3.11+; the pinned development interpreter is in
+# .python-version, and [tool.mypy] python_version must match it.
+requires-python = ">=3.11"
+dependencies = [
+    "anthropic>=1.0",
+    "boto3",
+    "fastapi",
+    "fastmcp",
+    "httpx",
+    "numpy",
+    "pydantic>=2",
+    "pydantic-settings",
+    "pymupdf",
+    "python-dotenv",
+    "python-frontmatter",
+    "trafilatura",
+    "uvicorn",
+    "youtube-transcript-api",
+]
+
+[project.optional-dependencies]
+# Provider extras. Anthropic is the default and stays a hard dependency for now
+# (slimming the core is milestone N3/N8); every other provider is reached
+# through LangChain and costs nothing until you ask for it.
+langchain = ["langchain-core>=0.3"]
+openai = ["llmwiki[langchain]", "langchain-openai"]
+google = ["llmwiki[langchain]", "langchain-google-genai"]
+nvidia = ["llmwiki[langchain]", "langchain-nvidia-ai-endpoints"]
+deepseek = ["llmwiki[langchain]", "langchain-deepseek"]
+openrouter = ["llmwiki[langchain]", "langchain-openrouter"]
+all-providers = ["llmwiki[openai,google,nvidia,deepseek,openrouter]"]
+
+# langchain-core is a dev dependency so the adapter's unit tests run against a
+# scripted BaseChatModel with no provider SDK and no network.
+dev = ["pytest", "pytest-mock", "pytest-asyncio", "mypy", "ruff", "respx",
+       "langchain-core>=0.3"]
+
+[project.scripts]
+llmwiki = "llmwiki.cli:main"
+
+[tool.setuptools.dynamic]
+version = {attr = "llmwiki.__version__"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+llmwiki = ["py.typed", "chains/prompts/*.md"]
+
+[tool.pytest.ini_options]
+# The repo root on sys.path, so `tests.doubles` imports under a bare `pytest`
+# and not only under `python -m pytest`, which adds the cwd itself.
+pythonpath = ["."]
+markers = ["integration: hits real external services; opt in with -m integration"]
+addopts = "-m 'not integration'"
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[tool.mypy]
+files = ["src/llmwiki"]
+python_version = "3.11"
+disallow_untyped_defs = true
+ignore_missing_imports = true
+
+[tool.ruff]
+line-length = 100
+src = ["src", "tests", "scripts"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+
+[tool.ruff.lint.per-file-ignores]
+# Depends()/File()/Form() in argument defaults is how FastAPI declares
+# dependencies; B008 is a false positive on every FastAPI route module.
+"src/llmwiki/api/routes.py" = ["B008"]

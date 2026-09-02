@@ -1,0 +1,18 @@
+<!doctype html>
+<html><head><title>Chunking Strategies for Retrieval</title></head>
+<body>
+<nav><a href="/">Home</a> <a href="/about">About</a></nav>
+<article>
+<h1>Chunking Strategies for Retrieval</h1>
+<p>Chunking splits a document into passages small enough to embed. The chunk
+boundary determines what a retriever can return, so a boundary drawn mid-argument
+costs recall that no reranker recovers.</p>
+<h2>Fixed-size windows</h2>
+<p>The simplest strategy slices on a character count with a fixed overlap. It is
+cheap and predictable, and it ignores document structure entirely.</p>
+<h2>Structural splitting</h2>
+<p>Splitting on headings respects the author's own boundaries. Sections that
+exceed the embedding budget are then split on length as a fallback.</p>
+</article>
+<footer>Copyright notice and navigation boilerplate.</footer>
+</body></html>

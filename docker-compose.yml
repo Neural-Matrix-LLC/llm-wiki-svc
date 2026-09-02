@@ -1,0 +1,82 @@
+# Phase 0 runs as a single process (decision D7): FastAPI serves REST, mounts MCP
+# at /mcp, and runs ingest work in background tasks. There is no separate worker
+# service to keep in sync, and no queue broker to operate.
+
+services:
+  api:
+    build:
+      context: .
+      target: runtime
+    image: llmwiki:latest
+    env_file:
+      # required:false so the offline and test profiles work in a fresh clone
+      # that has no .env yet. The api service still needs real credentials.
+      - path: .env
+        required: false
+    environment:
+      # Inside the container the local-storage path is the mounted volume,
+      # regardless of what .env says for host-side runs.
+      LOCAL_STORAGE_PATH: /data
+      API_HOST: 0.0.0.0
+      API_PORT: "8000"
+    ports:
+      # 0.0.0.0 on the host so the Windows browser can reach the WSL2 container.
+      - "${API_PORT:-8000}:8000"
+    volumes:
+      # Only used when STORAGE_BACKEND=local. With STORAGE_BACKEND=r2 the
+      # container is stateless and this volume stays empty.
+      - llmwiki-data:/data
+    restart: unless-stopped
+
+  # Offline mode: no keys, no network, fake adapters. Useful for a demo, for
+  # reviewing the wiki format, or for checking the image itself works.
+  #   docker compose --profile offline up api-offline
+  api-offline:
+    profiles: ["offline"]
+    build:
+      context: .
+      target: runtime
+    image: llmwiki:latest
+    environment:
+      STORAGE_BACKEND: local
+      VECTOR_BACKEND: memory
+      EMBEDDING_BACKEND: fake
+      LLM_BACKEND: fake
+      LOCAL_STORAGE_PATH: /data
+      INGEST_API_TOKEN: offline-token
+    ports:
+      - "${OFFLINE_PORT:-8001}:8000"
+    volumes:
+      - llmwiki-offline-data:/data
+
+  # End-to-end flow check against the built image.
+  #   docker compose --profile test run --rm smoke
+  smoke:
+    profiles: ["test"]
+    build:
+      context: .
+      target: runtime
+    image: llmwiki:latest
+    environment:
+      LOCAL_STORAGE_PATH: /data
+    volumes:
+      - llmwiki-offline-data:/data
+    entrypoint: ["python", "scripts/smoke_flow.py", "--offline"]
+
+  # The scheduled global lint (plan 6.8). Run from host cron, weekly:
+  #   docker compose --profile ops run --rm lint
+  lint:
+    profiles: ["ops"]
+    image: llmwiki:latest
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      LOCAL_STORAGE_PATH: /data
+    volumes:
+      - llmwiki-data:/data
+    entrypoint: ["llmwiki", "lint"]
+
+volumes:
+  llmwiki-data:
+  llmwiki-offline-data:
