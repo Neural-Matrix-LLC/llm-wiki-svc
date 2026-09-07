@@ -36,9 +36,16 @@ class FakeLLM:
         prompt: str,
         schema: dict | None = None,
         model: str | None = None,
-        max_tokens: int = 2048,
+        max_tokens: int | None = None,
+        temperature: float | None = None,
     ) -> LLMResponse:
-        self.calls.append({"op": op, "system": system, "prompt": prompt, "model": model})
+        # Recorded as passed - None included - so a test can assert a call
+        # site left these to be resolved by whichever adapter is really
+        # configured (plan §19.3), rather than always seeing a concrete number.
+        self.calls.append({
+            "op": op, "system": system, "prompt": prompt, "model": model,
+            "max_tokens": max_tokens, "temperature": temperature,
+        })
         usage = CostRecord(
             op=op,
             model=model or "fake",

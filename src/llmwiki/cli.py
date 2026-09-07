@@ -77,9 +77,10 @@ def main(argv: list[str] | None = None) -> int:
 
     # Imported after the environment is settled so the factory sees the right backends.
     from llmwiki import factory, tools
-    from llmwiki.config import load_settings
+    from llmwiki.config import configure_logging, load_settings
 
     cfg = load_settings()
+    configure_logging(cfg.log_level)
     factory.reset()
 
     if args.command == "ingest":

@@ -38,12 +38,20 @@ class LLMClient(Protocol):
         prompt: str,
         schema: dict | None = None,
         model: str | None = None,
-        max_tokens: int = 2048,
+        max_tokens: int | None = None,
+        temperature: float | None = None,
     ) -> LLMResponse:
         """Run one completion.
 
         ``system`` is the cache-stable prefix; ``prompt`` carries the volatile
         per-source content and must come after it.  When ``schema`` is given the
         result is returned in ``data``.
+
+        ``model``/``max_tokens``/``temperature`` are ``None`` by default: the
+        call site names only ``op`` and the concrete adapter resolves the rest
+        from *its own* configuration - ``Settings`` in the single-provider
+        fallback path, or a ``config/ops.py`` row when the application-specific
+        multi-provider router is active (design v1.4 §4.8.1, plan §19). Pass an
+        explicit value only to override that configuration for one call.
         """
         ...

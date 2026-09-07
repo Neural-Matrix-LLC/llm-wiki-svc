@@ -6,6 +6,7 @@ import pytest
 from tests.doubles import ScriptedLLM
 from tests.factories import make_extracted_doc, seed_gists
 
+from llmwiki.llm.fake import FakeLLM
 from llmwiki.models.plan import CostRecord
 from llmwiki.wiki import gists as gists_mod
 from llmwiki.wiki.compiler import Compiler, read_cost_ledger
@@ -57,7 +58,7 @@ def test_ledger_appends_across_sources(store, vectors, embedder, llm, settings):
 
 
 def test_budget_abort_marks_the_source_rather_than_running_away(
-    store, vectors, embedder, settings
+    store, vectors, embedder, settings, caplog
 ):
     """INGEST_TOKEN_BUDGET is a hard stop, not a warning."""
     settings.ingest_token_budget = 1
@@ -73,11 +74,15 @@ def test_budget_abort_marks_the_source_rather_than_running_away(
                              "concepts": ["alpha"], "entities": []},
         "plan_compile": {"ops": [{"kind": "create_page", "slug": "alpha", "title": "Alpha"}]},
     })
-    result = Compiler(store, vectors, embedder, llm, settings).compile_source(make_extracted_doc())
+    with caplog.at_level("WARNING", logger="llmwiki.wiki.compiler"):
+        result = Compiler(store, vectors, embedder, llm, settings).compile_source(
+            make_extracted_doc()
+        )
 
     assert result.aborted
     assert "INGEST_TOKEN_BUDGET" in result.reason
     assert result.created == []
+    assert any(r.levelname == "WARNING" and "aborted" in r.message for r in caplog.records)
 
 
 def test_planner_creates_are_downgraded_to_patches_for_existing_pages(
@@ -134,3 +139,23 @@ def test_compile_survives_any_wiki_size(wiki_size, store, vectors, embedder, llm
                    index=settings.vectorize_gists_index)
     result = Compiler(store, vectors, embedder, llm, settings).compile_source(make_extracted_doc())
     assert not result.aborted
+
+
+def test_compiler_leaves_model_and_sampling_params_to_the_configured_adapter(
+    store, vectors, embedder, settings
+):
+    """Obsoletes test_llm_max_tokens_and_temperature_reach_every_stage (removed
+    2026-09-05, plan §19.3/§19.7.2): every stage now passes only op/system/prompt
+    (/schema) - "config fully owns it" means Settings.llm_max_tokens/llm_temperature
+    (or a config/ops.py row, in routed mode) are resolved by the adapter
+    factory.py built, not read and forwarded by the compiler itself. Also
+    covers COMPILE_EXECUTOR_MODEL's removal: create_page/patch_page pass no
+    model= either."""
+    llm = FakeLLM()
+    Compiler(store, vectors, embedder, llm, settings).compile_source(make_extracted_doc())
+
+    assert llm.calls, "the scripted stages above must have actually run"
+    for call in llm.calls:
+        assert call["model"] is None
+        assert call["max_tokens"] is None
+        assert call["temperature"] is None

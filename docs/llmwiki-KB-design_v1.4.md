@@ -1,14 +1,15 @@
 # LLM Wiki Knowledge Base — Design Document
 
-**Version:** 1.4  
-**Date:** 2026-09-01  
+**Version:** 1.5  
+**Date:** 2026-09-05  
 **Status:** Draft for team evaluation  
 **Purpose:** Cost-effective, cloud-hosted, multimodal research knowledge base inspired by Andrej Karpathy’s LLM Wiki pattern, scaled for large volumes of PDFs, websites, blogs, YouTube videos, papers, images, and webpages.  
 **Updates:**  
 - 1.1: Added Section 4.6 on service interface / framework choice for sharability.  
 - 1.2: Expanded Section 4.6 with a detailed multi-dimension comparison table (MCP vs FastAPI vs Python package vs Hybrid).  
 - 1.3: Added Section 4.7 — Shareable LLM Integration Layer (inspired by AgentBase pattern), packaging strategy for cross-repo reuse, LangChain/LangGraph + LangSmith alignment.  
-- 1.4: Redesigned Architecture Diagram to clearly separate Core Wiki Package, Shareable LLM Layer, Processing, and Interface layers (aligns with 4.6 Hybrid + 4.7).
+- 1.4: Redesigned Architecture Diagram to clearly separate Core Wiki Package, Shareable LLM Layer, Processing, and Interface layers (aligns with 4.6 Hybrid + 4.7).  
+- 1.5: Added Section 4.8 — Application-Specific LLM Routing (multi-provider credentials + per-op model routing, deliberately kept *outside* §4.7's shareable, stable `LLMConfig` contract) and Agent Skill Invocation (the five compiler/query prompts become real SKILL.md-format files; the query agent — not the compiler — gains genuine runtime skill selection). Implementation detail in `implement-plan-v1.4.md` §19.
 
 ---
 
@@ -432,6 +433,59 @@ The main LLM Wiki service (FastAPI + MCP + core wiki logic) becomes one consumer
 - How aggressive to be with LangSmith as a hard vs soft dependency.  
 - Whether AgentBase should be a class to inherit or a set of composable mixins/helpers.
 
+### 4.8 Application-Specific LLM Routing & Agent Skill Invocation
+
+*(New in 1.5. Implementation detail lives in `implement-plan-v1.4.md` §19 — this section states the
+architectural decision and where its boundary sits relative to §4.7.)*
+
+§4.7's `LLMConfig` is deliberately a **single provider, single model, single credential** shape —
+that simplicity is what makes it a crisp, semver-protected contract other repositories (FUND) can
+depend on. Real deployments of *this* service want more: several providers configured at once, and a
+different model per pipeline stage (a cheap model for `plan_compile`, a stronger one for
+`create_page`/`patch_page`). That richer shape does not belong in the shareable contract — it is a
+concern of the application wiring this particular service together, not of the LLM layer other
+repositories import.
+
+#### 4.8.1 Multi-Provider, Per-Op Routing
+
+- A repo-root `config/` directory — **outside `src/llmwiki`, not part of the installable package** —
+  holds two plain, committed Python modules:
+  - `config/providers.py`: which providers are available and which environment variable names carry
+    each one's credentials (`{"provider": "openai", "api_key_env": "OPENAI_API_KEY", ...}`). It holds
+    **no secret values** — only env-var *names* — so it is ordinary committed config, not a `.env`
+    twin. A provider whose named env var is unset/empty at startup is simply absent from the *active*
+    provider set (not an error).
+  - `config/ops.py`: one row per operation name the codebase already calls (`answer_query`,
+    `summarize_source`, `plan_compile`, `create_page`, `patch_page`), each naming its provider, model,
+    temperature and token cap. An op naming an inactive/undefined provider, or a known op missing a
+    row, fails loudly at startup — the same "fail by name" posture as `Settings.require` today.
+- This retires `COMPILE_EXECUTOR_MODEL`: the "stronger model for patches" idea it encoded becomes
+  nothing more than `create_page`/`patch_page` having their own rows in `config/ops.py`.
+- **Zero-config behavior is unchanged.** When `config/providers.py` is absent, the service falls back
+  to exactly today's single-provider path driven by `Settings` — this is what keeps a fresh clone,
+  CI, and the offline smoke flow working with no setup.
+- This layer is explicitly **not** promoted into §4.7's shareable package. If a future consumer wants
+  multi-provider routing, that is a new, separate evaluation against the stability contract in
+  implement-plan-v1.4.md §7.3 — not an automatic graduation of this app's `config/`.
+
+#### 4.8.2 SKILL.md-Format Prompts & Query-Agent Skill Invocation
+
+- The prompt files under `chains/prompts/*.md` (one per op, §4.4) gain real YAML frontmatter
+  (`name`, `description`) so each is independently a valid Agent Skill, discoverable by an external
+  harness (Claude Code, the Claude Agent SDK, an MCP client) — not only by this codebase's own loader.
+- The four **compiler** stages keep the deterministic, fixed op→prompt mapping unchanged — this is
+  what §4.4's cost-bounded, non-agentic compilation guarantee depends on, and it is not weakened here.
+- The **query agent** (only) gains a genuine skill-invocation capability: rather than always loading
+  `answer_query.md`, it is given the discovered skill set and picks — and can chain — among them per
+  question, via a real tool-use round trip with the model. This is a scoped, early pull-forward of
+  what §4.7's `Skills` component and the existing plan's `SKILLS_DIR` (implement-plan-v1.4.md §14,
+  milestone N6) eventually generalize — done now, narrowly, for one agent, without waiting on N4/N6's
+  FUND-adoption gate and without generalizing skills/memory/`AgentBase` speculatively ahead of a real
+  second consumer (the same anti-speculative-generality reasoning implement-plan-v1.4.md §12.1 already
+  applies to N6).
+
+See §5 for the phase placement of this last piece.
+
 ---
 
 ## 5. Multi-Phase Growth Plan
@@ -451,6 +505,11 @@ Phases are driven by corpus size, user count, query volume, and feature demand.
 - Simple MCP server (and/or lightweight FastAPI) exposing the key tools.
 - Obsidian or simple markdown viewer + agent chat.
 - Cloud cheap models only; LangSmith tracing optional.
+- **Application-specific multi-provider/per-op LLM routing** (Section 4.8.1) — deliberately kept
+  outside the shareable layer above.
+- **Scoped exception:** the query agent (only) gets real skill invocation over SKILL.md-format
+  prompts (Section 4.8.2) — a narrow slice of the Phase 1 "better agent tools" item below, pulled
+  forward because it was explicitly requested, not because Phase 0 otherwise needs agentic tool use.
 
 **Success criteria:** Daily capture works; wiki compounds usefully; cost stays very low; agents can connect via MCP; LLM layer is importable by other code.
 

@@ -24,6 +24,36 @@ def video_id(url: str) -> str:
     return match.group(1)
 
 
+def fetch_video_title(url: str) -> str:
+    """Read the public video title via oEmbed. Empty string if the lookup fails.
+
+    Capture stores this on ``meta.json`` once; extraction stays a pure function
+    of the stored transcript bytes and does not touch the network.
+    """
+    import httpx
+
+    try:
+        identifier = video_id(url)
+    except ExtractionError:
+        return ""
+    oembed = (
+        "https://www.youtube.com/oembed"
+        f"?url=https://www.youtube.com/watch?v={identifier}&format=json"
+    )
+    try:
+        response = httpx.get(
+            oembed,
+            timeout=30.0,
+            follow_redirects=True,
+            headers={"User-Agent": "llmwiki/0.9 (+research knowledge base)"},
+        )
+        response.raise_for_status()
+        title = response.json().get("title")
+    except Exception:
+        return ""
+    return str(title or "").strip()
+
+
 def fetch_transcript(url: str) -> bytes:
     """Fetch the transcript at capture time, stored verbatim as the raw source."""
     from youtube_transcript_api import YouTubeTranscriptApi

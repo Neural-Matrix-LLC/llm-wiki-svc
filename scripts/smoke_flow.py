@@ -42,6 +42,13 @@ def main() -> int:
         os.environ.update(STORAGE_BACKEND="local", VECTOR_BACKEND="memory",
                           EMBEDDING_BACKEND="fake", LLM_PROVIDER="fake")
         os.environ.setdefault("LOCAL_STORAGE_PATH", str(REPO / ".data"))
+        # LLM_PROVIDER=fake alone is not enough: factory.py checks
+        # config/providers.py + config/ops.py *before* LLM_PROVIDER at all
+        # (plan §19.2) - a real routing config set up for actual use (as this
+        # repo may have) would otherwise make real network calls here despite
+        # --offline. Force both to a path that cannot exist.
+        os.environ["LLMWIKI_PROVIDERS_CONFIG"] = "/nonexistent/llmwiki-offline-guard/providers.py"
+        os.environ["LLMWIKI_OPS_CONFIG"] = "/nonexistent/llmwiki-offline-guard/ops.py"
 
     # Imported after the env is set so factory.py sees the right backends.
     from llmwiki import __version__, tools

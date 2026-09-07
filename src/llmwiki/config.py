@@ -6,11 +6,46 @@ Everything else receives a :class:`Settings` instance.  Secrets are typed as
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from typing import Literal
 
-from pydantic import Field, SecretStr, model_validator
+from pydantic import AliasChoices, Field, SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+_LOG_FORMAT = "%(asctime)s %(levelname)-7s %(name)s:%(lineno)d  %(message)s"
+_LOG_DATEFMT = "%H:%M:%S"
+_logging_configured = False
+
+
+def configure_logging(level: str = "INFO") -> None:
+    """Attach one stream handler to the root logger, at ``level``.
+
+    Lives here rather than in its own module because the transport layers
+    (api/, cli.py) may only import ``tools``/``models``/``config``/``wiki``/
+    ``factory`` (``test_layering.py::test_transport_layer_only_calls_tools``)
+    - both call this once, at process start, with ``Settings.log_level``.
+
+    Idempotent: a second call (a second ``Settings`` built by a test, or
+    ``serve --reload`` re-importing the app) only adjusts the level, it never
+    stacks a second handler or duplicates log lines.
+    """
+    global _logging_configured
+    resolved = getattr(logging, level.upper(), None)
+    if not isinstance(resolved, int):
+        raise ValueError(f"LOG_LEVEL={level!r} is not a recognized logging level")
+
+    root = logging.getLogger()
+    root.setLevel(resolved)
+    if not _logging_configured:
+        handler = logging.StreamHandler()
+        handler.setFormatter(logging.Formatter(_LOG_FORMAT, datefmt=_LOG_DATEFMT))
+        root.addHandler(handler)
+        _logging_configured = True
+    else:
+        for existing_handler in root.handlers:
+            existing_handler.setLevel(resolved)
+
 
 # Providers the generic LLM contract accepts. "anthropic" has a native adapter
 # (prompt caching, measured cost); the rest are reached through LangChain and
@@ -43,10 +78,44 @@ class Settings(BaseSettings):
     llm_api_key: SecretStr = SecretStr("")
     llm_model: str = "claude-haiku-4-5"
     llm_base_url: str = ""
+    # Applied uniformly by every adapter (native Anthropic and every
+    # LangChain-routed provider) and passed explicitly at every call site -
+    # same idiom as llm_model, never a hidden per-adapter default.
+    llm_max_tokens: int = 2048
+    llm_temperature: float = 1.0
 
-    # Wiki-specific, deliberately NOT part of the shared contract: the compiler
-    # escalates patch generation to a stronger model (plan-1.1 D5).
-    compile_executor_model: str = "claude-haiku-4-5"
+    # --- Application-specific LLM routing (design v1.4 §4.8, plan §19) --------
+    # Deliberately outside the shared agentkit-llm contract above: multi-
+    # provider credentials and per-op model routing are this application's
+    # concern, not the reusable LLM layer's. Absence of the *file* at
+    # llm_providers_config (not of this setting) is what selects the
+    # single-provider fallback path built from the fields above - see
+    # factory._build_llm_client. Replaces the old, single-purpose
+    # COMPILE_EXECUTOR_MODEL: a stronger model for create_page/patch_page is
+    # now just those ops' own rows in config/ops.py.
+    #
+    # ``validation_alias`` is required here: pydantic-settings would otherwise
+    # auto-derive the env var name from the field name alone
+    # (LLM_PROVIDERS_CONFIG, no "WIKI") - the deliberately-prefixed
+    # LLMWIKI_PROVIDERS_CONFIG/LLMWIKI_OPS_CONFIG documented in .env.example
+    # and implement-plan-v1.4.md §19.8 would otherwise be silently ignored.
+    # The plain field name is kept as a second alias so direct construction
+    # (``Settings(llm_providers_config=...)``, used throughout the test suite)
+    # is unaffected.
+    llm_providers_config: Path = Field(
+        default=Path("./config/providers.py"),
+        validation_alias=AliasChoices("LLMWIKI_PROVIDERS_CONFIG", "llm_providers_config"),
+    )
+    llm_ops_config: Path = Field(
+        default=Path("./config/ops.py"),
+        validation_alias=AliasChoices("LLMWIKI_OPS_CONFIG", "llm_ops_config"),
+    )
+
+    # Query-agent skill discovery directory (design v1.4 §4.8.2, plan §19.5),
+    # outside src/llmwiki like the two paths above. Not yet read by any code
+    # path - lands with R5; declared now so the location is locked in .env
+    # rather than improvised later.
+    agent_skills_dir: Path = Field(default=Path("./skills"))
 
     # --- Cloudflare ---
     cf_account_id: str = ""
@@ -64,6 +133,22 @@ class Settings(BaseSettings):
     ingest_api_token: SecretStr = SecretStr("changeme")
     api_host: str = "0.0.0.0"
     api_port: int = 8000
+
+    # --- Observability: stdlib logging ---
+    # Consumed by llmwiki.logging_config.configure_logging, called once by each
+    # entry point (cli.main, api/app.py). Independent of LangSmith tracing
+    # below - this is process-local log output, not a shipped trace.
+    log_level: str = "INFO"
+
+    # --- Observability: LangSmith tracing (optional, off by default) ---
+    # Independent of LLM_PROVIDER: factory.py wraps the native Anthropic client
+    # directly and exports these for LangChain's own auto-instrumentation to
+    # pick up on every other provider. Complements, not replaces, the measured
+    # cost ledger (models/plan.py CostRecord -> wiki/_meta/cost.jsonl).
+    langsmith_tracing: bool = False
+    langsmith_api_key: SecretStr = SecretStr("")
+    langsmith_project: str = "llmwiki"
+    langsmith_endpoint: str = ""
 
     # --- Cost guardrails ---
     compile_max_pages: int = 5

@@ -13,8 +13,8 @@ import pytest
 
 from llmwiki.extractors.base import ExtractionError, detect_modality, get_extractor
 from llmwiki.extractors.pdf import PdfExtractor
-from llmwiki.extractors.web import WebExtractor
-from llmwiki.extractors.youtube import YouTubeExtractor, video_id
+from llmwiki.extractors.web import WebExtractor, title_from_html
+from llmwiki.extractors.youtube import YouTubeExtractor, fetch_video_title, video_id
 from llmwiki.models.source import SourceMeta
 
 FIXTURES = Path(__file__).resolve().parents[1] / "fixtures"
@@ -74,11 +74,46 @@ def test_web_extraction_drops_navigation_and_footer() -> None:
     assert "Structural splitting" in doc.text
     assert "navigation boilerplate" not in doc.text
     assert "About" not in doc.text
+    assert doc.title == "Chunking Strategies for Retrieval"
 
 
 def test_web_extraction_of_contentless_html_fails() -> None:
     with pytest.raises(ExtractionError):
         WebExtractor().extract(meta("web", url="https://x.org"), b"<html><body></body></html>")
+
+
+def test_web_title_comes_from_the_html_when_meta_has_none() -> None:
+    html = (FIXTURES / "sample.html").read_text(encoding="utf-8")
+    assert title_from_html(html) == "Chunking Strategies for Retrieval"
+
+
+def test_youtube_extract_uses_the_captured_title() -> None:
+    doc = YouTubeExtractor().extract(
+        meta("youtube", url="https://youtu.be/dQw4w9WgXcQ", title="Never Gonna Give You Up"),
+        (FIXTURES / "transcript.json").read_bytes(),
+    )
+    assert doc.title == "Never Gonna Give You Up"
+
+
+def test_fetch_video_title_reads_oembed(monkeypatch: pytest.MonkeyPatch) -> None:
+    import httpx
+
+    def fake_get(url: str, **kwargs: object) -> httpx.Response:
+        assert "oembed" in url
+        return httpx.Response(200, json={"title": "Never Gonna Give You Up"})
+
+    monkeypatch.setattr(httpx, "get", fake_get)
+    assert fetch_video_title("https://youtu.be/dQw4w9WgXcQ") == "Never Gonna Give You Up"
+
+
+def test_fetch_video_title_is_empty_when_oembed_fails(monkeypatch: pytest.MonkeyPatch) -> None:
+    import httpx
+
+    def fake_get(url: str, **kwargs: object) -> httpx.Response:
+        raise httpx.ConnectError("offline")
+
+    monkeypatch.setattr(httpx, "get", fake_get)
+    assert fetch_video_title("https://youtu.be/dQw4w9WgXcQ") == ""
 
 
 def test_youtube_transcript_becomes_timestamped_paragraphs() -> None:

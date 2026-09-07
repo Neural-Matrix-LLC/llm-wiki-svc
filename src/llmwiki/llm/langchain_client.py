@@ -71,25 +71,30 @@ class LangChainLLM:
 
     Takes a *builder* rather than a model instance: ``complete`` accepts a
     per-call ``model``, and the compiler uses that to escalate patch generation
-    to a stronger model (D5).  Built models are cached per (model, token cap),
-    since constructing one opens no connection but does re-read credentials.
+    to a stronger model (D5).  Built models are cached per
+    (model, token cap, temperature), since constructing one opens no
+    connection but does re-read credentials.
     """
 
     def __init__(
         self,
-        build: Callable[[str, int], Any],
+        build: Callable[[str, int, float], Any],
         default_model: str,
         version: str = "",
+        default_max_tokens: int = 2048,
+        default_temperature: float = 1.0,
     ) -> None:
         self._build = build
-        self._models: dict[tuple[str, int], Any] = {}
+        self._models: dict[tuple[str, int, float], Any] = {}
         self.default_model = default_model
         self.version = version
+        self.default_max_tokens = default_max_tokens
+        self.default_temperature = default_temperature
 
-    def _model_for(self, model: str, max_tokens: int) -> Any:
-        key = (model, max_tokens)
+    def _model_for(self, model: str, max_tokens: int, temperature: float) -> Any:
+        key = (model, max_tokens, temperature)
         if key not in self._models:
-            self._models[key] = self._build(model, max_tokens)
+            self._models[key] = self._build(model, max_tokens, temperature)
         return self._models[key]
 
     def complete(
@@ -100,12 +105,15 @@ class LangChainLLM:
         prompt: str,
         schema: dict | None = None,
         model: str | None = None,
-        max_tokens: int = 2048,
+        max_tokens: int | None = None,
+        temperature: float | None = None,
     ) -> LLMResponse:
         from langchain_core.messages import HumanMessage, SystemMessage
 
         chosen = model or self.default_model
-        runnable: Any = self._model_for(chosen, max_tokens)
+        resolved_max_tokens = self.default_max_tokens if max_tokens is None else max_tokens
+        resolved_temperature = self.default_temperature if temperature is None else temperature
+        runnable: Any = self._model_for(chosen, resolved_max_tokens, resolved_temperature)
         if schema is not None:
             runnable = runnable.bind_tools([_tool_for(schema)], tool_choice=TOOL_NAME)
 

@@ -110,6 +110,23 @@ def test_registry_keywords_match_the_installed_class(name: str) -> None:
         providers.MODEL_ARG,
         providers.API_KEY_ARG,
         providers.BASE_URL_ARG,
+        providers.TEMPERATURE_ARG,
         spec.max_tokens_arg,
     ):
         assert keyword in accepted, f"{cls.__name__} does not accept {keyword!r}"
+
+
+def test_build_forwards_temperature_to_the_constructor(monkeypatch) -> None:
+    """Unlike max_tokens, temperature needs no per-provider spelling override."""
+    calls = []
+
+    class FakeChatModel:
+        def __init__(self, **kwargs):
+            calls.append(kwargs)
+
+    monkeypatch.setattr(providers, "load_class", lambda provider: FakeChatModel)
+
+    providers.build("openai", model="gpt-5", api_key="sk-openai", temperature=0.2, max_tokens=99)
+
+    assert calls[-1][providers.TEMPERATURE_ARG] == 0.2
+    assert calls[-1][providers.REGISTRY["openai"].max_tokens_arg] == 99

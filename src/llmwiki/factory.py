@@ -10,6 +10,8 @@ Domain classes take protocols and never reach in here (plan 4.3).
 
 from __future__ import annotations
 
+import logging
+import os
 from typing import Any
 
 from llmwiki.config import Settings
@@ -18,6 +20,8 @@ from llmwiki.embedding.base import Embedder
 from llmwiki.llm.base import LLMClient
 from llmwiki.storage.base import ObjectStore
 from llmwiki.vector.base import VectorStore
+
+logger = logging.getLogger(__name__)
 
 # Adapters are cached per distinct configuration, not per Settings instance:
 # Settings is mutable (tests adjust caps on it) and therefore unhashable, so the
@@ -41,6 +45,7 @@ def object_store(cfg: Settings | None = None) -> ObjectStore:
 
 
 def _build_object_store(cfg: Settings) -> ObjectStore:
+    logger.info("object store: backend=%s", cfg.storage_backend)
     if cfg.storage_backend == "local":
         from llmwiki.storage.local import LocalObjectStore
 
@@ -65,6 +70,7 @@ def vector_store(cfg: Settings | None = None) -> VectorStore:
 
 
 def _build_vector_store(cfg: Settings) -> VectorStore:
+    logger.info("vector store: backend=%s", cfg.vector_backend)
     if cfg.vector_backend == "memory":
         from llmwiki.vector.memory import MemoryVectorStore
 
@@ -89,6 +95,7 @@ def embedder(cfg: Settings | None = None) -> Embedder:
 
 
 def _build_embedder(cfg: Settings) -> Embedder:
+    logger.info("embedder: backend=%s model=%s", cfg.embedding_backend, cfg.embedding_model)
     if cfg.embedding_backend == "fake":
         from llmwiki.embedding.fake import FakeEmbedder
 
@@ -108,51 +115,157 @@ def _build_embedder(cfg: Settings) -> Embedder:
 def llm_client(cfg: Settings | None = None) -> LLMClient:
     """Return the configured LLM client."""
     cfg = cfg or default_settings
-    key = ("llm", cfg.llm_provider, cfg.llm_model, cfg.llm_base_url)
+    key = ("llm", cfg.llm_provider, cfg.llm_model, cfg.llm_base_url,
+           str(cfg.llm_providers_config), str(cfg.llm_ops_config))
     return _cached(key, lambda: _build_llm_client(cfg))
 
 
-def _build_llm_client(cfg: Settings) -> LLMClient:
-    if cfg.llm_provider == "fake":
+def _configure_langsmith(cfg: Settings) -> None:
+    """Export LangSmith's env vars so every provider's tracing sees them.
+
+    The native Anthropic adapter is wrapped explicitly (below); every
+    LangChain-routed provider auto-instruments off these same env vars, which
+    is why this exports rather than passes arguments. A no-op unless
+    ``LANGSMITH_TRACING`` is set - importing or configuring nothing is the
+    default cost.
+    """
+    if not cfg.langsmith_tracing:
+        return
+    cfg.require("langsmith_api_key")
+    os.environ["LANGSMITH_TRACING"] = "true"
+    os.environ["LANGSMITH_API_KEY"] = cfg.langsmith_api_key.get_secret_value()
+    os.environ["LANGSMITH_PROJECT"] = cfg.langsmith_project
+    if cfg.langsmith_endpoint:
+        os.environ["LANGSMITH_ENDPOINT"] = cfg.langsmith_endpoint
+
+
+def _construct_provider_client(
+    provider: str,
+    *,
+    api_key: str,
+    base_url: str,
+    default_model: str,
+    default_max_tokens: int,
+    default_temperature: float,
+    tracing: bool,
+) -> LLMClient:
+    """Build one concrete adapter for ``provider``.
+
+    No logging, no ``os.environ`` reads, no ``Settings`` - shared by the
+    single-provider fallback path below and the per-op router
+    (``_build_routed_llm_client``, implement-plan-v1.4.md §19.3).
+    """
+    if provider == "fake":
         from llmwiki.llm.fake import FakeLLM
 
         return FakeLLM()
 
-    cfg.require("llm_api_key")
     from llmwiki import __version__
 
-    if cfg.llm_provider == "anthropic":
+    if provider == "anthropic":
         # Native adapter: prompt caching and measured cost live here, so
         # Anthropic does not go through LangChain (plan-v1.4 7.5).
         from llmwiki.llm.anthropic_client import AnthropicLLM
 
         return AnthropicLLM(
-            api_key=cfg.llm_api_key.get_secret_value(),
-            default_model=cfg.llm_model,
-            base_url=cfg.llm_base_url or None,
+            api_key=api_key,
+            default_model=default_model,
+            base_url=base_url or None,
             version=__version__,
+            tracing=tracing,
+            default_max_tokens=default_max_tokens,
+            default_temperature=default_temperature,
         )
 
     from llmwiki.llm import providers
 
-    if cfg.llm_provider not in providers.REGISTRY:
+    if provider not in providers.REGISTRY:
         raise RuntimeError(
-            f"LLM_PROVIDER={cfg.llm_provider!r} has no adapter in this package. "
+            f"provider {provider!r} has no adapter in this package. "
             f"Available: anthropic, fake, {', '.join(sorted(providers.REGISTRY))}."
         )
 
     from llmwiki.llm.langchain_client import LangChainLLM
 
-    def build(model: str, max_tokens: int) -> Any:
+    def build(model: str, max_tokens: int, temperature: float) -> Any:
         return providers.build(
-            cfg.llm_provider,
-            model=model,
-            api_key=cfg.llm_api_key.get_secret_value(),
-            base_url=cfg.llm_base_url,
-            max_tokens=max_tokens,
+            provider, model=model, api_key=api_key, base_url=base_url,
+            max_tokens=max_tokens, temperature=temperature,
         )
 
-    return LangChainLLM(build, default_model=cfg.llm_model, version=__version__)
+    return LangChainLLM(
+        build, default_model=default_model, version=__version__,
+        default_max_tokens=default_max_tokens, default_temperature=default_temperature,
+    )
+
+
+def _build_routed_llm_client(cfg: Settings, routing: Any) -> LLMClient:
+    """Multi-provider, per-op path - built only when config/{providers,ops}.py
+    both exist (design v1.4 §4.8.1, plan §19.2-19.3)."""
+    used = sorted(routing.providers_in_use())
+    logger.info("llm client: routed mode ops=%d providers=%s", len(routing.ops), used)
+    _configure_langsmith(cfg)
+
+    clients: dict[str, LLMClient] = {}
+    for provider in used:
+        creds = routing.providers[provider]
+        clients[provider] = _construct_provider_client(
+            provider,
+            api_key=creds.api_key,
+            base_url=creds.base_url,
+            # The router (llm/router.py) always passes model=/max_tokens=/
+            # temperature= explicitly from the matching config/ops.py row, so
+            # these construction-time defaults are never actually read.
+            default_model="",
+            default_max_tokens=2048,
+            default_temperature=1.0,
+            tracing=cfg.langsmith_tracing,
+        )
+
+    from llmwiki.llm.router import RoutingLLMClient
+
+    return RoutingLLMClient(routing, clients)
+
+
+def _build_llm_client(cfg: Settings) -> LLMClient:
+    from llmwiki.llm import routing_config
+
+    routing = routing_config.load_routing_config(cfg.llm_providers_config, cfg.llm_ops_config)
+    if routing is not None:
+        return _build_routed_llm_client(cfg, routing)
+
+    # --- fallback: single provider, driven entirely by Settings ------------
+    if cfg.llm_provider == "fake":
+        logger.info("llm client: provider=fake (offline double, no key, no cost)")
+        return _construct_provider_client(
+            "fake", api_key="", base_url="", default_model=cfg.llm_model,
+            default_max_tokens=cfg.llm_max_tokens, default_temperature=cfg.llm_temperature,
+            tracing=False,
+        )
+
+    cfg.require("llm_api_key")
+    _configure_langsmith(cfg)
+
+    if cfg.llm_provider == "anthropic":
+        logger.info(
+            "llm client: provider=anthropic model=%s tracing=%s",
+            cfg.llm_model, cfg.langsmith_tracing,
+        )
+    else:
+        logger.info(
+            "llm client: provider=%s model=%s (via langchain) tracing=%s",
+            cfg.llm_provider, cfg.llm_model, cfg.langsmith_tracing,
+        )
+
+    return _construct_provider_client(
+        cfg.llm_provider,
+        api_key=cfg.llm_api_key.get_secret_value(),
+        base_url=cfg.llm_base_url,
+        default_model=cfg.llm_model,
+        default_max_tokens=cfg.llm_max_tokens,
+        default_temperature=cfg.llm_temperature,
+        tracing=cfg.langsmith_tracing,
+    )
 
 
 def reset() -> None:

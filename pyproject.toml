@@ -38,10 +38,17 @@ deepseek = ["llmwiki[langchain]", "langchain-deepseek"]
 openrouter = ["llmwiki[langchain]", "langchain-openrouter"]
 all-providers = ["llmwiki[openai,google,nvidia,deepseek,openrouter]"]
 
+# Optional tracing. Independent of which LLM_PROVIDER is chosen: it wraps the
+# native Anthropic adapter directly and is picked up automatically by every
+# LangChain provider's own instrumentation. Off (LANGSMITH_TRACING=false) costs
+# nothing and imports nothing - see llm/anthropic_client.py and factory.py.
+langsmith = ["langsmith>=0.3"]
+
 # langchain-core is a dev dependency so the adapter's unit tests run against a
-# scripted BaseChatModel with no provider SDK and no network.
+# scripted BaseChatModel with no provider SDK and no network. langsmith is a
+# dev dependency for the same reason: the tracing-wrap test monkeypatches it.
 dev = ["pytest", "pytest-mock", "pytest-asyncio", "mypy", "ruff", "respx",
-       "langchain-core>=0.3"]
+       "langchain-core>=0.3", "langsmith>=0.3"]
 
 [project.scripts]
 llmwiki = "llmwiki.cli:main"

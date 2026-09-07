@@ -114,3 +114,23 @@ def test_empty_knowledge_base_says_so_rather_than_inventing(
 def test_source_exists_rejects_a_malformed_id(store, vectors, embedder, llm, settings) -> None:
     agent = QueryAgent(store, vectors, embedder, llm, settings)
     assert agent.source_exists("../../etc/passwd") is False
+
+
+def test_answer_leaves_model_and_sampling_params_to_the_configured_adapter(
+    populated, store, vectors, embedder, llm, settings
+) -> None:
+    """Obsoletes test_answer_passes_settings_max_tokens_and_temperature (removed
+    2026-09-05, plan §19.3/§19.7.2): the agent no longer reads Settings.llm_max_tokens/
+    llm_temperature itself and forwards them - "config fully owns it" means the
+    call site names only op/system/prompt, and whichever adapter factory.py built
+    (from Settings in fallback mode, from config/ops.py in routed mode) resolves
+    the rest."""
+    agent = QueryAgent(store, vectors, embedder, llm, settings)
+
+    agent.answer("retrieval augmented generation")
+
+    calls = [c for c in llm.calls if c["op"] == "answer_query"]
+    assert calls, "answer() must have actually called the LLM"
+    assert calls[-1]["model"] is None
+    assert calls[-1]["max_tokens"] is None
+    assert calls[-1]["temperature"] is None

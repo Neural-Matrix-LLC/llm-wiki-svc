@@ -23,10 +23,11 @@ SCHEMA = {
 class ScriptedChatModel:
     """Stands in for a BaseChatModel; records what it was asked to do."""
 
-    def __init__(self, reply: AIMessage, model: str, max_tokens: int) -> None:
+    def __init__(self, reply: AIMessage, model: str, max_tokens: int, temperature: float) -> None:
         self.reply = reply
         self.model = model
         self.max_tokens = max_tokens
+        self.temperature = temperature
         self.bound: list[tuple] = []
         self.messages: list = []
 
@@ -42,8 +43,8 @@ class ScriptedChatModel:
 def make_client(reply: AIMessage, default_model: str = "gpt-5") -> tuple:
     built: list[ScriptedChatModel] = []
 
-    def build(model: str, max_tokens: int) -> ScriptedChatModel:
-        chat = ScriptedChatModel(reply, model, max_tokens)
+    def build(model: str, max_tokens: int, temperature: float) -> ScriptedChatModel:
+        chat = ScriptedChatModel(reply, model, max_tokens, temperature)
         built.append(chat)
         return chat
 
@@ -161,3 +162,30 @@ def test_chat_models_are_reused_across_identical_calls() -> None:
     client.complete(op="answer_query", system="s", prompt="q", max_tokens=99)
 
     assert [chat.max_tokens for chat in built] == [2048, 99]
+
+
+def test_a_temperature_change_builds_its_own_chat_model() -> None:
+    """temperature is baked in at construction, same as max_tokens (D5 comment)."""
+    client, built = make_client(AIMessage(content="x"))
+    client.complete(op="answer_query", system="s", prompt="p")
+    client.complete(op="answer_query", system="s", prompt="p", temperature=0.2)
+    client.complete(op="answer_query", system="s", prompt="p", temperature=0.2)
+
+    assert [chat.temperature for chat in built] == [1.0, 0.2]
+
+
+def test_omitted_max_tokens_and_temperature_use_the_configured_defaults() -> None:
+    """implement-plan-v1.4.md §19.3: a caller passing neither resolves to the
+    adapter's own construction-time defaults, not a hardcoded 2048/1.0."""
+    built: list = []
+
+    def build(model: str, max_tokens: int, temperature: float):
+        chat = ScriptedChatModel(AIMessage(content="x"), model, max_tokens, temperature)
+        built.append(chat)
+        return chat
+
+    client = LangChainLLM(build, default_model="gpt-5", default_max_tokens=777,
+                           default_temperature=0.4)
+    client.complete(op="answer_query", system="s", prompt="p")
+
+    assert (built[0].max_tokens, built[0].temperature) == (777, 0.4)

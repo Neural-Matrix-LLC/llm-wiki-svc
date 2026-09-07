@@ -18,14 +18,24 @@ source .venv/bin/activate
 uv sync
 cp .env.example .env
 
-pytest                                  # 181 unit tests, no network
+pytest                                  # unit tests, no network
 python scripts/smoke_flow.py --offline  # end-to-end flow with fake adapters
 llmwiki --offline ingest --file tests/fixtures/sample.pdf
 llmwiki --offline concepts
 ```
 
-Offline mode swaps in a filesystem store, an in-memory vector index, a hash-based
+`--offline` swaps in a filesystem store, an in-memory vector index, a hash-based
 embedder and a scripted LLM. `.data/wiki/` opens directly as an Obsidian vault.
+
+URL ingest uses the same command. `--url` still fetches the page or YouTube
+transcript over the network; `--offline` only keeps storage and the LLM local
+and fake. Drop `--offline` once `.env` has real credentials.
+
+```bash
+llmwiki --offline ingest --url "https://www.youtube.com/watch?v=fvIVGmwgk4w"
+llmwiki --offline ingest --url "https://karpathy.github.io/2019/04/25/recipe/"
+llmwiki --offline concepts
+```
 
 ## Running against real backends
 

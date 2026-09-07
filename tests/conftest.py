@@ -12,6 +12,27 @@ from llmwiki.storage.local import LocalObjectStore
 from llmwiki.vector.memory import MemoryVectorStore
 
 
+@pytest.fixture(autouse=True)
+def _isolate_llm_routing_config(monkeypatch, tmp_path) -> None:
+    """No test may see a real config/providers.py or config/ops.py.
+
+    ``_env_file=None`` (used throughout this suite) isolates a Settings
+    instance from a real ``.env`` - but ``llm_providers_config``/
+    ``llm_ops_config`` are plain ``Path`` fields whose *default* points at
+    ``./config/providers.py``/``./config/ops.py``, checked for existence on
+    disk by ``routing_config.load_routing_config`` regardless of
+    ``_env_file``. A developer who has set those files up for real, in this
+    same checkout (plan §19, R1), would otherwise flip every test that builds
+    an unmodified default ``Settings()`` into routed mode - env vars still
+    apply under ``_env_file=None``, so pointing them at a guaranteed-absent
+    path here restores the isolation. A test that explicitly passes
+    ``llm_providers_config=``/``llm_ops_config=`` is unaffected: an init
+    kwarg always outranks an env var.
+    """
+    monkeypatch.setenv("LLMWIKI_PROVIDERS_CONFIG", str(tmp_path / "unused-providers.py"))
+    monkeypatch.setenv("LLMWIKI_OPS_CONFIG", str(tmp_path / "unused-ops.py"))
+
+
 @pytest.fixture
 def settings(tmp_path) -> Settings:
     """Settings pinned to the offline backends and a per-test storage root."""

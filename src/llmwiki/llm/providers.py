@@ -25,6 +25,7 @@ from typing import Any
 MODEL_ARG = "model"
 API_KEY_ARG = "api_key"
 BASE_URL_ARG = "base_url"
+TEMPERATURE_ARG = "temperature"
 
 
 @dataclass(frozen=True)
@@ -89,13 +90,17 @@ def build(
     api_key: str,
     base_url: str = "",
     max_tokens: int = 2048,
+    temperature: float = 1.0,
 ) -> Any:
     """Construct the chat model for ``provider``.
 
     Returns a ``BaseChatModel``; typed as ``Any`` so that neither this module
     nor its importers need langchain-core present to be imported.  The token
-    cap is a constructor argument rather than a per-call one because the
-    integrations disagree about invoke-time keywords but all accept it here.
+    cap and temperature are constructor arguments rather than per-call ones
+    because the integrations disagree about invoke-time keywords but all
+    accept them here - ``temperature`` unlike ``max_tokens`` needs no
+    per-provider spelling override (checked by
+    ``test_registry_keywords_match_the_installed_class``).
     """
     spec = REGISTRY[provider]
     cls = load_class(provider)
@@ -103,6 +108,7 @@ def build(
         MODEL_ARG: model,
         API_KEY_ARG: api_key,
         spec.max_tokens_arg: max_tokens,
+        TEMPERATURE_ARG: temperature,
     }
     if base_url:
         kwargs[BASE_URL_ARG] = base_url

@@ -27,6 +27,7 @@ guards the design's central constraint and must never be weakened.
 from __future__ import annotations
 
 import json
+import logging
 from datetime import date
 
 from llmwiki.chains.prompts_loader import load_prompt
@@ -100,6 +101,8 @@ PAGE_SCHEMA = {
 # their opening; full-document handling for very long inputs is Phase 1.
 MAX_SUMMARY_CHARS = 24_000
 
+logger = logging.getLogger(__name__)
+
 
 class Compiler:
     """Compiles one extracted source into the wiki, touching as little as possible.
@@ -128,6 +131,7 @@ class Compiler:
 
     def compile_source(self, doc: ExtractedDoc, force: bool = False) -> CompileResult:
         """Run the full five-stage pass for one source."""
+        logger.info("compile start: source_id=%s title=%r", doc.source_id, doc.title)
         self._page_reads = 0
         self._costs = []
         result = CompileResult(source_id=doc.source_id)
@@ -138,6 +142,7 @@ class Compiler:
             result.skipped = [
                 slug for slug, gist in manifest.items() if doc.source_id in gist.sources
             ]
+            logger.info("compile skip: source_id=%s already compiled", doc.source_id)
             return result
 
         try:
@@ -148,21 +153,27 @@ class Compiler:
         except TokenBudgetExceeded as exc:
             result.aborted = True
             result.reason = str(exc)
+            logger.warning("compile aborted: source_id=%s %s", doc.source_id, exc)
         finally:
             self._record(doc, result, manifest)
 
+        logger.info(
+            "compile done: source_id=%s created=%d patched=%d skipped=%d aborted=%s",
+            doc.source_id, len(result.created), len(result.patched), len(result.skipped),
+            result.aborted,
+        )
         return result
 
     # -- stage 1: summarize -------------------------------------------------
 
     def _summarize(self, doc: ExtractedDoc) -> SourceSummary:
         text = doc.text[:MAX_SUMMARY_CHARS]
+        logger.debug("summarize_source: source_id=%s", doc.source_id)
         response = self.llm.complete(
             op="summarize_source",
             system=load_prompt("summarize_source"),
             prompt=f"# Source: {doc.title}\nURL: {doc.url or 'n/a'}\n\n{text}",
             schema=SUMMARY_SCHEMA,
-            model=self.settings.llm_default_model,
         )
         self._account(response.usage)
         data = response.data or {}
@@ -228,12 +239,12 @@ class Compiler:
             f"## Existing candidate pages (gists only)\n\n{listing}\n\n"
             f"## Constraint\n\nEmit at most {cap} operations."
         )
+        logger.debug("plan_compile: title=%r candidates=%d", summary.title, len(candidates))
         response = self.llm.complete(
             op="plan_compile",
             system=load_prompt("plan_compile"),
             prompt=prompt,
             schema=PLAN_SCHEMA,
-            model=self.settings.llm_default_model,
         )
         self._account(response.usage)
         raw_ops = (response.data or {}).get("ops", [])
@@ -287,6 +298,8 @@ class Compiler:
                 # touches this page will fold the content in.
                 result.skipped.append(op.slug)
                 result.reason = f"version conflict on {op.slug}: {exc}"
+                logger.warning("version conflict: source_id=%s slug=%s %s",
+                               doc.source_id, op.slug, exc)
 
         result.page_bodies_read = self._page_reads
 
@@ -297,6 +310,7 @@ class Compiler:
         op: CompileOp,
         manifest: dict[str, PageGist],
     ) -> None:
+        logger.debug("create_page: source_id=%s slug=%s", doc.source_id, op.slug)
         response = self.llm.complete(
             op="create_page",
             system=load_prompt("create_page"),
@@ -305,7 +319,6 @@ class Compiler:
                 f"Why: {op.reason}\n\n## Source material\n\n{summary.summary}\n"
             ),
             schema=PAGE_SCHEMA,
-            model=self.settings.compile_executor_model,
         )
         self._account(response.usage)
         data = response.data or {}
@@ -342,6 +355,7 @@ class Compiler:
         if doc.source_id in page.front_matter.sources:
             return False
 
+        logger.debug("patch_page: source_id=%s slug=%s", doc.source_id, op.slug)
         response = self.llm.complete(
             op="patch_page",
             system=load_prompt("patch_page"),
@@ -351,7 +365,6 @@ class Compiler:
                 f"# Why this page\n\n{op.reason}\n"
             ),
             schema=PAGE_SCHEMA,
-            model=self.settings.compile_executor_model,
         )
         self._account(response.usage)
         data = response.data or {}
@@ -383,7 +396,7 @@ class Compiler:
                 slug=doc.source_id,
                 title=doc.title,
                 type="source",
-                gist=f"Captured source ({doc.modality}): {doc.title}",
+                gist=f"Captured source ({doc.modality})",
                 sources=[doc.source_id],
                 updated=date.today(),
                 version=1,

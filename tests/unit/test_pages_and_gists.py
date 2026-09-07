@@ -100,6 +100,25 @@ def test_index_renders_from_the_manifest_without_reading_pages(spy_store) -> Non
     rendered = spy_store.inner.get("wiki/index.md").decode()
     assert "## Concepts" in rendered and "## Entities" in rendered
     assert "- [[rag]] - Grounding." in rendered
+    assert "- [[lewis]] - Authors." in rendered
+
+
+def test_index_sources_display_title_and_keep_source_id() -> None:
+    source_id = "ce91b894b9e7bcff"
+    rendered = gists_mod.render_index(
+        {
+            source_id: PageGist(
+                slug=source_id,
+                title="A Recipe for Training Neural Networks",
+                type="source",
+                gist="Captured source (web)",
+            )
+        }
+    )
+    assert (
+        f"- [[{source_id}|A Recipe for Training Neural Networks]] (`{source_id}`) "
+        "- Captured source (web)"
+    ) in rendered
 
 
 def test_index_is_stable_for_the_same_manifest() -> None:

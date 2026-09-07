@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import time
 
 from llmwiki.config import Settings
@@ -32,6 +33,8 @@ from llmwiki.storage.layout import (
 )
 from llmwiki.vector.base import VectorStore
 from llmwiki.wiki.compiler import Compiler
+
+logger = logging.getLogger(__name__)
 
 
 class IngestPipeline:
@@ -78,7 +81,11 @@ class IngestPipeline:
             data, resolved_mime = self._fetch(url, modality)
 
         if self.store.exists(raw_meta(source_id)):
+            logger.info("capture: source_id=%s duplicate, skipping", source_id)
             return SourceRef(source_id=source_id, status="done", duplicate=True)
+
+        if not title:
+            title = _title_from_source(modality, url, data)
 
         meta = SourceMeta(
             source_id=source_id,
@@ -96,6 +103,7 @@ class IngestPipeline:
             raw_meta(source_id), meta.model_dump_json(indent=2).encode(), "application/json"
         )
         self.set_status(SourceStatus(source_id=source_id, state="queued"))
+        logger.info("capture: source_id=%s modality=%s queued", source_id, modality)
         return SourceRef(source_id=source_id, status="queued")
 
     def _fetch(self, url: str, modality: str) -> tuple[bytes, str]:
@@ -115,16 +123,19 @@ class IngestPipeline:
         started = time.monotonic()
         status = SourceStatus(source_id=source_id, state="extracting")
         self.set_status(status)
+        logger.info("process: source_id=%s state=extracting", source_id)
         try:
             meta = self.load_meta(source_id)
             doc = self.extract(meta)
 
             status.state = "embedding"
             self.set_status(status)
+            logger.info("process: source_id=%s state=embedding", source_id)
             status.chunk_count = self._embed(doc)
 
             status.state = "compiling"
             self.set_status(status)
+            logger.info("process: source_id=%s state=compiling", source_id)
             result = Compiler(
                 self.store, self.vectors, self.embedder, self.llm, self.settings
             ).compile_source(doc)
@@ -136,10 +147,15 @@ class IngestPipeline:
         except (ExtractionError, ObjectNotFound) as exc:
             status.state = "failed"
             status.error = str(exc)
+            logger.warning("process: source_id=%s failed: %s", source_id, exc)
         except Exception as exc:  # pragma: no cover - unexpected, still must not crash the worker
             status.state = "failed"
             status.error = f"{type(exc).__name__}: {exc}"
+            logger.error("process: source_id=%s unexpected failure: %s", source_id, exc,
+                         exc_info=True)
         status.elapsed_s = time.monotonic() - started
+        logger.info("process: source_id=%s state=%s elapsed=%.2fs",
+                    source_id, status.state, status.elapsed_s)
         self.set_status(status)
         return status
 
@@ -203,3 +219,16 @@ class IngestPipeline:
 
     def load_meta(self, source_id: str) -> SourceMeta:
         return SourceMeta(**json.loads(self.store.get(raw_meta(source_id)).decode("utf-8")))
+
+
+def _title_from_source(modality: str, url: str | None, data: bytes) -> str:
+    """Fill ``meta.title`` at capture so ``raw/`` never needs a later rewrite."""
+    if modality == "web":
+        from llmwiki.extractors.web import title_from_html
+
+        return title_from_html(data.decode("utf-8", errors="replace"))
+    if modality == "youtube" and url:
+        from llmwiki.extractors.youtube import fetch_video_title
+
+        return fetch_video_title(url)
+    return ""

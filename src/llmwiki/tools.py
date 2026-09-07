@@ -218,7 +218,6 @@ def health(cfg: Settings | None = None) -> dict:
         },
         "models": {
             "default": cfg.llm_model,
-            "compile_executor": cfg.compile_executor_model,
             "embedding": cfg.embedding_model,
         },
     }

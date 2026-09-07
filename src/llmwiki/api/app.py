@@ -12,7 +12,10 @@ from fastapi import FastAPI
 
 from llmwiki import __version__
 from llmwiki.api.routes import router
+from llmwiki.config import configure_logging
+from llmwiki.config import settings as default_settings
 
+configure_logging(default_settings.log_level)
 logger = logging.getLogger(__name__)
 
 

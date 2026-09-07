@@ -1,10 +1,10 @@
 # Phase 0.5 Implementation Plan — Layer Separation & Shareable Packages
 
-**Version:** 1.0
-**Date:** 2026-09-01
-**Derived from:** `llmwiki-KB-design_v1.4.md` (§2 layered architecture, §4.6 Core Wiki Package, §4.7 Shareable LLM Integration Layer)
-**Supersedes:** nothing. `implement-plan.md` v1.1 remains authoritative for Phase 0 *behaviour*; this plan changes only *packaging*.
-**Status:** Ready to execute after the §17 open items on naming are answered (none block N0–N2)
+**Version:** 1.1
+**Date:** 2026-09-05
+**Derived from:** `llmwiki-KB-design_v1.4.md` (§2 layered architecture, §4.6 Core Wiki Package, §4.7 Shareable LLM Integration Layer, §4.8 Application-Specific LLM Routing)
+**Supersedes:** nothing. `implement-plan.md` v1.1 remains authoritative for Phase 0 *behaviour*. §1–§18 (v1.0) change only *packaging*, still with no behaviour change. §19 (new in 1.1) is the one exception: it is a deliberate, scoped *behaviour* change, independent of and not gated by the N0–N8 packaging milestones.
+**Status:** Ready to execute after the §17 open items on naming are answered (none block N0–N2). §19 is ready to execute now, pending final review of this revision.
 
 > **Reference convention:** "design v1.4 §X" points at `llmwiki-KB-design_v1.4.md`.
 > "plan-1.1 §X" points at `implement-plan.md`. A bare "§X" points at a section of *this* plan.
@@ -13,15 +13,16 @@
 
 | § | Section | § | Section |
 |---|---------|---|---------|
-| 1 | What This Plan Is (and Is Not) | 10 | Enforcement: The Boundary Guards |
-| 2 | What v1.4 Changed, and What It Obliges | 11 | Cross-Repo Consumption: FUND-financial-Research |
-| 3 | The Four Units | 12 | Milestones N0–N8 |
-| 4 | Locked Decisions | 13 | **Testing Plan** |
-| 5 | Target Repository Layout | 14 | Environment Variables & Config Injection |
-| 6 | Unit 1 — `agentkit-storage` | 15 | Repo Split: Graduation Criteria & Mechanics |
-| 7 | Unit 2 — `agentkit-llm` (design v1.4 §4.7) | 16 | Risks |
-| 8 | Unit 3 — `llmwiki` core (design v1.4 §4.6) | 17 | Open Items |
-| 9 | Unit 4 — The Service (api / mcp / cli) | 18 | Documentation Obligations |
+| 1 | What This Plan Is (and Is Not) | 11 | Cross-Repo Consumption: FUND-financial-Research |
+| 2 | What v1.4 Changed, and What It Obliges | 12 | Milestones N0–N8 |
+| 3 | The Four Units | 13 | **Testing Plan** |
+| 4 | Locked Decisions | 14 | Environment Variables & Config Injection |
+| 5 | Target Repository Layout | 15 | Repo Split: Graduation Criteria & Mechanics |
+| 6 | Unit 1 — `agentkit-storage` | 16 | Risks |
+| 7 | Unit 2 — `agentkit-llm` (design v1.4 §4.7) | 17 | Open Items |
+| 8 | Unit 3 — `llmwiki` core (design v1.4 §4.6) | 18 | Documentation Obligations |
+| 9 | Unit 4 — The Service (api / mcp / cli) | **19** | **Multi-Provider Op Routing & Query-Agent Skill Invocation (new, v1.1)** |
+| 10 | Enforcement: The Boundary Guards | | |
 
 ---
 
@@ -954,9 +955,10 @@ Non-negotiable, per `CLAUDE.md`:
 - **`CLAUDE.md`** — updated at N1 (fourth load-bearing test), N2 (per-package test commands in the
   "Working in this repository" block; the three-distribution layout), N3 (extras-based install), and
   N4 (`agentkit.llm` is where the LLM client lives now).
-- **`llmwiki-KB-design_v1.4.md`** — bump to 1.5 when N2 lands, recording (a) the §2.1 Storage-row
-  change to the Layer Responsibilities table, and (b) the resolved answers to §7 questions 8, 9 and
-  10 and §4.7's open decisions, as they are locked by §17 above.
+- **`llmwiki-KB-design_v1.4.md`** — version 1.5 was taken 2026-09-05 by §19's work (§4.8, below), ahead
+  of N2. Bump to **1.6** when N2 lands, recording (a) the §2.1 Storage-row change to the Layer
+  Responsibilities table, and (b) the resolved answers to §7 questions 8, 9 and 10 and §4.7's open
+  decisions, as they are locked by §17 above.
 - **`.env.example`** — no new variables through N4 by design (§14); its provider table is kept in
   step with `llmwiki.llm.providers.REGISTRY`, and it is updated in the same change as any N6/N7
   variable.
@@ -965,6 +967,269 @@ Non-negotiable, per `CLAUDE.md`:
   and for `agentkit-llm` the provider matrix. These are what an external consumer reads first.
 - **`docs/`** — `cross-repo-adoption.md` (N5, findings from the first real consumer),
   `testing.md` (N2, three-suite layout), `packaging.md` (N8, the split rehearsal and §15 procedure).
+
+---
+
+## 19. Multi-Provider Op Routing & Query-Agent Skill Invocation (new, v1.1)
+
+### 19.1 Scope and relationship to §1–§18
+
+Everything above this section is the Phase 0.5 **packaging** plan, whose one hard rule is "no
+behaviour change" (§1). This section is the deliberate exception: it changes what the LLM layer does,
+not just where its code lives. It is **independent of N0–N8** — it does not require, and is not
+blocked by, any packaging milestone, and it does not touch `packages/agentkit-*` (those do not exist
+yet). It can land before, after, or interleaved with N0–N8.
+
+Design reference: design v1.4 §4.8 (both subsections). Read that first — this section is the
+"how", not the "why".
+
+### 19.2 `config/providers.py` and `config/ops.py`
+
+New directory, repo root, **outside `src/llmwiki`** — not part of the installed package, not scanned
+by `test_layering.py` or `test_package_boundaries.py` (§10), not shipped in the wheel:
+
+```
+config/
+├── providers.py   # PROVIDERS: list[dict] — provider name -> credential env-var names
+└── ops.py         # OPS: list[dict]       — op name -> provider/model/temperature/max_tokens
+```
+
+```python
+# config/providers.py — committed, no secrets (only env-var *names*)
+PROVIDERS = [
+    {"provider": "anthropic", "api_key_env": "ANTHROPIC_API_KEY", "base_url_env": "ANTHROPIC_BASE_URL"},
+    {"provider": "openai",    "api_key_env": "OPENAI_API_KEY",    "base_url_env": "OPENAI_BASE_URL"},
+    {"provider": "fake"},  # offline double — no credentials, always active
+]
+```
+
+```python
+# config/ops.py — committed; one row per op the codebase calls llm.complete(op=...) with
+OPS = [
+    {"op": "summarize_source", "provider": "anthropic", "model": "claude-haiku-4-5", "temperature": 1.0, "max_tokens": 2048},
+    {"op": "plan_compile",     "provider": "anthropic", "model": "claude-haiku-4-5", "temperature": 1.0, "max_tokens": 2048},
+    {"op": "create_page",      "provider": "anthropic", "model": "claude-sonnet-5",  "temperature": 1.0, "max_tokens": 4096},
+    {"op": "patch_page",       "provider": "anthropic", "model": "claude-sonnet-5",  "temperature": 1.0, "max_tokens": 4096},
+    {"op": "answer_query",     "provider": "anthropic", "model": "claude-haiku-4-5", "temperature": 1.0, "max_tokens": 2048},
+]
+```
+
+Note on field naming: the original request spelled the token cap `max_token`; both files above use
+`max_tokens` to match every existing spelling in this codebase (`Settings.llm_max_tokens`,
+`complete(max_tokens=...)`, `CostRecord.output_tokens`). Flagging the deliberate deviation rather than
+silently picking one.
+
+**Loading.** `config/providers.py` and `config/ops.py` are loaded by path (`importlib.util
+.spec_from_file_location`), not imported as a package — they are not on `sys.path` and have no
+`__init__.py`. Default paths are `./config/providers.py` and `./config/ops.py`, resolved relative to
+the current working directory, exactly like `.env` already is. Two new env vars override the paths
+(§19.9) for deployments that keep `config/` elsewhere.
+
+**Resolution, at startup, in `factory.py`:**
+
+1. Absent-file check: if `config/providers.py` does not exist, **skip all of §19 entirely** — build
+   today's single-provider client from `Settings`, unchanged (§19.3 "Fallback mode"). If exactly one
+   of the two files exists, that is a broken half-migration — fail loudly naming which file is
+   missing.
+2. Otherwise, for each `PROVIDERS` row, resolve `api_key`/`base_url` by reading the named env vars
+   (`fake` needs neither) — **real `os.environ` first, `.env` as a fallback** (`dotenv_values()`,
+   never `os.environ` mutation), matching `Settings`' own precedence. Fixed 2026-09-06 (HISTORY.md):
+   the first implementation read only real `os.environ`, which cannot see a variable that exists
+   solely in `.env` — the documented, intended way to hold one — since nothing in this codebase calls
+   `load_dotenv()`. A row whose `api_key_env` resolves empty either way is **not an error** — it is
+   dropped from the *active* provider set. This is the literal answer to "undefined PROVIDER should
+   not be in the provider_list."
+3. Validate `OPS`: every op name the codebase actually calls (`answer_query`, `summarize_source`,
+   `plan_compile`, `create_page`, `patch_page` — this list itself is asserted against the live call
+   sites by a test, §19.8) must appear exactly once. A missing op, a duplicate op, or an op naming a
+   provider absent from the active set is a startup `RuntimeError` naming the op and the reason —
+   same posture as `Settings.require`.
+4. Build one concrete adapter per **distinct active provider actually referenced by at least one
+   `OPS` row** (lazy — an active-but-unused provider builds nothing), reusing today's per-provider
+   construction logic in `factory._build_llm_client` (native `AnthropicLLM` for `anthropic`,
+   `LangChainLLM` for everything in `llm.providers.REGISTRY`, `FakeLLM` for `fake`).
+5. Wrap the per-provider adapters and the `OPS` table in a new `RoutingLLMClient`.
+
+### 19.3 `RoutingLLMClient` and the call-site simplification
+
+New class, `src/llmwiki/llm/router.py`, implementing the existing `LLMClient` protocol unchanged in
+shape:
+
+```python
+class RoutingLLMClient:
+    def complete(self, *, op: str, system: str, prompt: str, schema: dict | None = None,
+                 model: str | None = None, max_tokens: int | None = None,
+                 temperature: float | None = None) -> LLMResponse:
+        row = self._ops[op]                      # KeyError here is a bug, not a config error —
+                                                   # __init__ already validated every call-site op exists
+        client = self._clients[row["provider"]]
+        return client.complete(op=op, system=system, prompt=prompt, schema=schema,
+                                model=model or row["model"],
+                                max_tokens=max_tokens or row["max_tokens"],
+                                temperature=row["temperature"] if temperature is None else temperature)
+```
+
+**Call sites simplify.** `agent/query.py` and `wiki/compiler.py`'s five `llm.complete(...)` calls drop
+`model=`, `max_tokens=`, `temperature=` — they pass only `op=`, `system=`, `prompt=`, and (where used)
+`schema=`. This is the direct implementation of "config fully owns it."
+
+**Fallback mode (`config/providers.py` absent) must not regress.** Today, `max_tokens=`/`temperature=`
+are supplied by every call site from `Settings.llm_max_tokens`/`llm_temperature`. If call sites stop
+passing them, something must still apply those settings, or a deployment's `LLM_MAX_TOKENS=4000` in
+`.env` would silently stop mattering. Fix: `LLMClient.complete()`'s `model`/`max_tokens`/`temperature`
+become `Optional`, defaulting to `None` (protocol change, `llm/base.py`) — a caller passing nothing
+gets the adapter's own construction-time defaults, not a hardcoded `2048`/`1.0`. `AnthropicLLM`,
+`LangChainLLM`, and `FakeLLM` already take `default_model`; each gains `default_max_tokens` /
+`default_temperature` alongside it, and `factory._build_llm_client`'s existing (unrouted) branch
+passes `cfg.llm_max_tokens` / `cfg.llm_temperature` there, same as it passes `cfg.llm_model` today.
+This is the one change in this section that touches the *fallback* path — everything else in §19 is
+additive and inert until `config/providers.py` exists.
+
+**`COMPILE_EXECUTOR_MODEL` is removed**, in both modes: `Settings.compile_executor_model`, the
+`.env.example` line, and the constructor argument in `factory._build_llm_client` all go. A deployment
+that wants `create_page`/`patch_page` on a stronger model must now define `config/ops.py` — there is
+no equivalent knob left in the zero-config fallback path. This is called out because it is a real,
+user-visible capability change for anyone currently setting that variable, not an internal refactor.
+
+### 19.4 SKILL.md-format prompts
+
+`chains/prompts/*.md` gain YAML frontmatter:
+
+```markdown
+---
+name: answer-query
+description: Answer a research question from retrieved wiki pages and raw chunks, with citations.
+---
+
+You are answering a research question from a compiled knowledge base.
+...
+```
+
+`load_prompt()` (`chains/prompts_loader.py`) parses frontmatter with `python-frontmatter` (already a
+hard dependency, used today for wiki pages) and returns the body only — every existing caller
+(`load_prompt("answer_query")` etc.) is unaffected; the `@cache` decorator and the file-not-found
+error message are unchanged. The four compiler-stage prompts are otherwise untouched: same file, same
+fixed op→prompt call, same tests.
+
+### 19.5 Query-agent skill invocation
+
+Scoped to `agent/query.py` only, per the confirmed answer. `QueryAgent.answer()` currently always
+calls `load_prompt("answer_query")` as a fixed system prompt. It instead:
+
+1. Discovers the skill set — the frontmatter (`name`, `description`) of every file under
+   `chains/prompts/` (or a dedicated `chains/skills/` directory if the compiler-stage prompts and the
+   query-agent's skills should not share one directory — **open item, §19.10**).
+2. Offers them to the model as tool choices on the `answer_query` call (or a preceding call), letting
+   the model pick — and, across turns, chain — among them, rather than always resolving to the same
+   fixed prompt body.
+3. **Keeps every existing guarantee.** `WIKI_CONFIDENCE`/wiki-first-with-RAG-fallback retrieval,
+   `_build_context`'s citation building, and — critically — the load-bearing
+   `test_agent.py::test_every_citation_resolves_to_a_real_raw_object` all sit **above** this change in
+   `answer()` and are unaffected by which skill produced the final text: `source_exists()` still
+   filters every citation before it reaches the caller, regardless of skill path taken.
+
+This is new agentic surface in a codebase that has had none until now (the compiler is deliberately
+non-agentic; the query agent has been a fixed retrieve-then-single-call shape). Treated accordingly:
+own subsection, own tests (§19.8), and explicitly not extended to the compiler (§4.8.2's boundary).
+
+### 19.6 Milestones
+
+Independent of N0–N8's numbering (§19.1) — labeled `R` for "routing" to avoid implying an ordering
+dependency on N-anything:
+
+| # | Milestone | Size | Exit criteria |
+|---|---|---|---|
+| # | Milestone | Size | Exit criteria | Status |
+|---|---|---|---|---|
+| **R1** | `config/` loader + validation | `[M]` | `config/providers.py`/`config/ops.py` absent → byte-identical behaviour to pre-R1 (existing suite green, unmodified). Present → active-set resolution, missing/duplicate/inactive-provider op validation, all with named `RuntimeError`s, each covered by a test | **Landed 2026-09-05** |
+| **R2** | `RoutingLLMClient` + protocol `Optional` change | `[M]` | `llm/base.py` signature updated; `AnthropicLLM`/`LangChainLLM`/`FakeLLM` gain `default_max_tokens`/`default_temperature`; fallback-mode output is unchanged for a fixed `Settings` (regression test, §19.8) | **Landed 2026-09-05** |
+| **R3** | Call-site simplification + `COMPILE_EXECUTOR_MODEL` removal | `[S]` | `query.py`/`compiler.py`'s five calls drop `model=`/`max_tokens=`/`temperature=`; `Settings.compile_executor_model` and its `.env.example` line removed; `.env.example` gains the `config/` explanation | **Landed 2026-09-05** |
+| **R4** | SKILL.md frontmatter + `load_prompt` parsing | `[S]` | All 5 prompt files get frontmatter; `load_prompt()` returns body only; compiler call sites and their tests are unchanged | **Deliberately deferred** — lands with R5, not with R1–R3, per explicit instruction: `chains/prompts/*.md` stays untouched until then |
+| **R5** | Query-agent skill invocation | `[L]` | `QueryAgent.answer()` discovers and can select among skills; citation-resolution contract test still passes unmodified; new tests per §19.8 | Not started |
+
+R1–R3 landed together 2026-09-05 (§13's "must pass all existing tests" rule held: the full suite passed
+unmodified, plus new tests). R4 was originally planned to land alongside R1–R3 but was explicitly held
+back to land with R5 instead, keeping `chains/prompts/*.md` untouched until the query-agent skill work
+is actually ready to consume real frontmatter. R5 is materially larger than R4 (a new agent capability)
+and should still be its own review when the two land.
+
+### 19.7 Testing plan
+
+**19.7.1 Must pass all existing tests.** Same standing rule as §13.1. R1 and R2 are explicitly
+designed so the existing 207 unit tests need **no assertion changes** — `config/` absent and the
+`Optional` defaults resolving to today's literal values are what make that true. R3's removal of
+`compile_executor_model` is the one place an existing test changes on purpose (below).
+
+**19.7.2 Obsolete tests announced for removal / change.** *(Updated to the actual outcome, landed
+2026-09-05 — two rows below were not anticipated when this section was first drafted; grepping for
+`model=`/`max_tokens=` at call sites missed them because they assert on `.calls[...]["max_tokens"]`
+in the double, not on call-site syntax. Recorded here rather than silently fixed, since undercounting a
+plan's own test impact is itself worth a paper trail.)*
+
+| Test | Change | Reason |
+|---|---|---|
+| `tests/unit/test_agent.py::test_answer_passes_settings_max_tokens_and_temperature` | **Rewritten** → `test_answer_leaves_model_and_sampling_params_to_the_configured_adapter`: asserts the recorded call's `model`/`max_tokens`/`temperature` are all `None`, instead of equal to a `Settings.model_copy`-injected value | Its premise — the agent reads `Settings.llm_max_tokens`/`llm_temperature` and forwards them itself — is exactly what "config fully owns it" (R3) removed |
+| `tests/unit/test_compiler_behaviour.py::test_llm_max_tokens_and_temperature_reach_every_stage` | **Rewritten** → `test_compiler_leaves_model_and_sampling_params_to_the_configured_adapter`: same change, across all four compiler-stage calls; doubles as the `COMPILE_EXECUTOR_MODEL` regression check (`create_page`/`patch_page` pass no `model=` either) | Same reason, plus §19.3's `COMPILE_EXECUTOR_MODEL` removal |
+| `llm/fake.py::FakeLLM.complete` and `tests/doubles.py::ScriptedLLM.complete` | **Updated**: record `max_tokens`/`temperature` exactly as passed (`None` included) rather than pre-resolving to `2048`/`1.0` before appending to `.calls` | Needed for the two rewrites above to actually observe "nothing was passed" — a double that silently fills in a default would hide the very regression these tests exist to catch |
+| `tests/unit/test_config.py` — a test asserting `Settings.compile_executor_model`'s default | *(planned, not needed)* | No such test existed — the field had zero test coverage, so its removal needed no deletion |
+
+**19.7.3 New tests announced for new code paths.** *(Updated to the actual filenames landed
+2026-09-05.)*
+
+| Milestone | New test | Covers |
+|---|---|---|
+| R1 | `tests/unit/test_routing_config.py` | Absent `config/` → fallback (`None`); half-present config fails loudly; a full valid config resolves every known op; op-row defaults for `temperature`/`max_tokens`; active-set resolution drops a provider with an unset env var; credentials resolved from the named env var; missing op / duplicate op / op naming an inactive provider / unknown provider kind / a malformed `PROVIDERS`/`OPS` module each raise a named `RuntimeError`; the `KNOWN_OPS`-vs-real-call-sites AST drift guard |
+| R2 | `tests/unit/test_anthropic_client.py`, `tests/unit/test_langchain_client.py` (extended, not a new file) | `complete()` with `model`/`max_tokens`/`temperature` omitted resolves to the adapter's construction-time default (`default_max_tokens`/`default_temperature`), not a hardcoded value; an explicit call-site value still overrides it |
+| R2 | `tests/unit/test_router.py` | `RoutingLLMClient` dispatches each op to the right provider adapter with the right model/temperature/max_tokens; an explicit call-site override wins; `schema` is forwarded |
+| R3 | (see §19.7.2 rewrites above) | |
+| R3 | `tests/unit/test_factory.py` (extended) | Routed mode builds a working `RoutingLLMClient` end to end; a provider named in `config/providers.py` but referenced by no `OPS` row is never constructed; absent routing config leaves the fallback path (a plain `FakeLLM`, not a `RoutingLLMClient`) untouched |
+| R3 | `tests/unit/test_config.py` (extended) | The two new config paths default outside `src/llmwiki` and are absent in this repository; `agent_skills_dir`'s default; `compile_executor_model` no longer exists |
+| R4 | `test_prompts_loader.py` (extends `prompts_loader.py`'s current coverage, or new file) — **not yet landed, deferred with R4 itself** | Frontmatter is parsed and stripped; a prompt file with no frontmatter still loads (back-compat during migration); `name`/`description` round-trip for external SKILL.md consumption |
+| R5 | `test_agent_skill_invocation.py` — **not yet landed** | Skill discovery finds all frontmatter'd prompts; the model's skill choice is honored; a chained multi-skill turn is handled; `test_every_citation_resolves_to_a_real_raw_object`-equivalent assertion re-run against skill-invoked answers specifically (not just the pre-existing fixed-prompt path) |
+
+**19.7.4 Documentation of added/removed tests.** Each of R1–R5 gets a `HISTORY.md` entry (goal, root
+cause where applicable, implementation detail, related files, test coverage — per `CLAUDE.md`), and
+the removed/rewritten rows in §19.7.2 are named there explicitly, same obligation as §13.4 imposes on
+N0–N8.
+
+### 19.8 Environment variables & config injection
+
+| Variable | Default | Read by | Notes |
+|---|---|---|---|
+| `LLMWIKI_PROVIDERS_CONFIG` | `./config/providers.py` | `Settings.llm_providers_config`, consulted by `factory.py` | Path to the providers manifest; absence of the *file* (not the env var) is what triggers fallback mode |
+| `LLMWIKI_OPS_CONFIG` | `./config/ops.py` | `Settings.llm_ops_config`, consulted by `factory.py` | Path to the ops table |
+| `AGENT_SKILLS_DIR` | `./skills` | `Settings.agent_skills_dir` | Query-agent skill directory (§19.9 item 1) — outside `src/llmwiki`, like the two paths above. Added in R1–R3; not read by any code path until R4/R5 |
+| *(per-provider, named by `config/providers.py`, not fixed here)* | — | resolved by `llm/routing_config.py`, per provider row | e.g. `OPENAI_API_KEY`, `OPENAI_BASE_URL` — whatever `api_key_env`/`base_url_env` name. `.env.example` must list one per provider actually present in the committed default `config/providers.py`, same sync obligation `CLAUDE.md` already imposes |
+| `COMPILE_EXECUTOR_MODEL` | — | *(removed, R3)* | No replacement variable — its role moves entirely into `config/ops.py` |
+
+`config/providers.py` and `config/ops.py` are themselves not env-driven — they are checked-in code,
+read once at the same startup point `factory.py` already reads `Settings`. They do not add a second
+`os.environ` reader to this repository; they add a second *file* `factory.py` consults, which then
+reads named env vars on `config/providers.py`'s behalf. In the implementation, that reading happens in
+`llm/routing_config.py` (invoked from `factory.py`, never at import time) rather than in `factory.py`
+itself — `os.environ` access in this application-specific slice is not literally confined to one
+module the way §10.1's guard 3 requires of the (separate, not-yet-extracted) shareable packages; it is
+confined to `config.py` (the four/five `LLM_*` fallback names) plus `llm/routing_config.py` (whatever
+names `config/providers.py` itself declares), which is the closest equivalent available given that the
+set of env vars to read is not knowable until `config/providers.py` is read.
+
+### 19.9 Open items
+
+1. **Skill directory — resolved.** The query agent's discoverable skills do **not** share
+   `chains/prompts/` with the compiler's fixed prompts, and do **not** move to a `chains/skills/`
+   under `src/llmwiki` either: they live in a repo-root `skills/` directory, outside `src/llmwiki`
+   entirely — the same posture as `config/` (§19.2) — configurable via a new `AGENT_SKILLS_DIR`
+   env var (`Settings.agent_skills_dir`, default `./skills`). The setting was added in R1–R3 (it is
+   inert, read by no code path yet) so the location is locked in before R4 writes any SKILL.md
+   frontmatter, rather than improvised at R5. `chains/prompts/*.md` remains exactly what it is today:
+   the compiler's four fixed, non-agentic prompts.
+2. **Skill-selection failure mode.** If the model's tool choice names something not in the discovered
+   skill set (malformed tool call, hallucinated name), R5 needs a defined fallback — most likely
+   "retry once, then fall back to the fixed `answer_query` skill" — rather than a hard failure on a
+   user-facing query.
+3. **Should `RoutingLLMClient` participate in LangSmith tracing (§7.6) per sub-adapter, or only at the
+   router level?** Affects whether a routed call shows as one span or two in a trace. Not exit-criteria
+   blocking for R1–R5; worth deciding before this sees real traffic.
 
 ---
 

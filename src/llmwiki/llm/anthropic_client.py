@@ -10,6 +10,11 @@ Two details matter for cost:
   goes in the user message, after the last breakpoint, or the cache never hits.
 * Structured output is done with a forced tool call rather than "reply with
   JSON", which removes the parse-failure retry loop entirely.
+
+``tracing=True`` (``LANGSMITH_TRACING``, factory.py) wraps the client with
+``langsmith.wrappers.wrap_anthropic`` so every call also reaches LangSmith.
+``langsmith`` is imported only in that branch - tracing off (the default)
+costs nothing and needs nothing installed.
 """
 
 from __future__ import annotations
@@ -37,6 +42,22 @@ def price(model: str, usage: CostRecord) -> float:
     return pricing.price(model, usage, fallback="claude-haiku-4-5")
 
 
+def _wrap_for_tracing(client: Any) -> Any:
+    """Wrap an Anthropic client so every call is also sent to LangSmith.
+
+    Separate function so the import failure path names the extra to install,
+    same as ``cfg.require`` does for a missing credential.
+    """
+    try:
+        from langsmith.wrappers import wrap_anthropic
+    except ImportError as exc:
+        raise RuntimeError(
+            "LANGSMITH_TRACING is set but the `langsmith` package is not installed. "
+            'Run `pip install "llmwiki[langsmith]"`.'
+        ) from exc
+    return wrap_anthropic(client)
+
+
 class AnthropicLLM:
     """LLMClient backed by the Anthropic Messages API."""
 
@@ -46,6 +67,9 @@ class AnthropicLLM:
         default_model: str,
         base_url: str | None = None,
         version: str = "",
+        tracing: bool = False,
+        default_max_tokens: int = 2048,
+        default_temperature: float = 1.0,
     ) -> None:
         import anthropic
 
@@ -55,9 +79,14 @@ class AnthropicLLM:
         options: dict[str, Any] = {"api_key": api_key, "max_retries": 0}
         if base_url:
             options["base_url"] = base_url
-        self._client = anthropic.Anthropic(**options)
+        client = anthropic.Anthropic(**options)
+        if tracing:
+            client = _wrap_for_tracing(client)
+        self._client = client
         self.default_model = default_model
         self.version = version
+        self.default_max_tokens = default_max_tokens
+        self.default_temperature = default_temperature
 
     def complete(
         self,
@@ -67,16 +96,20 @@ class AnthropicLLM:
         prompt: str,
         schema: dict | None = None,
         model: str | None = None,
-        max_tokens: int = 2048,
+        max_tokens: int | None = None,
+        temperature: float | None = None,
     ) -> LLMResponse:
         chosen = model or self.default_model
+        resolved_max_tokens = self.default_max_tokens if max_tokens is None else max_tokens
+        resolved_temperature = self.default_temperature if temperature is None else temperature
         system_blocks: list[dict[str, Any]] = [{"type": "text", "text": system}]
         if len(system) >= CACHE_MIN_CHARS:
             system_blocks[0]["cache_control"] = {"type": "ephemeral"}
 
         request: dict[str, Any] = {
             "model": chosen,
-            "max_tokens": max_tokens,
+            "max_tokens": resolved_max_tokens,
+            "temperature": resolved_temperature,
             "system": system_blocks,
             "messages": [{"role": "user", "content": prompt}],
         }

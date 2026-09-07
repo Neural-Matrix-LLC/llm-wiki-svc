@@ -5,6 +5,646 @@ considered complete, per `CLAUDE.md`.
 
 ---
 
+## 2026-09-07 — New developer-support technical document
+
+**Goal.** Give a developer joining this repository (to support, extend, bug
+fix, or test it) a single map document, distinct from the design doc
+(why-shaped-this-way) and the implementation plan (packaging roadmap):
+module-to-module workflows named by class/file, an extension guide per seam
+(new LLM provider, new op, new extractor, new storage/vector backend, the
+multi-provider routing config), and the full API reference (Python
+`tools.py` layer, REST, MCP, CLI, config), plus an explicit note on the R4/R5
+skill-invocation work that is planned but not yet implemented.
+
+**Implementation detail.** New `docs/llm-wiki-technical-document.md`, written
+by reading the actual current source tree (not the aspirational
+`packages/agentkit-*` layout in `implement-plan-v1.4.md`, which has not been
+executed - §10 of the new document states this gap explicitly so a reader
+does not conflate the plan with the code). Content was derived from: the
+L0-L5 layer ladder and `ALLOWED_EXCEPTIONS` in
+`tests/unit/test_layering.py`; the five-stage compiler
+(`wiki/compiler.py`), the wiki-first/RAG-fallback query agent
+(`agent/query.py`), and the ingest pipeline (`pipeline/ingest.py`); the
+single-provider vs. R1-R3 multi-provider LLM routing paths in `factory.py`,
+`llm/router.py` and `llm/routing_config.py`; the six-tool `tools.py` surface
+and its REST (`api/routes.py`), MCP (`mcp/server.py`) and CLI (`cli.py`)
+transports; `storage/layout.py`'s key scheme; and `.env.example`/
+`config/providers.py.example`/`config/ops.py.example` for the configuration
+reference.
+
+**Related files.** `docs/llm-wiki-technical-document.md` (new). Read but not
+modified: `docs/llmwiki-KB-design_v1.4.md`, `docs/implement-plan-v1.4.md`,
+`README.md`, `pyproject.toml`, `.env.example`, `config/*.example`,
+`src/llmwiki/**` (all modules), `tests/unit/test_layering.py`.
+
+**Test coverage.** Documentation-only change; no code, config, or test
+behaviour changed. No existing test is obsoleted or newly required. Verified
+the document's factual claims against a live `pytest` run at the time of
+writing: 267 passed, 1 skipped, 6 deselected, plus the one pre-existing,
+unrelated failure (`test_extractors.py::test_fetch_video_title_reads_oembed`)
+- recorded in the new document's §8 so a reader does not mistake it for a
+regression they caused.
+
+---
+
+## 2026-09-06 — Routing config couldn't read `.env`, its own env vars were wired wrong, and `--offline` wasn't
+
+**Goal.** Fix four bugs found while actually activating the R1-R3 multi-provider
+routing feature (below) for real, with OpenRouter: (1) a provider's
+`api_key_env` set only in `.env` (not the real shell) resolved to empty; (2)
+the documented override variables `LLMWIKI_PROVIDERS_CONFIG`/
+`LLMWIKI_OPS_CONFIG` did nothing at all; (3) this repository's own test suite
+had no isolation from a real `config/providers.py`/`config/ops.py` sitting in
+the checkout, unlike its `_env_file=None` isolation from a real `.env`; (4)
+`scripts/smoke_flow.py --offline` no longer guaranteed no network calls once a
+real routing config existed - and, in the course of investigating, actually
+made five real calls to OpenRouter (`z-ai/glm-5.3-flash`, small token counts,
+recorded in `.data/wiki/_meta/cost.jsonl` with real timestamps) despite the
+flag, before the fix landed.
+
+**Root cause.**
+1. `llm/routing_config.py` resolved `api_key_env`/`base_url_env` with a bare
+   `os.environ.get(...)`. Nothing in this codebase ever calls
+   `dotenv.load_dotenv()` - `Settings` (config.py) reads `.env` through
+   pydantic-settings' own internal parser, which populates only `Settings`'
+   fixed model fields and never exports anything into the real process
+   environment. A variable that exists only in `.env` (the documented,
+   intended way to hold it) was therefore invisible to `routing_config.py`.
+2. `Settings.llm_providers_config`/`llm_ops_config` had no `validation_alias`.
+   pydantic-settings auto-derives an env var name from the field name alone
+   (`LLM_PROVIDERS_CONFIG`, no "WIKI") - the deliberately-prefixed names
+   written into `.env.example` and `implement-plan-v1.4.md` §19.8 were a
+   different string entirely and were silently accepted-and-ignored
+   (`extra="ignore"`), with the hardcoded default used instead. Caught by
+   directly testing the documented env var against a real `Settings()` - unit
+   tests never had, because every one of them passed the path as a Python
+   kwarg, never as an env var.
+3. `tests/conftest.py` had `_env_file=None` sprinkled through the suite for
+   isolation from a real `.env`, but nothing equivalent for
+   `llm_providers_config`/`llm_ops_config`: those are plain `Path` fields whose
+   *default* is checked for existence on disk by
+   `routing_config.load_routing_config`, a check with no `_env_file` gate at
+   all. Once real `config/providers.py`/`config/ops.py` existed in this
+   checkout (for actual OpenRouter use), every test building a default
+   `Settings()` silently flipped into routed mode.
+4. `scripts/smoke_flow.py --offline` set `LLM_PROVIDER=fake` but never touched
+   `llm_providers_config`/`llm_ops_config`. `factory._build_llm_client` checks
+   routing config *before* `cfg.llm_provider` at all (by design, §19.2) - so a
+   real routing config outranked `--offline`'s intent completely, silently.
+
+**Implementation detail.**
+- `llm/routing_config.py`: new `_dotenv_fallback()` (via `dotenv_values()`,
+  which - unlike `load_dotenv()` - never mutates `os.environ` and returns
+  `{}` for a missing file) and `_env()`, used everywhere `api_key_env`/
+  `base_url_env` are resolved. Precedence: real `os.environ` wins over `.env`,
+  matching pydantic-settings' own source order. Also removed a debug line
+  (added ad hoc while diagnosing this) that logged a resolved secret value
+  verbatim at DEBUG level, and a stray `logging.basicConfig()` call that would
+  have fought with `config.configure_logging`'s single point of control.
+- `config.py`: `llm_providers_config`/`llm_ops_config` gained
+  `validation_alias=AliasChoices("LLMWIKI_..._CONFIG", "llm_..._config")` -
+  the documented env var name now actually works, and the plain field name
+  (used by every constructor call in the test suite) still does too.
+- `tests/conftest.py`: new autouse `_isolate_llm_routing_config` fixture -
+  points both env vars at a guaranteed-nonexistent path under `tmp_path` for
+  every test, unconditionally. A test that explicitly passes
+  `llm_providers_config=`/`llm_ops_config=` is unaffected (an init kwarg
+  always outranks an env var in pydantic-settings' source order).
+- `scripts/smoke_flow.py`: `--offline` now also sets both env vars to a
+  guaranteed-nonexistent path, for the same reason.
+- `config/providers.py.example` (and the real, already-copied
+  `config/providers.py`): two comment lines exceeding ruff's line length -
+  invisible while the file was `.example` (ruff only checks `.py`), surfaced
+  the moment it was copied to a real `.py` file - rewrapped.
+
+**Related files.** `src/llmwiki/llm/routing_config.py`, `src/llmwiki/config.py`,
+`tests/conftest.py`, `scripts/smoke_flow.py`, `config/providers.py.example`,
+`config/providers.py` (the user's real copy).
+
+**Test coverage.** Full suite: 267 passed, 1 skipped, 6 deselected, plus the
+same one pre-existing unrelated failure. `ruff check .` and `mypy` clean.
+`scripts/smoke_flow.py --offline` re-run after the fix and confirmed back to
+the deterministic `FakeLLM` output (no new `cost.jsonl` entries with a real
+model id).
+- New: `tests/unit/test_routing_config.py::test_credentials_are_resolved_from_dotenv_when_not_a_real_env_var`,
+  `::test_a_real_env_var_wins_over_dotenv` (root cause 1);
+  `tests/unit/test_config.py::test_documented_env_var_names_actually_configure_the_routing_paths`
+  (root cause 2).
+- Rewritten: `tests/unit/test_config.py::test_routing_config_paths_default_outside_src_and_absent`
+  → `test_routing_config_paths_default_under_a_config_directory`: now
+  explicitly clears the two env vars and `chdir`s into an empty `tmp_path`
+  before asserting the default, rather than asserting against this
+  checkout's real state (which the new autouse fixture masks anyway, and
+  which was the false assumption that made the original version of this test
+  pass by accident rather than by design).
+
+**Operational note.** Five real OpenRouter calls happened during this session
+before the `--offline` fix landed, against whatever credit/quota
+`OPENROUTER_API_KEY` draws on - check the OpenRouter dashboard if that
+matters. `.data/wiki/_meta/cost.jsonl` (local smoke-flow scratch state, not
+committed) now has five real-model entries mixed in with fake-mode ones from
+before and after; harmless, but flagged rather than silently cleaned, since
+it's a historical ledger by design and deleting entries from it wasn't asked
+for.
+
+## 2026-09-05 — Application-specific multi-provider/per-op LLM routing (R1-R3)
+
+**Goal.** Let a deployment configure several LLM providers at once and route
+each pipeline op (`summarize_source`, `plan_compile`, `create_page`,
+`patch_page`, `answer_query`) to its own provider/model/temperature/max_tokens
+- without that shape becoming part of `agentkit-llm`'s shareable, semver-
+protected `LLMConfig` contract (implement-plan-v1.4.md §7.3). Design in
+`llmwiki-KB-design_v1.4.md` §4.8 (v1.5); implementation plan in
+`implement-plan-v1.4.md` §19 (v1.1), milestones R1-R3. **R4 (SKILL.md
+frontmatter + `load_prompt` parsing) and R5 (query-agent skill invocation) are
+deliberately not part of this change**, per explicit instruction -
+`chains/prompts/*.md` and `chains/prompts_loader.py` are untouched; they land
+together later. The one exception is `Settings.agent_skills_dir`
+(`AGENT_SKILLS_DIR`, R5's skill directory), added now, inert, so its location
+outside `src/llmwiki` is locked in ahead of R4/R5 rather than improvised then.
+
+**Implementation detail.**
+- New `config/providers.py` + `config/ops.py` (repo root, outside
+  `src/llmwiki`, not part of the installed package) - a committed, secret-free
+  manifest of providers (naming which env var carries each one's credentials)
+  and a per-op routing table. **Absence of `config/providers.py` is the
+  fallback switch**: nothing changes for a deployment that never creates one,
+  which is why the real repository still has no `config/` directory and the
+  existing test suite needed no behaviour-changing edits.
+- New `llm/routing_config.py`: loads and validates both files
+  (`load_routing_config`). A provider whose named credential env var is unset
+  is dropped from the active set, silently (not an error). A missing/duplicate
+  known op, or an op naming an inactive/unknown provider, fails loudly by name
+  at startup - same posture as `Settings.require`. `KNOWN_OPS` is the
+  frozenset of the five ops the codebase actually calls; a dedicated AST-scan
+  test breaks if a new call site adds an op with no matching row.
+- New `llm/router.py` (`RoutingLLMClient`): implements the existing
+  `LLMClient` protocol, dispatching `complete(op=...)` to the provider adapter
+  the matching `config/ops.py` row names, with that row's model/temperature/
+  max_tokens - an explicit call-site value still overrides it.
+- `llm/base.py`: `LLMClient.complete()`'s `model`/`max_tokens`/`temperature`
+  are now `Optional`, defaulting to `None` rather than a hardcoded `2048`/
+  `1.0`. Each concrete adapter (`AnthropicLLM`, `LangChainLLM`) gained
+  `default_max_tokens`/`default_temperature` constructor params (alongside the
+  existing `default_model`) and resolves `None` to them. This is what let call
+  sites drop `max_tokens=`/`temperature=` entirely without silently ignoring
+  `Settings.llm_max_tokens`/`llm_temperature` in the fallback path - the
+  constructors default to `2048`/`1.0` (matching the old hardcoded values), so
+  every existing adapter unit test needed no change.
+- `factory.py`: `_build_llm_client` now checks `routing_config.
+  load_routing_config()` first; `None` falls through to the existing
+  single-provider logic, otherwise `_build_routed_llm_client` builds one
+  concrete adapter per **provider actually referenced by an op row** (not
+  every active provider) and wraps them in a `RoutingLLMClient`. Extracted
+  `_construct_provider_client` (fake/anthropic/LangChain construction, no
+  logging, no env reads) so both paths share it. `llm_client()`'s cache key
+  extended with the two config paths.
+- **`COMPILE_EXECUTOR_MODEL` / `Settings.compile_executor_model` removed.** Its
+  one job - a stronger model for `create_page`/`patch_page` - is now just
+  those ops' own `config/ops.py` rows. A deployment relying on the old
+  variable must define `config/ops.py`; there is no equivalent left in the
+  zero-config fallback. `tools.py::health()`'s `models.compile_executor` key
+  is removed with it (nothing else read it).
+- `config.py`: added `llm_providers_config` (default `./config/providers.py`),
+  `llm_ops_config` (default `./config/ops.py`), and `agent_skills_dir`
+  (default `./skills`, **not yet read by any code path** - the location is
+  locked in now, ahead of R5, so it isn't improvised later; configurable via
+  `AGENT_SKILLS_DIR` per the confirmed design decision that it lives outside
+  `src/llmwiki` like the two paths above).
+- Call sites simplified: `agent/query.py`'s and `wiki/compiler.py`'s five
+  `llm.complete(...)` calls all drop `model=`/`max_tokens=`/`temperature=`,
+  passing only `op=`/`system=`/`prompt=`/(`schema=`) - "config fully owns it."
+  Debug log lines that named the resolved model were adjusted since the model
+  is no longer known at the call site (routed mode may choose per-op).
+- `.env.example`: `COMPILE_EXECUTOR_MODEL` line removed; added
+  `LLMWIKI_PROVIDERS_CONFIG`, `LLMWIKI_OPS_CONFIG`, `AGENT_SKILLS_DIR` with an
+  explanation of the fallback switch and where secrets actually live.
+
+**Related files.** `src/llmwiki/llm/routing_config.py` (new),
+`src/llmwiki/llm/router.py` (new), `src/llmwiki/llm/base.py`,
+`src/llmwiki/llm/anthropic_client.py`, `src/llmwiki/llm/langchain_client.py`,
+`src/llmwiki/llm/fake.py`, `src/llmwiki/factory.py`, `src/llmwiki/config.py`,
+`src/llmwiki/agent/query.py`, `src/llmwiki/wiki/compiler.py`,
+`src/llmwiki/tools.py`, `.env.example`, `tests/doubles.py`,
+`docs/llmwiki-KB-design_v1.4.md` (→ v1.5), `docs/implement-plan-v1.4.md`
+(→ v1.1, new §19).
+
+**Test coverage.** Full suite: 264 passed, 1 skipped, 6 deselected (integration,
+opt-in), plus the one pre-existing unrelated failure already noted in the entry
+below (`test_extractors.py::test_fetch_video_title_reads_oembed` - present in
+the working tree before this change, untouched). `ruff check .` and `mypy` both
+clean. `python scripts/smoke_flow.py --offline` passes end to end. No test
+referenced `compile_executor_model` at all, so its removal needed no test
+deletions.
+
+- **Obsolete, rewritten in place** (their premise - that the domain layer reads
+  `Settings.llm_max_tokens`/`llm_temperature` and forwards them itself - is
+  exactly what R3 removed):
+  - `tests/unit/test_agent.py::test_answer_passes_settings_max_tokens_and_temperature`
+    → `test_answer_leaves_model_and_sampling_params_to_the_configured_adapter`:
+    now asserts the recorded call's `model`/`max_tokens`/`temperature` are all
+    `None` (nothing forwarded), instead of asserting they equal a
+    `Settings.model_copy`-injected value.
+  - `tests/unit/test_compiler_behaviour.py::test_llm_max_tokens_and_temperature_reach_every_stage`
+    → `test_compiler_leaves_model_and_sampling_params_to_the_configured_adapter`:
+    same change, across all four compiler-stage calls, and now also doubles as
+    the `COMPILE_EXECUTOR_MODEL` regression check (`create_page`/`patch_page`
+    pass no `model=` either).
+  - `FakeLLM.complete()` (`llm/fake.py`) and `ScriptedLLM.complete()`
+    (`tests/doubles.py`) now record `max_tokens`/`temperature` **as passed**
+    (`None` included) instead of pre-resolving to `2048`/`1.0` before
+    recording - required for the two rewrites above to actually observe
+    "nothing was passed," and itself covered by asserting on `.calls[...]`
+    in both rewritten tests.
+- **New:** `tests/unit/test_routing_config.py` (loader/validation - absent
+  config, half-present config, active-set resolution, credential resolution
+  from the named env var, missing/duplicate/inactive-provider/unknown-
+  provider-kind errors, malformed module errors, and the
+  `KNOWN_OPS`-vs-real-call-sites drift guard); `tests/unit/test_router.py`
+  (`RoutingLLMClient` dispatch, op-row values, explicit-override precedence,
+  schema passthrough).
+- **Extended:** `tests/unit/test_factory.py` (routed-mode end-to-end build, an
+  active-but-unused provider is never constructed, absent routing config
+  leaves the fallback path untouched); `tests/unit/test_anthropic_client.py`
+  and `tests/unit/test_langchain_client.py` (omitted `max_tokens`/
+  `temperature` resolve to the adapter's configured defaults, not a
+  hardcoded value; an explicit call-site value still overrides them);
+  `tests/unit/test_config.py` (the two new config paths default outside
+  `src/llmwiki` and are absent in this repo; `agent_skills_dir` default;
+  `compile_executor_model` no longer exists).
+
+## 2026-09-05 — `requirements.txt` missing the `openrouter` extra's packages
+
+**Goal.** `llmwiki ingest` failed with `ModuleNotFoundError: No module named
+'langchain_core'` even though `LLM_PROVIDER=openrouter` was configured in
+`.env`. Root-caused and fixed so both the local dev venv and the Docker image
+(built from `requirements.txt`, per `Dockerfile`) actually carry what
+`LLM_PROVIDER=openrouter` needs.
+
+**Root cause.** Two stacked problems:
+1. The project's own `.venv` had only the bare package installed (no `dev` or
+   provider extra) - `uv pip install -e ".[dev,openrouter]"` had never been
+   run in it, so `langchain_core`/`langchain_openrouter`/`openrouter` were
+   genuinely absent from the interpreter `llmwiki` runs under. A `pip list |
+   grep lang` run in the same terminal appeared to show them installed, but
+   that was a different Python environment on `PATH` (this `.venv` is
+   uv-managed and has no `pip` binary at all), which is what made the failure
+   look inconsistent.
+2. `requirements.txt` - the lockfile `Dockerfile` builds from
+   (`COPY requirements.txt ./` + `pip install -r requirements.txt`, before the
+   app is even installed) - was frozen from a `.[dev]`-only environment. It
+   carries `langchain-core` (a `dev` extra dependency, for the adapter tests)
+   but none of the `openrouter` extra's packages, so a container built to run
+   with `LLM_PROVIDER=openrouter` would hit the identical
+   `ModuleNotFoundError` at first ingest/compile call. `uv.lock` (present,
+   untracked) already had the correct resolution for every extra including
+   `openrouter`; `requirements.txt` had just never been regenerated to match.
+
+**Implementation detail.**
+- Added the three packages the `openrouter` extra needs, at the versions
+  `uv.lock` resolves, in the file's existing alphabetical order:
+  `jsonpath-python==1.1.6` (dep of the `openrouter` SDK), `openrouter==0.10.8`
+  (the SDK `langchain-openrouter` wraps), `langchain-openrouter==0.2.8`. Their
+  own transitive deps (`httpx`, `httpcore`, `pydantic`, `jsonpath-python`
+  itself) were already present at compatible pins - no other line changed.
+- Ran `uv pip install -e ".[dev,openrouter]"` in the project's `.venv` so the
+  local environment matches what `requirements.txt` now documents.
+
+**Related files.** `requirements.txt`.
+
+**Test coverage.**
+- No regressions: `pytest -q` → 238 passed, 1 skipped, 6 deselected, plus one
+  pre-existing unrelated failure
+  (`test_extractors.py::test_fetch_video_title_reads_oembed`, already present
+  in the working tree before this change - not touched).
+- No new tests added: this is a dependency/lockfile fix, no new code path.
+- Verified the actual failure mode directly: `langchain_core`,
+  `langchain_openrouter`, and `openrouter` all import cleanly from `.venv`
+  post-install (they raised `ModuleNotFoundError` beforehand). Did not force a
+  full fresh ingest through the real `openrouter` API, since the source's raw
+  object already existed and re-ingesting would either dedup-skip (no
+  exercise of the code path) or spend real API budget - out of scope for
+  verifying a dependency pin.
+
+---
+
+## 2026-09-05 — `LOG_LEVEL` and stdlib `logging`: which adapter/model backs ingest and compile
+
+**Goal.** No way to see, during development, which LLM client/model a given
+ingest or compile actually used, or where in the pipeline time was going -
+Python's logging defaults meant nothing below WARNING was ever visible and
+only one module (`api/app.py`) even had a logger. Add `LOG_LEVEL` and
+`debug`/`info`/`warning`/`error` logging at the locations that answer that,
+starting with (per explicit request) "which LLMClient backs wiki ingest,
+compile, etc."
+
+**Root cause.** N/A — new capability, not a bug fix.
+
+**Implementation detail.**
+
+- `Settings.log_level: str = "INFO"` (`config.py`).
+- `configure_logging(level)` lives in `config.py` itself, not its own module:
+  the transport layers (`api/`, `cli.py`) may only import
+  `tools`/`models`/`config`/`wiki`/`factory` per
+  `test_layering.py::test_transport_layer_only_calls_tools` (one of the four
+  load-bearing tests - see `CLAUDE.md`), so a standalone `logging_config.py`
+  module (its own layer, per that test's AST walk) would have failed it. It
+  attaches one `StreamHandler` to the root logger with a format that includes
+  module + line number (`%(name)s:%(lineno)d`) so a log line names its own
+  location, and is idempotent - a second call only adjusts the level, never
+  stacks a second handler.
+- Both entry points call it once: `cli.main()` right after `load_settings()`,
+  and `api/app.py` at module import (before its existing
+  `logger = logging.getLogger(__name__)`).
+- Every other touched module follows the one existing convention
+  (`api/app.py`'s `logger = logging.getLogger(__name__)`):
+  - `factory.py` - INFO once per adapter actually built: object store
+    backend, vector store backend, embedder backend+model, and (the direct
+    answer to the request) the LLM client's `provider=... model=...
+    tracing=...`, logged at the exact chokepoint (`_build_llm_client`) every
+    call path shares.
+  - `wiki/compiler.py` - INFO at `compile_source` start/end (source id,
+    title, created/patched/skipped/aborted counts); DEBUG at each of the 4
+    `.complete()` call sites naming the model actually used
+    (`llm_default_model` for summarize/plan, `compile_executor_model` for
+    create/patch page); WARNING on a token-budget abort and on a version
+    conflict (previously recorded only in `result.reason`, never logged).
+  - `pipeline/ingest.py` - INFO at capture (source id, modality, duplicate)
+    and at each `process()` state transition (extracting/embedding/
+    compiling/done/failed) with elapsed time; the unexpected-exception catch
+    now also logs at ERROR with a traceback instead of failing silently.
+  - `agent/query.py` - DEBUG in `answer()`: model used, whether the RAG
+    fallback engaged.
+- `.env.example` documents `LOG_LEVEL` under a new "stdlib logging" section.
+
+**Related files.** `src/llmwiki/config.py`, `src/llmwiki/cli.py`,
+`src/llmwiki/api/app.py`, `src/llmwiki/factory.py`,
+`src/llmwiki/wiki/compiler.py`, `src/llmwiki/pipeline/ingest.py`,
+`src/llmwiki/agent/query.py`, `.env.example`.
+
+**Test coverage.**
+
+- No regressions: `pytest -q` → 234 passed, 5 skipped, 6 deselected, plus the
+  same one pre-existing failure noted below. Also fixed, in passing, a real
+  test-isolation bug this work exposed: `test_config.py::test_configure_langsmith_exports_the_env_vars`
+  wrote `LANGSMITH_TRACING=true` etc. straight into `os.environ` (real
+  application behavior, not `monkeypatch.setenv`) and never cleaned it up, so
+  it leaked into every later test in the session - harmless until a test
+  actually built a real `AnthropicLLM(tracing=True)` after it, which then hit
+  an installed-package version mismatch (`langsmith`'s `wrap_anthropic`
+  expects a legacy `.completions` attribute this `anthropic` SDK version no
+  longer has). Fixed with a `try/finally` that `monkeypatch.delenv`s the four
+  vars: that fix, plus keeping tests below explicit about
+  `langsmith_tracing=False`, means the underlying `anthropic`/`langsmith`
+  version mismatch is now dormant but not itself resolved - it would resurface
+  if `LANGSMITH_TRACING=true` is set for real against this `anthropic` pin.
+- New tests:
+  - `tests/unit/test_logging_config.py` (new file) - `configure_logging` sets
+    the root level, rejects an unrecognized `LOG_LEVEL`, is idempotent (no
+    handler stacking on a second call), and is case-insensitive.
+  - `tests/unit/test_config.py::test_defaults_are_the_cloud_backends` -
+    extended to assert `log_level == "INFO"`.
+  - `tests/unit/test_factory.py` (new file) - `caplog`-based:
+    `test_llm_client_build_logs_the_provider_and_model` (the `fake` path) and
+    `test_anthropic_client_build_logs_its_model` (the native path) both
+    assert the provider/model actually land in a log record.
+  - `tests/unit/test_compiler_behaviour.py::test_budget_abort_marks_the_source_rather_than_running_away` -
+    extended with a `caplog` assertion that the abort is logged at WARNING.
+- No obsolete tests.
+- `ruff check .` and `mypy` both clean; `python scripts/smoke_flow.py
+  --offline` → SMOKE PASS (the smoke script calls `tools.py` directly, not
+  `cli.main()`, so it does not itself call `configure_logging` - out of scope
+  for this change). Manually verified end-to-end with the real CLI
+  (`LOG_LEVEL=DEBUG llmwiki --offline ingest --file ...`): factory logs each
+  backend and the LLM provider/model at INFO, and DEBUG shows
+  `summarize_source`/`plan_compile` using `llm_default_model` while
+  `create_page`/`patch_page` use `compile_executor_model` - the exact
+  visibility asked for.
+- The one pre-existing failure, `tests/unit/test_extractors.py::test_fetch_video_title_reads_oembed`,
+  predates and is unrelated to this change (see the LangSmith-tracing entry
+  below for how that was verified).
+
+---
+
+## 2026-09-04 — `LLM_MAX_TOKENS` / `LLM_TEMPERATURE`, applied uniformly across adapters
+
+**Goal.** `max_tokens` and sampling temperature were not configurable: the
+Anthropic adapter and every LangChain provider silently used a hardcoded
+`max_tokens=2048` default baked into the `LLMClient.complete()` protocol
+signature, and temperature was never set at all (each provider's own default
+applied, unexamined). Add `LLM_MAX_TOKENS`/`LLM_TEMPERATURE` as two more
+provider-generic knobs, alongside `LLM_MODEL`.
+
+**Root cause.** N/A — new capability, not a bug fix.
+
+**Implementation detail.**
+
+- `Settings` gains `llm_max_tokens: int = 2048` and `llm_temperature: float =
+  1.0` (`config.py`) — `1.0` matches Anthropic's own default, so leaving the
+  var unset changes nothing observable.
+- Both are passed as **explicit kwargs at every `.complete()` call site**
+  (`self.settings.llm_max_tokens` / `self.settings.llm_temperature`), the same
+  idiom already used for `model=self.settings.llm_default_model` /
+  `model=self.settings.compile_executor_model` — no hidden per-adapter
+  default, five call sites touched: `wiki/compiler.py` (`_summarize`, `_plan`,
+  `_create_page`, `_patch_page`) and `agent/query.py` (`answer`).
+- `LLMClient.complete()` (`llm/base.py`) gains a `temperature: float = 1.0`
+  parameter next to the existing `max_tokens: int = 2048`.
+- `AnthropicLLM.complete()` puts `temperature` straight into the Messages API
+  request dict alongside `max_tokens` — both are genuinely per-call fields on
+  that API.
+- `LangChainLLM`/`providers.build()`: temperature, like `max_tokens`, must be
+  a **constructor** argument for LangChain chat models (invoke-time keywords
+  differ across integrations, per the existing `max_tokens_arg` comment in
+  `providers.py`) — `TEMPERATURE_ARG = "temperature"` is added as a single
+  constant (no per-provider override needed, unlike `max_tokens_arg`), and
+  `LangChainLLM`'s model cache key grows from `(model, max_tokens)` to
+  `(model, max_tokens, temperature)`.
+- `factory.py`'s LangChain `build(model, max_tokens)` closure becomes
+  `build(model, max_tokens, temperature)`; the Anthropic branch needed no
+  change (temperature there is per-call, not constructed).
+- `FakeLLM` and the `ScriptedLLM` test double (`tests/doubles.py`) both now
+  record `max_tokens`/`temperature` in `self.calls`, so propagation is
+  assertable from tests instead of just accepted-and-ignored.
+- `.env.example` documents both under the LLM section, explicitly noting they
+  sit outside the four-name agentkit-llm contract (plan-v1.4 §7.6) but are
+  still applied uniformly by every adapter.
+
+**Related files.** `src/llmwiki/config.py`, `src/llmwiki/llm/base.py`,
+`src/llmwiki/llm/anthropic_client.py`, `src/llmwiki/llm/langchain_client.py`,
+`src/llmwiki/llm/providers.py`, `src/llmwiki/llm/fake.py`,
+`src/llmwiki/factory.py`, `src/llmwiki/wiki/compiler.py`,
+`src/llmwiki/agent/query.py`, `.env.example`, `tests/doubles.py`.
+
+**Test coverage.**
+
+- No regressions: `pytest -q` → 228 passed, 5 skipped, 6 deselected, plus the
+  same one pre-existing failure noted below.
+- New tests:
+  - `tests/unit/test_config.py::test_defaults_are_the_cloud_backends` —
+    extended to assert `llm_max_tokens == 2048`, `llm_temperature == 1.0`.
+  - `tests/unit/test_anthropic_client.py::test_max_tokens_and_temperature_reach_the_request`
+    and `::test_temperature_defaults_to_one` — a stubbed `messages.create`
+    proves both values land in the request dict.
+  - `tests/unit/test_providers.py::test_registry_keywords_match_the_installed_class`
+    — extended to also require `TEMPERATURE_ARG` be accepted by every
+    installed LangChain chat model class.
+  - `tests/unit/test_providers.py::test_build_forwards_temperature_to_the_constructor`
+    — new, confirms `build()` forwards `temperature` to the constructor.
+  - `tests/unit/test_langchain_client.py::test_a_temperature_change_builds_its_own_chat_model`
+    — new, mirrors the existing `max_tokens`-triggers-a-rebuild test.
+  - `tests/unit/test_compiler_behaviour.py::test_llm_max_tokens_and_temperature_reach_every_stage`
+    — new, proves every compiler-stage `.complete()` call carries
+    `Settings.llm_max_tokens`/`llm_temperature`, not the protocol default.
+  - `tests/unit/test_agent.py::test_answer_passes_settings_max_tokens_and_temperature`
+    — new, same proof for the query agent's `answer_query` call.
+- No obsolete tests.
+- `ruff check .` and `mypy` both clean; `python scripts/smoke_flow.py
+  --offline` → SMOKE PASS.
+- The one pre-existing failure, `tests/unit/test_extractors.py::test_fetch_video_title_reads_oembed`,
+  predates and is unrelated to this change (part of the user's own
+  in-progress title-capture work; verified via `git stash` in the prior
+  LangSmith-tracing entry above).
+
+---
+
+## 2026-09-04 — Optional LangSmith tracing, independent of `LLM_PROVIDER`
+
+**Goal.** The project's only LLM observability was the measured cost ledger
+(`CostRecord` → `wiki/_meta/cost.jsonl`) — token counts and USD, no visibility
+into prompts, responses, or run structure. Add LangSmith tracing as an opt-in
+layer on top, without weakening the "no provider SDK imported until asked for"
+discipline the extras already enforce.
+
+**Root cause.** N/A — new capability, not a bug fix.
+
+**Implementation detail.**
+
+* Four new `Settings` fields (`langsmith_tracing`, `langsmith_api_key`,
+  `langsmith_project`, `langsmith_endpoint`), all optional, tracing off by
+  default. `langsmith_api_key` is `SecretStr`, same as every other credential.
+* `factory._configure_langsmith(cfg)` runs at the top of `_build_llm_client`,
+  the one chokepoint every entry path (CLI, FastAPI, MCP) shares. It is a
+  no-op unless `LANGSMITH_TRACING=true`; otherwise it calls
+  `cfg.require("langsmith_api_key")` and exports `LANGSMITH_TRACING` /
+  `LANGSMITH_API_KEY` / `LANGSMITH_PROJECT` / `LANGSMITH_ENDPOINT` to
+  `os.environ`, which is what LangChain's own auto-instrumentation reads for
+  every LangChain-routed provider (`openai`/`google`/`nvidia`/`deepseek`/
+  `openrouter`).
+* The default provider, `anthropic`, bypasses LangChain entirely by design
+  (native adapter, for caching and measured cost) — so LangChain's
+  auto-instrumentation would never see it. `AnthropicLLM` gained a
+  `tracing: bool = False` constructor arg; when true it wraps the client with
+  `langsmith.wrappers.wrap_anthropic`, imported only in that branch. A missing
+  `langsmith` package with tracing requested raises a `RuntimeError` naming
+  the extra to install, the same pattern `cfg.require` uses for a missing key.
+* New `langsmith` extra in `pyproject.toml` (`pip install "llmwiki[langsmith]"`),
+  independent of the provider extras. Added to `dev` too, since it was already
+  a transitive dependency of `langchain-core` there — the tracing-wrap test
+  needs it importable to monkeypatch.
+* `.env.example` documents the four new variables and states explicitly that
+  tracing is complementary to, not a replacement for, the cost ledger.
+
+**Related files.** `src/llmwiki/config.py`, `src/llmwiki/factory.py`,
+`src/llmwiki/llm/anthropic_client.py`, `pyproject.toml`, `requirements.txt`,
+`.env.example`.
+
+**Test coverage.**
+
+1. *No regressions.* Full suite passes (the one failing test in
+   `test_extractors.py::test_fetch_video_title_reads_oembed` predates this
+   change — confirmed via `git stash` — and belongs to unrelated in-progress
+   work on YouTube/web title capture; not touched here).
+   `test_providers.py::test_importing_the_registry_imports_no_provider_sdk`
+   still passes: `langsmith` stays a function-local import.
+2. *Obsolete tests removed.* None.
+3. *New tests.* `test_langsmith_tracing_defaults_off`,
+   `test_langsmith_api_key_does_not_appear_in_repr`,
+   `test_configure_langsmith_is_a_noop_when_tracing_is_off`,
+   `test_configure_langsmith_requires_the_api_key`,
+   `test_configure_langsmith_exports_the_env_vars` (`test_config.py`);
+   `test_tracing_off_never_imports_langsmith`,
+   `test_tracing_on_wraps_the_client`,
+   `test_tracing_on_without_langsmith_installed_raises_a_clear_error`
+   (new `tests/unit/test_anthropic_client.py`).
+4. *Documented* here.
+
+`.env` was not modified — only `.env.example`; `ruff` and `mypy` both clean.
+
+---
+
+## 2026-09-04 — Capture titles and titled source rows in index.md
+
+**Goal.** YouTube and blog `raw/*/meta.json` were stored with an empty `title`
+because URL ingest never passed `--title`. `wiki/index.md` then listed those
+sources as `[[source_id]]`, which is the storage key, not something a person
+reads.
+
+**Root cause.** Capture wrote `SourceMeta.title` from the caller only.
+Extractors already recovered a blog title from HTML into `ExtractedDoc`, but
+`raw/` is append-only so that never reached `meta.json`. YouTube extraction
+had no title source at all — the transcript JSON has no video title.
+
+**Implementation detail.**
+
+* Capture fills an empty title before the first `meta.json` write: HTML via
+  `title_from_html` (trafilatura metadata, then `<title>`), YouTube via the
+  public oEmbed endpoint. A caller-supplied title still wins. Failed lookups
+  leave the field empty rather than failing the ingest.
+* `wiki/index.md` source rows use an Obsidian alias: `[[source_id|title]]
+  (`source_id`)`. Concept and entity rows are unchanged. The source gist no
+  longer repeats the title.
+
+**Related files.** `src/llmwiki/pipeline/ingest.py`,
+`src/llmwiki/extractors/web.py`, `src/llmwiki/extractors/youtube.py`,
+`src/llmwiki/wiki/gists.py`, `src/llmwiki/wiki/compiler.py`.
+
+**Test coverage.**
+
+1. *No regressions.* Existing extractor, ingest, and index tests still pass.
+2. *Obsolete tests removed.* None.
+3. *New tests.* `test_web_title_comes_from_the_html_when_meta_has_none`,
+   `test_youtube_extract_uses_the_captured_title`,
+   `test_fetch_video_title_reads_oembed`,
+   `test_fetch_video_title_is_empty_when_oembed_fails`,
+   `test_capture_fills_web_title_from_html`,
+   `test_capture_fills_youtube_title_from_oembed`,
+   `test_caller_title_wins_over_inferred_html_title`,
+   `test_index_sources_display_title_and_keep_source_id`. Web extraction now
+   also asserts the fixture `<title>`.
+4. *Documented* here.
+
+**`.env` was not modified.**
+
+---
+
+## 2026-09-04 — README Quickstart: YouTube and blog URL ingest
+
+**Goal.** The Quickstart only showed a local PDF ingest. Add the CLI commands
+for the two URL modalities the extractors already support (YouTube transcript
+and web/blog HTML).
+
+**Root cause.** Docs gap, not a code gap. `llmwiki ingest --url` was already
+the capture path (`cli.py` → `tools.ingest_now` → `IngestPipeline.capture`).
+
+**Implementation detail.** `README.md` Quickstart now has a second command
+block: one YouTube URL and one blog URL, still under `--offline` so compile
+stays on fake adapters. A short note states that `--url` still fetches over
+the network. Stale "181 unit tests" count in that block was dropped in favour
+of "unit tests" so the README does not drift from the gate again.
+
+**Related files.** `README.md`.
+
+**Test coverage.**
+
+1. *No regressions.* Docs only; no code path changed.
+2. *Obsolete tests removed.* None.
+3. *New tests.* None — CLI ingest of `--url` is already covered by extractor
+   and pipeline unit tests.
+4. *Documented* here.
+
+---
+
 ## 2026-09-01 — Development environment pinned to Python 3.11
 
 **Goal.** Make the checked-in configuration true before the first commit. Three

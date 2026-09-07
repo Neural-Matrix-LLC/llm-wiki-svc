@@ -75,10 +75,23 @@ def render_index(gists: dict[str, PageGist]) -> str:
         lines.append(f"## {headings[page_type]}")
         lines.append("")
         for gist in rows:
-            summary = f" - {gist.gist}" if gist.gist else ""
-            lines.append(f"- [[{gist.slug}]]{summary}")
+            lines.append(_index_bullet(gist))
         lines.append("")
     return "\n".join(lines)
+
+
+def _index_bullet(gist: PageGist) -> str:
+    """One index row. Source pages show the title; the slug stays as the link target."""
+    summary = f" - {gist.gist}" if gist.gist else ""
+    if gist.type != "source":
+        return f"- [[{gist.slug}]]{summary}"
+    label = _wikilink_label(gist.title or gist.slug)
+    return f"- [[{gist.slug}|{label}]] (`{gist.slug}`){summary}"
+
+
+def _wikilink_label(title: str) -> str:
+    """Obsidian aliases cannot contain ``|`` or ``]]``."""
+    return title.replace("|", "—").replace("]]", "")
 
 
 def write_index(store: ObjectStore, gists: dict[str, PageGist]) -> None:

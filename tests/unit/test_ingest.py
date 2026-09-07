@@ -86,6 +86,37 @@ def test_meta_is_never_rewritten_on_recapture(pipeline, store) -> None:
     assert store.get(raw_meta(ref.source_id)) == original, "raw/ must be append-only"
 
 
+def test_capture_fills_web_title_from_html(pipeline, store) -> None:
+    data = (FIXTURES / "sample.html").read_bytes()
+    ref = pipeline.capture(file=data, filename="page.html", mime="text/html")
+    meta = SourceMeta(**__import__("json").loads(store.get(raw_meta(ref.source_id)).decode()))
+    assert meta.title == "Chunking Strategies for Retrieval"
+
+
+def test_capture_fills_youtube_title_from_oembed(pipeline, store, monkeypatch) -> None:
+    monkeypatch.setattr(
+        "llmwiki.extractors.youtube.fetch_transcript",
+        lambda url: (FIXTURES / "transcript.json").read_bytes(),
+    )
+    monkeypatch.setattr(
+        "llmwiki.extractors.youtube.fetch_video_title",
+        lambda url: "Never Gonna Give You Up",
+    )
+    ref = pipeline.capture(url="https://www.youtube.com/watch?v=dQw4w9WgXcQ")
+    meta = SourceMeta(**__import__("json").loads(store.get(raw_meta(ref.source_id)).decode()))
+    assert meta.title == "Never Gonna Give You Up"
+    assert meta.modality == "youtube"
+
+
+def test_caller_title_wins_over_inferred_html_title(pipeline, store) -> None:
+    data = (FIXTURES / "sample.html").read_bytes()
+    ref = pipeline.capture(
+        file=data, filename="page.html", mime="text/html", title="Explicit Title"
+    )
+    meta = SourceMeta(**__import__("json").loads(store.get(raw_meta(ref.source_id)).decode()))
+    assert meta.title == "Explicit Title"
+
+
 def test_extraction_is_a_pure_function_of_stored_bytes(pipeline, store) -> None:
     """Re-extraction must not need the network - the bytes are the source."""
     data = (FIXTURES / "sample.html").read_bytes()

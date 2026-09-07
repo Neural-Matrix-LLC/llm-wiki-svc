@@ -10,6 +10,8 @@ already answers.
 
 from __future__ import annotations
 
+import logging
+
 from llmwiki.chains.prompts_loader import load_prompt
 from llmwiki.config import Settings
 from llmwiki.embedding.base import Embedder
@@ -25,6 +27,8 @@ from llmwiki.wiki.pages import read_page
 # Below this similarity the wiki is not actually answering the question.
 WIKI_CONFIDENCE = 0.35
 MAX_CONTEXT_CHARS = 12_000
+
+logger = logging.getLogger(__name__)
 
 
 class QueryAgent:
@@ -73,11 +77,11 @@ class QueryAgent:
                 used_rag_fallback=used_fallback,
             )
 
+        logger.debug("answer_query: used_rag_fallback=%s", used_fallback)
         response = self.llm.complete(
             op="answer_query",
             system=load_prompt("answer_query"),
             prompt=f"# Question\n\n{query}\n\n# Retrieved context\n\n{context}",
-            model=self.settings.llm_default_model,
         )
         text = response.text or (response.data or {}).get("text", "")
         resolved = [c for c in citations if self.source_exists(c.source_id)]
