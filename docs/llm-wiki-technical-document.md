@@ -2,10 +2,10 @@
 
 **Audience:** an engineer who needs to support, extend, fix, or test this
 repository, without having read the design doc or implementation plan first.
-**Scope:** the codebase as it exists on disk today (Phase 0, with the R1–R3
-multi-provider LLM routing feature landed). This document describes
-*implemented behaviour*. Where the roadmap differs from today's code, that is
-called out explicitly rather than blended in.
+**Scope:** the codebase as it exists on disk today (Phase 0, plus plan-v1.4
+§19's R1–R5: multi-provider LLM routing and query-agent skill invocation).
+This document describes *implemented behaviour*. Where the roadmap differs
+from today's code, that is called out explicitly rather than blended in.
 
 **Primary sources this document distills**, and where to go for more:
 
@@ -25,7 +25,10 @@ pages, YouTube transcripts, plain text) are stored immutably, then an LLM
 incrementally compiles them into an interlinked markdown wiki. A query agent
 answers questions from that wiki first, falling back to raw vector search,
 and every citation it returns is verified to resolve back to a real captured
-source.
+source. The compiler is deliberately non-agentic (fixed stages, fixed
+prompts); the query agent gained one narrow piece of genuine agentic
+behaviour in R5 — choosing, and chaining, among a discoverable catalog of
+skills before it answers (§2.4, §3.3).
 
 ```
 Capture → raw/ (object storage) → Extract → Chunk + Embed → Vector Store
@@ -62,7 +65,9 @@ L0  models/                (pure pydantic schemas, zero I/O, imports nothing els
      │
 L1  storage/  extractors/  embedding/  vector/  llm/     (adapters — each Protocol-based, siblings, never import each other)
      │
-L2  wiki/     agent/                                     (domain logic — compiler, page I/O, query agent)
+L1* chains/                (prompt CONTENT + a cached file loader — no domain logic; §2.4)
+     │
+L2  wiki/     agent/                                     (domain logic — compiler, page I/O, query agent + its skills.py; §2.4)
      │
 L3  pipeline/                                             (orchestrates extract → chunk → embed → compile)
      │
@@ -70,6 +75,11 @@ L4  tools.py                                               (the entire public fu
      │
 L5  api/  mcp/  cli.py                                     (transports — validate input, call tools.py, serialize)
 ```
+
+Two things live entirely **outside** `src/llmwiki/` and are not part of the
+installed package at all: repo-root `config/` (§5.6) and repo-root `skills/`
+(§2.4, §5.8). Neither is a "layer" in the ladder above — `test_layering.py`
+and `test_package_boundaries.py`-style guards do not scan them.
 
 Two allowed exceptions, both serialization not logic: `api/` and `cli.py` may
 import `wiki.pages.render_page` to render a page as markdown text, and
@@ -98,8 +108,8 @@ them testable with a spy store or a scripted LLM.
 | `vector/` | L1 | `VectorStore` protocol (`base.py`), `VectorizeStore`, `MemoryVectorStore`. |
 | `llm/` | L1 | `LLMClient` protocol (`base.py`), `AnthropicLLM`, `LangChainLLM`, `FakeLLM`, the provider registry, pricing, and the R1–R3 multi-provider router (`router.py`, `routing_config.py`). |
 | `wiki/` | L2 | `compiler.py` (the incremental compiler), `pages.py` (read/write/parse), `gists.py` (the manifest + index), `lint.py` (scheduled global check). |
-| `agent/` | L2 | `query.py` — `QueryAgent`, wiki-first retrieval with RAG fallback. |
-| `chains/` | L1/L2-adjacent | `prompts_loader.py` + `prompts/*.md` — the five prompt templates the compiler and query agent use. |
+| `agent/` | L2 | `query.py` — `QueryAgent`, wiki-first retrieval with RAG fallback, plus (R5) skill selection/chaining. `skills.py` — `discover_skills()`, reads the repo-root `skills/` SKILL.md catalog. See §2.4. |
+| `chains/` | L1/L2-adjacent | `prompts_loader.py` + `prompts/*.md` — the five prompt templates the compiler (always) and query agent (only when no `skills/` catalog is discovered) use. **Not** the same thing as repo-root `skills/` — see §2.4. |
 | `pipeline/` | L3 | `ingest.py` (`IngestPipeline` — capture/extract/embed/compile orchestration), `chunker.py` (heading-aware text chunking). |
 | `tools.py` | L4 | Every function any transport calls. This *is* the public Python API (§6.1). |
 | `api/` | L5 | `app.py` (FastAPI app + MCP mount), `routes.py` (HTTP handlers). |
@@ -109,7 +119,9 @@ them testable with a spy store or a scripted LLM.
 | `config.py` | outside ladder | `Settings` (pydantic-settings) — the only module reading `.env`/`os.environ`, except `llm/routing_config.py` (§5.6). |
 
 Repo-root `config/` (note: **not** `src/llmwiki/config.py`) is a separate,
-uninstalled thing — see §5.6.
+uninstalled thing — see §5.6. Repo-root `skills/` (note: **not**
+`src/llmwiki/chains/prompts/`) is the same kind of thing, for the query
+agent's skill catalog — see §2.4 and §5.8.
 
 ### 2.3 The adapter pattern (why tests never touch the network)
 
@@ -140,6 +152,127 @@ feature landed, **also** points `LLMWIKI_PROVIDERS_CONFIG`/`LLMWIKI_OPS_CONFIG`
 at a guaranteed-nonexistent path — otherwise a real `config/providers.py` in
 the checkout would silently outrank `LLM_PROVIDER=fake` (see §5.6 and the
 2026-09-06 `HISTORY.md` entry for the bug this fixed).
+
+### 2.4 Agents, `chains/prompts/`, and `skills/` — three things with similar names
+
+This codebase has exactly **two** things that ever call an LLM as part of
+answering a request — the compiler and the query agent — and, as of R5, only
+one of them is "agentic" in the tool-calling sense. The rest of this section
+exists because `chains/` and `skills/` look interchangeable at a glance
+(both are directories of markdown files with YAML frontmatter) and are not:
+they are consumed by different code, at different times, for different
+reasons.
+
+**0. What each agent actually is.**
+
+| | `Compiler` (`wiki/compiler.py`) | `QueryAgent` (`agent/query.py`) |
+|---|---|---|
+| Called from | `IngestPipeline.process()` → `compile_source()` (§3.1) | `tools.answer()` (§3.3) |
+| Shape | Five **fixed** stages, always in the same order (§3.2) | One retrieval pass, then (R5) an optional selection step, then generation |
+| LLM calls per run | Up to 4 (`summarize_source`, `plan_compile`, `create_page`\*, `patch_page`\*) | 1 (pre-R5, or no `skills/` catalog) to `1 + MAX_SKILL_CHAIN` (R5, catalog present) |
+| Which prompt runs, decided by | **The Python source code.** Each stage's function body names its own `op=` and calls `load_prompt("<that literal name>")` — there is no branch, no choice, no model input into this decision | Pre-R5 / no catalog: also the source code, identically. **R5, catalog present: the model**, via a forced tool-call (§3.3) |
+| Is this "agentic"? | **No, deliberately.** Design v1.4 §4.4/§4.8.2 requires the compiler to stay non-agentic — a model that could decide to re-plan, retry, or call something unexpected is exactly what would break the "compilation cost never grows with wiki size" guarantee `test_compiler_no_full_scan.py` enforces | **Only this one, only since R5, only for picking/chaining a system prompt.** It cannot decide to skip retrieval, re-query, or call any tool other than "choose a skill" — see §3.3 for the exact boundary |
+
+\* `create_page`/`patch_page` run zero or more times, once per planned
+operation (§3.2 step 4), not fixed at exactly one call.
+
+**1. The original structure (still true for the compiler, and for the query
+agent whenever no `skills/` catalog exists): `chains/prompts/*.md` is content,
+not logic.**
+
+`chains/prompts_loader.py:load_prompt(name)` is a cached file reader with one
+job: given a literal string, return the body of `prompts/{name}.md`. It has
+no opinion about *when* `name` should be `"plan_compile"` vs `"answer_query"`
+— that decision is compiled into the Python call site itself:
+
+```python
+# wiki/compiler.py — always this literal string, every run, no exception
+response = self.llm.complete(op="summarize_source",
+                              system=load_prompt("summarize_source"), ...)
+
+# agent/query.py, pre-R5 (and still today, whenever discover_skills() finds nothing)
+response = self.llm.complete(op="answer_query",
+                              system=load_prompt("answer_query"), ...)
+```
+
+R4 (2026-09-07) added `name`/`description` YAML frontmatter to all five files
+so each is independently readable as an Agent Skill by an *external* harness
+(Claude Code, the Claude Agent SDK, an MCP client) — but that changed nothing
+about how *this codebase* uses them. `load_prompt()` still strips the
+frontmatter and returns the body only, and every call site above is exactly
+as fixed as it was before R4. **If you are adding a new compiler stage, you
+are extending this fixed structure — see §5.3, not §5.8.**
+
+**2. The new structure (R5, query agent only): `skills/*.md` is a catalog the
+model chooses from, at request time.**
+
+Repo-root `skills/` (a **different directory** from
+`src/llmwiki/chains/prompts/` — see the warning in §2.2) holds the same kind
+of SKILL.md-format files, but nothing in `agent/query.py` hardcodes which one
+runs. Instead:
+
+```
+agent/skills.py:discover_skills(settings.agent_skills_dir)
+    scans every *.md under the directory, at the START of every answer() call
+    → dict[name, Skill(name, description, body, path)]     — an open set,
+      not a fixed list of call sites; adding a skill = adding a file, no code change
+
+agent/query.py:QueryAgent._select_skills(query, skills)
+    shows the model the discovered {name: description} listing
+    ONE forced-schema LLM call (op="answer_query", schema names the discovered
+    names as an enum) → the model picks 1..MAX_SKILL_CHAIN of them, in order
+    invalid/hallucinated choice → retry once → fall back to the fixed
+    chains/prompts/answer_query.md skill (never a hard failure)
+
+agent/query.py:QueryAgent._answer_with_skills(...)
+    runs the chosen skill(s) in order: each is ONE more op="answer_query" call
+    whose `system` is THAT skill's body (not chains/prompts/answer_query.md);
+    step 2+ also receives step 1's output text appended to its prompt
+```
+
+The generation call's *shape* never changes —
+`LLMClient.complete(op="answer_query", system=..., prompt=...)`, the same
+signature the pre-R5 code always used. What changed is that `system` is no
+longer always the literal return value of `load_prompt("answer_query")`; it
+is now, when a catalog exists, whichever skill body the model picked for
+*this specific question*. See §3.6 for how this fits together with *which
+concrete `LLMClient` class* actually executes that call — the two decisions
+(which text, which provider) are made by unrelated code and never see each
+other.
+
+| | `chains/prompts/*.md` | repo-root `skills/*.md` |
+|---|---|---|
+| Read by | `chains/prompts_loader.load_prompt(name)` | `agent/skills.py:discover_skills(dir)` |
+| Used by | Compiler (always, all 4 stages) + query agent (only as the R5 fallback) | Query agent only (R5), when the directory has ≥1 valid file |
+| Which file runs | Hardcoded per call site, in Python | Chosen by the model, per question, via a tool-call |
+| Adding a new one | Requires a new `op=` value + a new call site (§5.3) | Drop a new `.md` file in `skills/` — **no code change** |
+| Malformed file | N/A — `FileNotFoundError` if a hardcoded name is missing | Logged and **skipped**, not fatal (`agent/skills.py`) — the agent must keep answering even if one skill file is broken |
+| Location | `src/llmwiki/chains/prompts/` — inside the installed package | Repo root `skills/` — outside `src/llmwiki/`, like `config/` (§5.6), not installed, not scanned by any layering test |
+| Ships with (this repo) | `summarize_source.md`, `plan_compile.md`, `create_page.md`, `patch_page.md`, `answer_query.md` | `answer_query.md` (default, single-skill), `compare_concepts.md` |
+
+**Gotchas worth knowing before touching either directory:**
+
+- Every test in `tests/unit/` except `test_agent_skill_invocation.py` runs
+  with `Settings.agent_skills_dir` pointed at a **guaranteed-absent**
+  directory (`conftest.py`'s autouse `_isolate_agent_skills_dir` fixture). If
+  you add a test that calls `QueryAgent.answer()` and expect skill selection
+  to run, you must pass your own `agent_skills_dir=` — the default fixture
+  will otherwise silently give you the fixed-prompt path.
+- All skill-related LLM calls (the selection call and every chosen skill's
+  generation call) are recorded under the single op label `"answer_query"` in
+  the cost ledger — there is currently no way to tell, from
+  `wiki/_meta/cost.jsonl` alone, how many of a given `answer_query` call's
+  tokens were spent choosing a skill versus generating the answer. This was a
+  deliberate scope decision (avoids a new `op=` value and the config/AST-guard
+  churn that would come with one) — revisit if per-step cost visibility
+  becomes important; `implement-plan-v1.4.md` §19.9 item 3 flags the related
+  open question of LangSmith span granularity.
+- `agent/skills.py` is in the `agent` layer (L2) — same `test_layering.py`
+  rules as `agent/query.py` apply to it (may not import `api/mcp/cli/
+  pipeline/tools/factory`).
+- The compiler is **never** a consumer of `skills/` and is not expected to
+  become one — see the "No, deliberately" row above. Do not wire
+  `discover_skills()` into `wiki/compiler.py`.
 
 ---
 
@@ -231,11 +364,34 @@ tools.py:answer(query)  ──►  agent.query.QueryAgent.answer(query)
       ├─ VectorStore.query(gists_index)             ← wiki search, tried FIRST
       │     if best hit score ≥ WIKI_CONFIDENCE (0.35): wiki alone is used
       │     else: VectorStore.query(chunks_index)    ← RAG fallback, only now
-      ├─ _build_context()
+      ├─ _build_context()                            ← UNCHANGED by everything below
       │     wiki.pages.read_page() for each wiki hit's slug
       │     citations built from each page's front_matter.sources
       │     (+ chunk hits' source_id/url if the fallback ran)
-      ├─ LLMClient.complete(op="answer_query")        (no schema — free text)
+      │
+      ├─ agent.skills.discover_skills(settings.agent_skills_dir)   [R5, §2.4]
+      │     │
+      │     ├─ {} (no skills/ directory, or it's empty)
+      │     │     └─ _answer_with_fixed_prompt()
+      │     │           LLMClient.complete(op="answer_query",
+      │     │                              system=load_prompt("answer_query"))
+      │     │           ← the ENTIRE pre-R5 behaviour, byte-identical
+      │     │
+      │     └─ {name: Skill, ...} (≥1 discovered)
+      │           └─ _answer_with_skills()
+      │                 ├─ _select_skills(query, skills)
+      │                 │     LLMClient.complete(op="answer_query",
+      │                 │       system=SKILL_SELECTION_SYSTEM,
+      │                 │       schema={"skills": enum(discovered names), ...})
+      │                 │     invalid/hallucinated choice → retry once →
+      │                 │       None ⇒ fall back to _answer_with_fixed_prompt()
+      │                 │
+      │                 └─ for each chosen skill name, in order (≤ MAX_SKILL_CHAIN):
+      │                       LLMClient.complete(op="answer_query",
+      │                         system=skills[name].body,     ← NOT load_prompt()
+      │                         prompt=question + context [+ previous step's text])
+      │                     → last step's text is the answer
+      │
       └─ resolved = [c for c in citations if self.source_exists(c.source_id)]
             source_exists() checks ObjectStore.exists(raw/{id}/meta.json)
             → Answer{text, citations, used_rag_fallback}
@@ -244,7 +400,13 @@ tools.py:answer(query)  ──►  agent.query.QueryAgent.answer(query)
 The citation-resolution step is what
 `tests/unit/test_agent.py::test_every_citation_resolves_to_a_real_raw_object`
 guards (load-bearing per `CLAUDE.md`): an `Answer` can never cite a source
-that isn't really in `raw/`.
+that isn't really in `raw/`. Note where it sits in the diagram above — **after**
+`_build_context()` and **after** every skill-invocation branch rejoins — which
+is why R5 needed no change to that guard: citations are a property of what
+was *retrieved*, never of which skill (or how many LLM calls) produced the
+final text. See §2.4 for the full agent-vs-`chains/`-vs-`skills/` picture,
+§3.6 for the four `LLMClient` implementations and how each `system=` string
+above is sourced, and §5.8 for the extension guide.
 
 ### 3.4 One function surface, three transports
 
@@ -284,6 +446,88 @@ factory.llm_client(cfg)
 ```
 
 See §5 for how to extend either path.
+
+### 3.6 `LLMClient` implementations, and how a prompt/skill body reaches one
+
+§3.5 showed *which client gets built*. This section shows the other half:
+*what text ends up inside that client's `system=` argument*, and ties the two
+together into one picture. There are exactly four classes that satisfy the
+`LLMClient` Protocol (`llm/base.py:30`) — every one of them can execute a
+`chains/prompts/*.md` or `skills/*.md` body, because by the time either
+reaches `.complete()` it is just a plain `str`; the client has no idea which
+file (or which mechanism, §2.4) it came from.
+
+| Class | File | Backend | Built when |
+|---|---|---|---|
+| `AnthropicLLM` | `llm/anthropic_client.py:61` | Native Anthropic SDK — prompt caching, measured USD cost (plan §7.5) | Fallback mode with `LLM_PROVIDER=anthropic`, or a routed op whose `config/ops.py` row names provider `anthropic` |
+| `LangChainLLM` | `llm/langchain_client.py:69` | Wraps a LangChain chat model — `openai`/`google`/`nvidia`/`deepseek`/`openrouter`, each behind its own extra | Fallback mode with `LLM_PROVIDER` set to one of those five, or a routed op naming one of them |
+| `FakeLLM` | `llm/fake.py:24` | Offline double — synthesizes deterministic text/JSON, no network, no cost | `LLM_PROVIDER=fake` (tests, `--offline`), or a routed op naming provider `fake` |
+| `RoutingLLMClient` | `llm/router.py:15` | Not a real backend — holds a `dict[provider, LLMClient]` (one real client per *distinct* provider in use) and dispatches `.complete(op=...)` to the right one per `config/ops.py`'s row for that `op` | Only when **both** `config/providers.py` and `config/ops.py` exist (R1–R3, §5.6) |
+
+**The combined flow**, construction (left, once per process — `factory.py`'s
+`_cached()` memoizes by config key) feeding into prompt/skill sourcing (right,
+every call):
+
+```
+                         CONSTRUCTION                                        EVERY CALL
+                    (factory.llm_client(cfg), cached)                  (wiki/compiler.py or
+                                                                          agent/query.py)
+routing_config.load_routing_config()
+      │
+      ├─ config/providers.py + config/ops.py BOTH exist
+      │     └─► RoutingLLMClient{ops→provider→client}      ─┐
+      │           one AnthropicLLM/LangChainLLM/FakeLLM      │
+      │           per distinct provider named in ops.py      │
+      │                                                       │
+      └─ neither exists (default)                             ├──► self.llm  (one LLMClient,
+            └─► single AnthropicLLM / LangChainLLM / FakeLLM  ┘      held by Compiler or
+                  chosen by LLM_PROVIDER alone                       QueryAgent for its lifetime)
+                                                                             │
+                                                                             │  .complete(op=, system=, prompt=, schema=)
+                                                                             ▼
+   ┌─────────────────────────── system= is sourced BEFORE this call, by the caller ──────────────────────────┐
+   │                                                                                                          │
+   │  wiki/compiler.py, ALWAYS:                          agent/query.py, decided by discover_skills() first: │
+   │    load_prompt("summarize_source"|                                                                      │
+   │                "plan_compile"|                        no skills/ catalog:                               │
+   │                "create_page"|                           load_prompt("answer_query")                     │
+   │                "patch_page")                                                                             │
+   │    ← chains/prompts_loader.py                         catalog present:                                  │
+   │      reads chains/prompts/{name}.md,                    1. SKILL_SELECTION_SYSTEM (literal Python        │
+   │      strips YAML frontmatter,                              string, not a file) — one forced-schema call  │
+   │      returns body only, @cache'd                        2. skills[chosen_name].body, per chosen skill    │
+   │                                                             ← agent/skills.py:discover_skills() reads    │
+   │                                                               skills/*.md, strips frontmatter the same   │
+   │                                                               way, returns {name: Skill(body=...)}       │
+   └──────────────────────────────────────────────────────────────────────────────────────────────────────────┘
+                                                                             │
+                                                                             ▼
+                                                        LLMResponse{text, data, usage} → CostRecord{op=...}
+                                                        appended to wiki/_meta/cost.jsonl (op label only —
+                                                        does not distinguish provider, or skill-selection
+                                                        vs. skill-generation calls; §2.4 gotchas)
+```
+
+Two things worth internalizing from this diagram:
+
+- **Which concrete class runs a given call and which text it runs are decided
+  independently, by different code, at different times.** The left half
+  (`factory.py`) only ever asks "which provider does this `op` use, right
+  now, for this process". The right half (`chains/prompts_loader.py` /
+  `agent/skills.py`) only ever asks "which file's body is `system=`, for this
+  call". Neither side reads the other's decision — a routed `answer_query`
+  call going to `openai` still sources its `system` text from
+  `chains/prompts/answer_query.md` or `skills/*.md` exactly as it would under
+  `anthropic`.
+- **`RoutingLLMClient` never touches a prompt file itself.** It only ever
+  looks at `op` (a string like `"answer_query"`) to decide *which client
+  object* to forward to — the `system=`/`prompt=` strings pass through it
+  unread. This is why adding a new routed provider (§5.6) or a new skill file
+  (§5.8) never requires touching `llm/router.py`.
+
+See §5.1–§5.2 for adding a new `LLMClient` implementation, §5.3 for a new
+`op=` value (compiler side), and §5.8 for a new `skills/` file (query-agent
+side, no code change).
 
 ---
 
@@ -509,33 +753,74 @@ cp config/ops.py.example config/ops.py
    registry and REST reach the same function objects — extend its assertions
    if you add or remove a tool.
 
-### 5.8 Not yet implemented: R4/R5 (roadmap)
+### 5.8 R4/R5: SKILL.md prompts and query-agent skill invocation
 
-**This section documents what is coming next, not what exists today.**
-Design v1.4 §4.8.2 and `implement-plan-v1.4.md` §19 describe two further
-milestones, deliberately deferred out of the R1–R3 change that shipped the
-routing feature above (`HISTORY.md`, 2026-09-05 entry, is explicit that
-`chains/prompts/*.md` and `chains/prompts_loader.py` are untouched by R1–R3):
+Landed 2026-09-07 (`HISTORY.md`); design v1.4 §4.8.2, `implement-plan-v1.4.md`
+§19.4/§19.5. See §2.4 for the conceptual picture (agents vs `chains/prompts/`
+vs `skills/`) and §3.3 for the annotated call-flow diagram; this section is
+the "how to add one" complement to those.
 
 - **R4 — SKILL.md-format prompts.** The five files under
-  `chains/prompts/*.md` gain real YAML frontmatter (`name`, `description`) so
-  each becomes an independently valid [Agent
+  `chains/prompts/*.md` carry real YAML frontmatter (`name`, `description`),
+  making each independently a valid [Agent
   Skill](https://code.claude.com/docs/en/skills), discoverable by an external
   harness (Claude Code, the Claude Agent SDK, an MCP client), not only by
-  this codebase's own `load_prompt()`. The four **compiler** stages keep
-  their deterministic, fixed op→prompt mapping — this is unchanged and is
-  what §4.4's cost-bounded, non-agentic compilation guarantee depends on.
-- **R5 — query-agent skill invocation.** The **query agent only** gains a
-  genuine skill-invocation capability: instead of always loading
-  `answer_query.md`, it is given the discovered skill set and picks (and can
-  chain) among them per question, via a real tool-use round trip with the
-  model. `Settings.agent_skills_dir` (`config.py`, default `./skills`) is
-  already declared for this — reserved, but **not yet read by any code
-  path**.
+  this codebase's own `load_prompt()` (`chains/prompts_loader.py`, which
+  parses and discards the frontmatter — every existing caller still gets the
+  body only). The four **compiler** stages keep their deterministic, fixed
+  op→prompt mapping — unchanged, and still what §4.4's cost-bounded,
+  non-agentic compilation guarantee depends on.
+- **R5 — query-agent skill invocation.** The **query agent only**
+  (`agent/query.py:QueryAgent.answer()`) has genuine skill invocation. After
+  retrieval and context-building (unchanged), it calls
+  `agent/skills.py:discover_skills(settings.agent_skills_dir)` — SKILL.md
+  files under a repo-root `skills/` directory (`AGENT_SKILLS_DIR`, default
+  `./skills`; this repository ships `answer-query` and `compare-concepts`).
+  No skills discovered → the pre-R5 fixed-prompt call, byte-identical. Skills
+  discovered → one `answer_query`-op call, forced by a `schema` naming the
+  discovered skill names (the same forced-tool-call shape the compiler
+  already uses for structured output — no new op, no `LLMClient` protocol
+  change), asks the model to pick one skill or an ordered chain of up to
+  `MAX_SKILL_CHAIN` (3); each chosen skill's frontmatter body becomes the
+  system prompt for one more `answer_query` call, later steps receiving the
+  previous step's output appended to the prompt. A selection that names
+  nothing from the discovered set is retried once, then falls back to the
+  fixed `answer_query` skill (§19.9 item 2) — a malformed or hallucinated
+  choice must not be a hard failure on a user-facing query. Citation
+  resolution (`source_exists`, the load-bearing contract) sits above all of
+  this and is unaffected by which skill produced the text.
+- Tests: `tests/unit/test_prompts_loader.py` (R4),
+  `tests/unit/test_agent_skill_invocation.py` (R5 — discovery, selection,
+  chaining, the fallback path, and the citation contract re-run specifically
+  against a skill-invoked answer). `tests/conftest.py`'s
+  `_isolate_agent_skills_dir` keeps every other test in the suite on the
+  fixed-prompt path, mirroring R1's `_isolate_llm_routing_config`.
 
-When R4/R5 land, this document's §3.2/§3.3 workflow diagrams and §5.3's "how
-to add an op" instructions will need a corresponding update — check
-`docs/HISTORY.md` for the entry before relying on this section as current.
+**Recipe: adding a new query-agent skill (no code change).**
+
+1. Write a new file under `skills/`, e.g. `skills/summarize_topic.md`:
+   ```markdown
+   ---
+   name: summarize-topic
+   description: Give a single-page overview of everything the wiki knows about one topic.
+   ---
+
+   You are summarizing everything a compiled knowledge base contains about one topic...
+   ```
+2. That's it — the next `QueryAgent.answer()` call's `discover_skills()`
+   picks it up automatically; no import, no registration, no restart-required
+   config. Compare to §5.3 ("adding a new compiler/agent **operation**"),
+   which *does* require a code change — the two are different extension
+   points on purpose (§2.4).
+3. To test it deliberately (rather than leaving it to the model's judgment),
+   write a case in `tests/unit/test_agent_skill_invocation.py` using
+   `SequencedLLM` (scripts the selection call's response), following the
+   existing `test_the_models_skill_choice_is_honored` pattern — pass your own
+   `agent_skills_dir=` since the suite's default isolates this away (see the
+   gotcha in §2.4).
+4. `name` must be unique across every file in the directory (`discover_skills`
+   skips, and logs, a duplicate — first one wins, sorted by filename) and
+   present (a file missing `name` is skipped and logged, not fatal).
 
 ---
 
@@ -664,7 +949,7 @@ kept in sync with the code. In summary, grouped:
   `LLM_MODEL`, `LLM_BASE_URL`, `LLM_MAX_TOKENS`, `LLM_TEMPERATURE`.
 - **Multi-provider routing (§5.6):** `LLMWIKI_PROVIDERS_CONFIG`,
   `LLMWIKI_OPS_CONFIG` (paths; default `./config/{providers,ops}.py`),
-  `AGENT_SKILLS_DIR` (reserved for R5, unused today).
+  `AGENT_SKILLS_DIR` (query-agent skill directory, default `./skills`, §5.8).
 - **Deprecated LLM aliases** (still read, removed at a future milestone):
   `ANTHROPIC_API_KEY`, `LLM_DEFAULT_MODEL`, `LLM_BACKEND`.
 - **Observability:** `LOG_LEVEL`; `LANGSMITH_TRACING`, `LANGSMITH_API_KEY`,
@@ -791,4 +1076,4 @@ section.
 
 *This document is maintained as living Markdown alongside the code. Update it
 when a module moves, a layer rule changes, a tool is added or removed from
-the MCP/REST/CLI surface, or when R4/R5 (§5.8) land.*
+the MCP/REST/CLI surface, or when the `skills/` catalog (§5.8) changes.*

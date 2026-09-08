@@ -145,8 +145,13 @@ def test_routing_config_paths_default_under_a_config_directory(monkeypatch, tmp_
     assert not cfg.llm_ops_config.exists()
 
 
-def test_agent_skills_dir_defaults_outside_src(tmp_path) -> None:
-    """Not consumed by any code path yet (lands with R5) - only the default matters here."""
+def test_agent_skills_dir_defaults_outside_src(monkeypatch) -> None:
+    """R5 landed: query-agent skill discovery (agent/skills.py) reads this. Bypasses
+    conftest.py's autouse _isolate_agent_skills_dir on purpose, same reasoning as
+    test_routing_config_paths_default_under_a_config_directory above - that fixture exists
+    to keep the *rest* of the suite off this repository's real skills/ directory, not to
+    hide the true default from the one test that verifies it."""
+    monkeypatch.delenv("AGENT_SKILLS_DIR", raising=False)
     cfg = Settings(_env_file=None)
     assert cfg.agent_skills_dir == Path("skills")
 

@@ -33,6 +33,23 @@ def _isolate_llm_routing_config(monkeypatch, tmp_path) -> None:
     monkeypatch.setenv("LLMWIKI_OPS_CONFIG", str(tmp_path / "unused-ops.py"))
 
 
+@pytest.fixture(autouse=True)
+def _isolate_agent_skills_dir(monkeypatch, tmp_path) -> None:
+    """No test may see this repository's real ``skills/`` directory.
+
+    Same reasoning as ``_isolate_llm_routing_config`` above, for the same
+    reason: ``Settings.agent_skills_dir`` defaults to ``./skills``, resolved
+    against the current working directory regardless of ``_env_file``, and
+    this repository ships one (plan §19.5/§19.9, R5). Left unpinned, every
+    test in this suite that builds a default ``Settings()`` would silently
+    start exercising skill-invocation instead of the fixed-prompt path -
+    exactly the regression R4/R5's exit criteria rule out
+    (``tests/unit/test_agent_skill_invocation.py`` opts back in explicitly,
+    by passing its own ``agent_skills_dir=``).
+    """
+    monkeypatch.setenv("AGENT_SKILLS_DIR", str(tmp_path / "unused-skills"))
+
+
 @pytest.fixture
 def settings(tmp_path) -> Settings:
     """Settings pinned to the offline backends and a per-test storage root."""

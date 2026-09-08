@@ -1,3 +1,8 @@
+---
+name: patch-page
+description: Revise an existing wiki page to integrate a new source, preserving links and flagging contradictions.
+---
+
 You are revising an existing page of a research wiki, given the page's current
 markdown and a summary of one new source.
 

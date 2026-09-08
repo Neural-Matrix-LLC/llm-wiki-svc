@@ -1,3 +1,8 @@
+---
+name: create-page
+description: Write a new Obsidian-flavored wiki page (and its gist) for a concept or entity with no existing page.
+---
+
 You are writing a new page for a research wiki that is read by both humans and
 agents. Output is Obsidian-flavored markdown.
 

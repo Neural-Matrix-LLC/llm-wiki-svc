@@ -4,11 +4,13 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Current State
 
-Phase 0 is **implemented**. `pytest` runs 207 unit tests with no network access
-(plus 5 skipped where a provider extra is absent); `scripts/smoke_flow.py
---offline` walks the whole flow end to end with fake adapters. Integration tests
-exist but have never run — they need Cloudflare and Anthropic credentials that do
-not exist yet.
+Phase 0 is **implemented**, plus plan-v1.4 §19's R1–R5 (multi-provider/per-op
+LLM routing, SKILL.md-format prompts, query-agent skill invocation). `pytest`
+runs 291 unit tests with no network access (a handful skip when a provider
+extra is absent, environment-dependent); `scripts/smoke_flow.py --offline`
+walks the whole flow end to end with fake adapters. Integration tests exist but
+have never run — they need Cloudflare and Anthropic credentials that do not
+exist yet.
 
 The LLM layer is multi-provider: `LLM_PROVIDER` selects `anthropic` (native
 adapter — prompt caching, measured USD cost), `openai`, `google`, `nvidia`,

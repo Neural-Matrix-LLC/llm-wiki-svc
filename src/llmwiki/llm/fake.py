@@ -56,10 +56,17 @@ class FakeLLM:
         if op in self.responses:
             data = self.responses[op]
             return LLMResponse(text=json.dumps(data), data=data, usage=usage)
-        data = self._synthesize(op, prompt)
+        data = self._synthesize(op, prompt, schema)
         return LLMResponse(text=data.get("text", json.dumps(data)), data=data, usage=usage)
 
-    def _synthesize(self, op: str, prompt: str) -> dict:
+    def _synthesize(self, op: str, prompt: str, schema: dict | None = None) -> dict:
+        # Query-agent skill selection (plan §19.5, R5) reuses the answer_query
+        # op with its own schema shape rather than a distinct op - detected
+        # here the same way, by looking for the "skills" property, since this
+        # double has no other signal to tell the two calls apart.
+        if op == "answer_query" and schema and "skills" in schema.get("properties", {}):
+            enum = schema["properties"]["skills"].get("items", {}).get("enum", [])
+            return {"skills": enum[:1]}
         terms = self._salient_terms(prompt)
         if op == "summarize_source":
             return {

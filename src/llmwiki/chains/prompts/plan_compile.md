@@ -1,3 +1,8 @@
+---
+name: plan-compile
+description: Decide the smallest set of page mutations (create, patch, backlink, flag) needed to integrate one new source into the wiki.
+---
+
 You are the planning stage of an incremental wiki compiler.
 
 You receive a summary of one new source plus one-line gists of the wiki pages

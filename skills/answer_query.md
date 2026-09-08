@@ -1,6 +1,6 @@
 ---
 name: answer-query
-description: Answer a research question from retrieved wiki pages and raw chunks, with citations, or say plainly what is missing.
+description: Answer a research question directly from retrieved wiki pages and raw chunks, with citations. The default choice for a plain, single-topic question.
 ---
 
 You are answering a research question from a compiled knowledge base.

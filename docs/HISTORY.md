@@ -5,6 +5,126 @@ considered complete, per `CLAUDE.md`.
 
 ---
 
+## 2026-09-07 — SKILL.md-format prompts and query-agent skill invocation (R4-R5)
+
+**Goal.** Execute the two milestones `implement-plan-v1.4.md` §19.6 held back
+from the 2026-09-05 R1-R3 change: give the five `chains/prompts/*.md` files
+real Agent Skill frontmatter (R4), and give the query agent - only the query
+agent, not the compiler - genuine runtime skill selection over that discovered
+skill set (R5). Design in `llmwiki-KB-design_v1.4.md` §4.8.2.
+
+**Implementation detail.**
+
+*R4 - frontmatter.* All five prompt files
+(`summarize_source.md`/`plan_compile.md`/`create_page.md`/`patch_page.md`/
+`answer_query.md`) gained a `---` YAML block naming `name` (kebab-case,
+matching the filename) and one-line `description`. `chains/prompts_loader.py`
+now parses each file with `frontmatter.loads()` (already a hard dependency,
+used identically by `wiki/pages.py`) and returns `.content.strip()` - the
+`@cache`d body every existing caller already expected. A file with no
+frontmatter still loads (`frontmatter.loads` on plain text returns empty
+metadata and the whole text as content), which is what keeps this a
+non-breaking, back-compatible change to a loader four call sites depend on.
+
+*R5 - query-agent skill invocation.* New `agent/skills.py`:
+`discover_skills(skills_dir)` scans `*.md` under `Settings.agent_skills_dir`
+(`AGENT_SKILLS_DIR`, default `./skills`, added inert in R1-R3) and returns a
+`dict[str, Skill]` keyed by frontmatter `name`. Unlike `routing_config.py`'s
+startup-fatal validation, a malformed or unnamed file is logged and skipped,
+not fatal - the query agent must keep answering even if one skill file is
+broken. `agent/query.py:QueryAgent.answer()` calls it after retrieval and
+context-building (both unchanged): no skills discovered runs the pre-R5 single
+fixed-prompt call (`_answer_with_fixed_prompt`), byte-identical to before;
+skills discovered calls `_answer_with_skills`, which:
+
+1. Asks the model to choose a skill or ordered chain of up to `MAX_SKILL_CHAIN`
+   (3) skills, via one `answer_query`-op call forced by a `schema` whose
+   `skills` property enumerates the discovered names - the same forced-tool-
+   call mechanism the compiler already uses for structured output
+   (`SUMMARY_SCHEMA`/`PLAN_SCHEMA`/`PAGE_SCHEMA` in `wiki/compiler.py`), so
+   this needed no change to `LLMClient`'s protocol.
+2. Validates the response against the discovered set; a choice naming nothing
+   valid is retried once (`SKILL_SELECTION_ATTEMPTS = 2`), then falls back to
+   the fixed skill (design v1.4 §4.8.2, plan §19.9 item 2's defined failure
+   mode) - a malformed tool call or a hallucinated skill name must not be a
+   hard failure on a user-facing query.
+3. Runs the chosen skill(s) in order, each as one more `answer_query`-op call
+   whose `system` is that skill's frontmatter body; a step after the first
+   also receives the previous step's output appended to its prompt. The final
+   step's text is the answer.
+
+Citation resolution (`source_exists`, building `citations` from the retrieved
+wiki/chunk hits) sits **above** all of this in `answer()`, unchanged - it does
+not know or care which skill, or how many calls, produced the text.
+
+**Related files.** `src/llmwiki/chains/prompts/*.md` (all five),
+`src/llmwiki/chains/prompts_loader.py`, `src/llmwiki/agent/skills.py` (new),
+`src/llmwiki/agent/query.py`, `src/llmwiki/llm/fake.py` (`_synthesize` gained a
+branch recognizing the skill-selection `schema` shape, so offline runs -
+`scripts/smoke_flow.py --offline` included - exercise the real control flow),
+`skills/answer_query.md` (new), `skills/compare_concepts.md` (new),
+`tests/conftest.py`, `tests/unit/test_config.py`, `.env.example` (no variable
+change; `AGENT_SKILLS_DIR`'s comment updated - it is now read),
+`docs/implement-plan-v1.4.md` (§19.6/§19.7.2/§19.7.3 status updated to landed),
+`docs/llm-wiki-technical-document.md` (§5.8 rewritten from roadmap to current
+state), `CLAUDE.md` (test count).
+
+**Three deliberate deviations from the letter of the plan**, each recorded in
+`implement-plan-v1.4.md` §19.6 as well:
+
+1. Skill selection and per-step generation reuse the `answer_query` op rather
+   than a new op. §19.5 item 2 explicitly allows either "the `answer_query`
+   call (or a preceding call)"; reusing it keeps `KNOWN_OPS`, `config/ops.py`
+   and the AST drift guard (`test_routing_config.py::
+   test_known_ops_matches_every_real_call_site`) untouched. Trade-off: every
+   skill-related call shares one cost-ledger op label instead of each getting
+   its own - acceptable for now, and exactly the kind of granularity §19.9
+   item 3 already left open for LangSmith.
+2. A real `skills/` directory ships, populated with two skills
+   (`answer-query` - the same rules as `chains/prompts/answer_query.md` - and
+   `compare-concepts`, for comparison questions), rather than landing inert.
+   §19.9 item 1 settled the *location*, not a promise to leave it empty; §4.8.2
+   frames R5 as a real behaviour change to the query agent, the same posture
+   R3 already took removing `COMPILE_EXECUTOR_MODEL`.
+3. `tests/conftest.py` gained `_isolate_agent_skills_dir` (mirrors R1's
+   `_isolate_llm_routing_config`): an autouse fixture pointing
+   `AGENT_SKILLS_DIR` at a guaranteed-absent path so every test in the suite
+   *except* the new `test_agent_skill_invocation.py` (which opts back in
+   explicitly) keeps exercising the pre-R5 fixed-prompt path. This is what
+   keeps `test_agent.py` - including the load-bearing
+   `test_every_citation_resolves_to_a_real_raw_object` - passing completely
+   unmodified, per the R5 exit criteria.
+
+**Test coverage.** Full suite: 289 passed, 1 skipped, 6 deselected
+(integration, opt-in), plus the one pre-existing unrelated failure already
+noted in the 2026-09-07 technical-document entry below
+(`test_extractors.py::test_fetch_video_title_reads_oembed` - present before
+this change, untouched by it). `ruff check .` and `mypy` both clean.
+`python scripts/smoke_flow.py --offline` passes end to end, now actually
+exercising skill discovery/selection against the shipped `skills/` catalog.
+
+- **Rewritten, not obsoleted:**
+  `tests/unit/test_config.py::test_agent_skills_dir_defaults_outside_src` now
+  `monkeypatch.delenv("AGENT_SKILLS_DIR")` before building `Settings`, bypassing
+  the new isolation fixture on purpose (same reasoning as
+  `test_routing_config_paths_default_under_a_config_directory`), and its
+  docstring no longer claims the setting is unread.
+- **New:** `tests/unit/test_prompts_loader.py` (5 tests) - every real prompt
+  file's frontmatter round-trips (`name`/`description`), `load_prompt()`
+  strips it and returns exactly `frontmatter.loads(...).content.strip()`, a
+  file with no frontmatter still loads, a missing prompt still names the file.
+  `tests/unit/test_agent_skill_invocation.py` (11 tests) - `discover_skills()`
+  finds every frontmatter'd file / returns empty for an absent directory /
+  skips an unnamed file / skips a duplicate name; `QueryAgent.answer()` with
+  no discoverable skills makes exactly one fixed-prompt call; the model's
+  skill choice is honored (asserted on the recorded `system` prompt of the
+  generation call); a two-skill chain carries the first step's output into the
+  second step's prompt; an invalid choice retries once then falls back to the
+  fixed skill; and the citation-resolution contract re-run specifically
+  against a skill-invoked answer.
+
+---
+
 ## 2026-09-07 — New developer-support technical document
 
 **Goal.** Give a developer joining this repository (to support, extend, bug

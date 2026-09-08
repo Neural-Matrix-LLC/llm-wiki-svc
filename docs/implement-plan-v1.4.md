@@ -1144,14 +1144,28 @@ dependency on N-anything:
 | **R1** | `config/` loader + validation | `[M]` | `config/providers.py`/`config/ops.py` absent → byte-identical behaviour to pre-R1 (existing suite green, unmodified). Present → active-set resolution, missing/duplicate/inactive-provider op validation, all with named `RuntimeError`s, each covered by a test | **Landed 2026-09-05** |
 | **R2** | `RoutingLLMClient` + protocol `Optional` change | `[M]` | `llm/base.py` signature updated; `AnthropicLLM`/`LangChainLLM`/`FakeLLM` gain `default_max_tokens`/`default_temperature`; fallback-mode output is unchanged for a fixed `Settings` (regression test, §19.8) | **Landed 2026-09-05** |
 | **R3** | Call-site simplification + `COMPILE_EXECUTOR_MODEL` removal | `[S]` | `query.py`/`compiler.py`'s five calls drop `model=`/`max_tokens=`/`temperature=`; `Settings.compile_executor_model` and its `.env.example` line removed; `.env.example` gains the `config/` explanation | **Landed 2026-09-05** |
-| **R4** | SKILL.md frontmatter + `load_prompt` parsing | `[S]` | All 5 prompt files get frontmatter; `load_prompt()` returns body only; compiler call sites and their tests are unchanged | **Deliberately deferred** — lands with R5, not with R1–R3, per explicit instruction: `chains/prompts/*.md` stays untouched until then |
-| **R5** | Query-agent skill invocation | `[L]` | `QueryAgent.answer()` discovers and can select among skills; citation-resolution contract test still passes unmodified; new tests per §19.8 | Not started |
+| **R4** | SKILL.md frontmatter + `load_prompt` parsing | `[S]` | All 5 prompt files get frontmatter; `load_prompt()` returns body only; compiler call sites and their tests are unchanged | **Landed 2026-09-07** |
+| **R5** | Query-agent skill invocation | `[L]` | `QueryAgent.answer()` discovers and can select among skills; citation-resolution contract test still passes unmodified; new tests per §19.8 | **Landed 2026-09-07** |
 
 R1–R3 landed together 2026-09-05 (§13's "must pass all existing tests" rule held: the full suite passed
 unmodified, plus new tests). R4 was originally planned to land alongside R1–R3 but was explicitly held
 back to land with R5 instead, keeping `chains/prompts/*.md` untouched until the query-agent skill work
-is actually ready to consume real frontmatter. R5 is materially larger than R4 (a new agent capability)
-and should still be its own review when the two land.
+is actually ready to consume real frontmatter. R4 and R5 landed together 2026-09-07, with three
+deviations from the letter of §19.4/§19.5 worth recording (full detail in `HISTORY.md`):
+
+1. **Skill selection and per-step generation reuse the `answer_query` op**, not a new op. §19.5 item 2
+   explicitly allows either "the `answer_query` call (or a preceding call)"; reusing it keeps `KNOWN_OPS`,
+   `config/ops.py` and the AST drift guard (§19.2 step 3) untouched, at the cost of every skill-related
+   call sharing one cost-ledger op label rather than each getting its own.
+2. **A real `skills/` directory ships**, populated with two skills (`answer-query`, `compare-concepts`),
+   rather than landing inert. §19.9 item 1's directory decision is a location, not a promise to leave it
+   empty; per §4.8.2, R5 is explicitly a real behaviour change to the query agent (the same posture R3
+   already took removing `COMPILE_EXECUTOR_MODEL`), so shipping a populated default is what makes that
+   true rather than aspirational.
+3. **`tests/conftest.py` gained `_isolate_agent_skills_dir`**, mirroring R1's `_isolate_llm_routing_config`,
+   and `test_config.py::test_agent_skills_dir_defaults_outside_src` was updated to bypass it — the same
+   pattern §19.7.2 already used for the routing-config default test, now needed because item 2 above
+   makes `./skills` a real, populated directory in this checkout.
 
 ### 19.7 Testing plan
 
@@ -1172,6 +1186,7 @@ plan's own test impact is itself worth a paper trail.)*
 | `tests/unit/test_compiler_behaviour.py::test_llm_max_tokens_and_temperature_reach_every_stage` | **Rewritten** → `test_compiler_leaves_model_and_sampling_params_to_the_configured_adapter`: same change, across all four compiler-stage calls; doubles as the `COMPILE_EXECUTOR_MODEL` regression check (`create_page`/`patch_page` pass no `model=` either) | Same reason, plus §19.3's `COMPILE_EXECUTOR_MODEL` removal |
 | `llm/fake.py::FakeLLM.complete` and `tests/doubles.py::ScriptedLLM.complete` | **Updated**: record `max_tokens`/`temperature` exactly as passed (`None` included) rather than pre-resolving to `2048`/`1.0` before appending to `.calls` | Needed for the two rewrites above to actually observe "nothing was passed" — a double that silently fills in a default would hide the very regression these tests exist to catch |
 | `tests/unit/test_config.py` — a test asserting `Settings.compile_executor_model`'s default | *(planned, not needed)* | No such test existed — the field had zero test coverage, so its removal needed no deletion |
+| `tests/unit/test_config.py::test_agent_skills_dir_defaults_outside_src` | **Rewritten** (R5, 2026-09-07): now `monkeypatch.delenv("AGENT_SKILLS_DIR")` before building `Settings`, and its docstring no longer says "not consumed by any code path yet" | R5's populated `skills/` directory means `conftest.py`'s new `_isolate_agent_skills_dir` autouse fixture now sets that env var for every other test in the suite; this one test verifies the true default and must bypass it, exactly as `test_routing_config_paths_default_under_a_config_directory` already does for `LLMWIKI_PROVIDERS_CONFIG`/`LLMWIKI_OPS_CONFIG` |
 
 **19.7.3 New tests announced for new code paths.** *(Updated to the actual filenames landed
 2026-09-05.)*
@@ -1184,8 +1199,8 @@ plan's own test impact is itself worth a paper trail.)*
 | R3 | (see §19.7.2 rewrites above) | |
 | R3 | `tests/unit/test_factory.py` (extended) | Routed mode builds a working `RoutingLLMClient` end to end; a provider named in `config/providers.py` but referenced by no `OPS` row is never constructed; absent routing config leaves the fallback path (a plain `FakeLLM`, not a `RoutingLLMClient`) untouched |
 | R3 | `tests/unit/test_config.py` (extended) | The two new config paths default outside `src/llmwiki` and are absent in this repository; `agent_skills_dir`'s default; `compile_executor_model` no longer exists |
-| R4 | `test_prompts_loader.py` (extends `prompts_loader.py`'s current coverage, or new file) — **not yet landed, deferred with R4 itself** | Frontmatter is parsed and stripped; a prompt file with no frontmatter still loads (back-compat during migration); `name`/`description` round-trip for external SKILL.md consumption |
-| R5 | `test_agent_skill_invocation.py` — **not yet landed** | Skill discovery finds all frontmatter'd prompts; the model's skill choice is honored; a chained multi-skill turn is handled; `test_every_citation_resolves_to_a_real_raw_object`-equivalent assertion re-run against skill-invoked answers specifically (not just the pre-existing fixed-prompt path) |
+| R4 | `test_prompts_loader.py` (new file, landed 2026-09-07) | Frontmatter is parsed and stripped; a prompt file with no frontmatter still loads (back-compat during migration); `name`/`description` round-trip for external SKILL.md consumption; a missing prompt still names the file |
+| R5 | `test_agent_skill_invocation.py` (new file, landed 2026-09-07) | `discover_skills()`: finds every frontmatter'd file, empty for an absent directory, skips an unnamed or duplicate-named file; `QueryAgent.answer()`: no discoverable skills is byte-identical to the pre-R5 fixed-prompt call, the model's skill choice is honored, a chained multi-skill turn carries the previous step's output forward, an invalid/hallucinated choice retries once then falls back to the fixed `answer_query` skill (§19.9 item 2), and `test_every_citation_resolves_to_a_real_raw_object`'s assertion re-run specifically against a skill-invoked answer |
 
 **19.7.4 Documentation of added/removed tests.** Each of R1–R5 gets a `HISTORY.md` entry (goal, root
 cause where applicable, implementation detail, related files, test coverage — per `CLAUDE.md`), and
