@@ -51,6 +51,33 @@ def test_mcp_tools_delegate_to_tools_py(monkeypatch) -> None:
         assert f"tools.{name}(" in source, f"MCP tool {name} does not call tools.{name}"
 
 
+@pytest.mark.asyncio
+async def test_every_transport_can_ingest_all_five_source_kinds() -> None:
+    """PDF, blog URL, YouTube URL, pure text and text file, on every surface.
+
+    A source kind reachable from one transport but not the others is the way
+    this surface drifts: the parameters are the contract, not the tool count.
+    """
+    from llmwiki.api.routes import IngestRequest
+    from llmwiki.cli import build_parser
+
+    core = inspect.signature(tools.ingest_source).parameters
+    assert {"url", "file", "filename", "mime", "text"} <= set(core)
+
+    assert {"url", "text"} <= set(IngestRequest.model_fields)  # POST /ingest
+    upload = inspect.signature(__import__("llmwiki.api.routes", fromlist=["upload"]).upload)
+    assert "file" in upload.parameters  # POST /upload carries the file kinds
+
+    server = mcp_server.build_server()
+    ingest_tool = {tool.name: tool for tool in await server.list_tools()}["ingest_source"]
+    assert {"url", "text"} <= set(ingest_tool.parameters["properties"])
+
+    args = build_parser().parse_args(["ingest", "--text", "pasted"])
+    assert args.text == "pasted"
+    for flag in ("--url", "--file"):
+        assert build_parser().parse_args(["ingest", flag, "x"])
+
+
 def test_transport_layers_share_one_implementation() -> None:
     """REST and MCP must reach the same function object, or they will drift."""
     from llmwiki.api import routes

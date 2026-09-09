@@ -20,7 +20,7 @@ class TextExtractor:
         text = normalize(text)
         if not text.strip():
             raise ExtractionError(f"no text content in {meta.source_id}")
-        title = meta.title or _first_line(text)
+        title = meta.title or first_line(text)
         return ExtractedDoc(
             source_id=meta.source_id, title=title, text=text, modality=meta.modality, url=meta.url
         )
@@ -42,7 +42,8 @@ def normalize(text: str) -> str:
     return "\n".join(out).strip() + "\n"
 
 
-def _first_line(text: str) -> str:
+def first_line(text: str) -> str:
+    """First non-empty line, heading markers stripped - a usable title for loose text."""
     for line in text.splitlines():
         stripped = line.strip().lstrip("#").strip()
         if stripped:

@@ -63,6 +63,33 @@ def test_ingest_rejects_a_malformed_body(client) -> None:
     assert response.status_code == 422
 
 
+def test_ingest_rejects_a_body_naming_both_a_url_and_text(client) -> None:
+    response = client.post(
+        "/ingest", json={"url": "https://example.org/a", "text": "pasted"}, headers=AUTH
+    )
+    assert response.status_code == 422
+
+
+def test_ingest_accepts_pure_text_and_reaches_done(client) -> None:
+    """Text with no file and no URL is a first-class source over REST."""
+    response = client.post(
+        "/ingest",
+        json={"text": "# Retrieval\n\nGrounding answers in retrieved documents.\n"},
+        headers=AUTH,
+    )
+
+    assert response.status_code == 200, response.text
+    source_id = response.json()["source_id"]
+    assert len(source_id) == 16
+    # TestClient runs background tasks before returning, so the poll is settled.
+    status = client.get(f"/sources/{source_id}")
+    assert status.json()["state"] == "done", status.json()
+
+
+def test_ingest_text_requires_a_token(client) -> None:
+    assert client.post("/ingest", json={"text": "pasted"}).status_code == 401
+
+
 def test_upload_captures_and_returns_a_source_ref(client) -> None:
     response = client.post(
         "/upload",

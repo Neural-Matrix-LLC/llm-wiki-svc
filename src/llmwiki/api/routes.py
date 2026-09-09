@@ -10,7 +10,7 @@ import secrets
 from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, UploadFile
 from fastapi.responses import PlainTextResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
-from pydantic import BaseModel
+from pydantic import BaseModel, model_validator
 
 from llmwiki import tools
 from llmwiki.config import settings
@@ -34,10 +34,18 @@ def require_token(
 
 
 class IngestRequest(BaseModel):
-    """Body of ``POST /ingest``."""
+    """Body of ``POST /ingest``: either a URL to fetch or text to store verbatim."""
 
-    url: str
+    url: str | None = None
+    text: str | None = None
     title: str = ""
+
+    @model_validator(mode="after")
+    def _exactly_one_source(self) -> IngestRequest:
+        """Reject a body naming both or neither, so the 422 comes from validation."""
+        if (self.url is None) == (self.text is None):
+            raise ValueError("provide exactly one of url or text")
+        return self
 
 
 @router.get("/healthz")
@@ -48,8 +56,13 @@ def healthz() -> dict:
 
 @router.post("/ingest", response_model=SourceRef, dependencies=[Depends(require_token)])
 def ingest(request: IngestRequest, background: BackgroundTasks) -> SourceRef:
-    """Capture a URL and queue it. Returns before compilation runs."""
-    ref = tools.ingest_source(url=request.url, title=request.title)
+    """Capture a URL or a block of text and queue it. Returns before compilation runs.
+
+    ``{"url": ...}`` covers a blog post, a YouTube video and a direct link to a
+    PDF; ``{"text": ...}`` stores the string itself as the immutable source.
+    Files go to ``POST /upload`` instead.
+    """
+    ref = tools.ingest_source(url=request.url, text=request.text, title=request.title)
     if not ref.duplicate:
         background.add_task(tools.process_source, ref.source_id)
     return ref
@@ -61,7 +74,10 @@ async def upload(
     file: UploadFile = File(...),
     title: str = Form(""),
 ) -> SourceRef:
-    """Capture an uploaded file (PDF, text, image)."""
+    """Capture an uploaded file: a PDF, a ``.txt``/``.md`` text file, HTML or an image.
+
+    The modality comes from the content type and filename, not from the caller.
+    """
     data = await file.read()
     ref = tools.ingest_source(
         file=data,

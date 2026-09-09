@@ -5,6 +5,129 @@ considered complete, per `CLAUDE.md`.
 
 ---
 
+## 2026-09-08 — Five source kinds, end to end: pure text, and a URL's real content type
+
+**Goal.** Make the five capture kinds the design names — a PDF file, a blog
+URL, a YouTube URL, pure text, and a text file — all actually reachable, and
+reachable from *every* transport (REST, MCP, CLI, Python).
+
+**Root cause / gap analysis.** Four of the five already worked. Auditing the
+path turned up three real defects:
+
+1. **Pure text had no path in at all.** `IngestPipeline.capture()` accepted
+   only `url=` or `file=`; a caller with a paragraph in hand had to fabricate
+   a filename and mime and pretend it was an upload. Nothing in `tools.py`,
+   the REST body, the MCP tool or the CLI took text.
+2. **A URL that serves a PDF was extracted as HTML.** `detect_modality` ran
+   once, on the URL alone, *before* the fetch. `https://arxiv.org/pdf/...`
+   has no `.pdf`-bearing mime at that point, so it hit the final
+   `if url: return "web"` branch and went to trafilatura, which found no
+   readable content and failed the source. A blog link and a paper link are
+   the same input shape — only the response distinguishes them.
+3. **YouTube detection recognized two URL shapes.** The substring test
+   (`"youtube.com/watch" in url or "youtu.be/" in url`) missed `/shorts/`,
+   `/live/`, `/embed/` and `m.youtube.com`, all of which have transcripts.
+
+A fourth, smaller one fell out of the restructuring: the duplicate check ran
+*after* the network fetch, so recapturing a known URL paid for a request
+whose bytes were then thrown away.
+
+**Implementation detail.**
+
+*Capture (`pipeline/ingest.py`).* `capture()` gained `text: str | None`, and
+input validation moved into a new `_source_id()` static method that requires
+**exactly one** of `url`/`file`/`text` (naming what it got in the error),
+rejects empty ones, and content-addresses the source. Because the id is now
+known before anything is resolved, the `raw_meta` duplicate check moved ahead
+of the fetch. For a URL, `detect_modality` is called twice: once on the
+declared mime to choose the fetch strategy (transcript vs. HTTP GET), then
+again on the content type the server actually returned, which is what routes
+an arXiv link to `PdfExtractor`. Pasted text is stored verbatim as
+`original.txt` with mime `text/plain`, and `_title_from_source` now fills
+`meta.title` from its first non-empty line — `raw/` is append-only, so the
+title has to be right at capture.
+
+*Detection (`extractors/base.py`).* `detect_modality` now strips any
+`; charset=…` parameter, treats non-HTML `text/*` as `text` (a served `.md`
+file is a text source; boilerplate removal would gut it), and keeps `web` as
+the fallback only for a URL with an unrecognized content type. YouTube
+matching moved to `extractors/youtube.py:is_youtube_url()`, which requires a
+YouTube **host and** an extractable 11-character id — so `/shorts/`,
+`/live/`, `/embed/`, `youtube-nocookie.com` and `m.` hosts are transcripts,
+while a channel or playlist page falls through to the web extractor instead
+of failing inside `fetch_transcript`. `_VIDEO_ID` gained `/shorts/`, `/live/`
+and `/v/`.
+
+*Transports.* `tools.ingest_source()`/`ingest_now()` pass `text=` through.
+`POST /ingest`'s `IngestRequest` now has optional `url` and `text` with a
+`model_validator` requiring exactly one — a body naming both or neither is a
+422 from validation, so the existing malformed-body test still holds. The MCP
+`ingest_source` tool takes `url=None, text=None`; still six tools, so the
+canonical-surface test is untouched. The CLI's mutually-exclusive group
+gained `--text` (with `--text -` reading stdin).
+
+`extractors/text.py:_first_line` became public `first_line` — capture and the
+extractor now derive a title the same way, rather than two spellings of it.
+
+**Related files.** `src/llmwiki/pipeline/ingest.py`,
+`src/llmwiki/extractors/base.py`, `src/llmwiki/extractors/youtube.py`,
+`src/llmwiki/extractors/text.py`, `src/llmwiki/tools.py`,
+`src/llmwiki/api/routes.py`, `src/llmwiki/mcp/server.py`,
+`src/llmwiki/cli.py`, `docs/llm-wiki-technical-document.md` (new §3.1.1 plus
+§1/§3.1/§5.4/§6.1–6.4/§8), `README.md`, `CLAUDE.md`.
+
+**No new environment variables**, so `.env.example` is unchanged.
+
+**Test coverage.**
+
+*Added* — `tests/unit/test_ingest.py`: `test_capture_stores_pasted_text_as_its_own_source`,
+`test_pasted_text_takes_its_title_from_the_first_line`,
+`test_identical_text_is_deduplicated`, `test_empty_text_is_rejected_at_capture`,
+`test_pasted_text_runs_the_full_flow_and_reaches_done`,
+`test_a_text_file_upload_is_extracted_as_text`,
+`test_a_url_that_serves_a_pdf_is_captured_as_a_pdf`,
+`test_a_blog_url_is_still_captured_as_a_web_page`,
+`test_a_duplicate_url_is_not_fetched_again`.
+`tests/unit/test_extractors.py`: `test_is_youtube_url` (6 cases) and 10 new
+`test_modality_detection` cases (PDF-by-content-type, charset-suffixed mime,
+served text files, shorts/live/m. hosts, a channel page).
+`tests/unit/test_routes.py`: `test_ingest_accepts_pure_text_and_reaches_done`,
+`test_ingest_rejects_a_body_naming_both_a_url_and_text`,
+`test_ingest_text_requires_a_token`.
+`tests/unit/test_tools_and_mcp.py`:
+`test_every_transport_can_ingest_all_five_source_kinds` — the parity guard
+for requirement 2, asserting the core signature, the REST model fields, the
+`/upload` route, the MCP tool's JSON schema and the CLI flags all reach every
+kind. A source kind reachable from one transport but not the others is how
+this surface drifts.
+
+*Renamed* — `test_capture_requires_a_url_or_a_file` →
+`test_capture_requires_exactly_one_input`, now also covering the
+two-inputs-supplied case.
+
+*Removed* — none; no test became obsolete.
+
+*Repaired, pre-existing and unrelated* —
+`test_fetch_video_title_reads_oembed` had been failing since before this
+change (documented as such in the technical document §8). Its fake
+`httpx.Response(200, json=…)` carried no `request`, so
+`raise_for_status()` raised `RuntimeError`, `fetch_video_title` swallowed it
+as a failed lookup and returned `""`. Fixed by setting
+`request=httpx.Request("GET", url)` on the fake response. The production code
+was never wrong.
+
+**Results.** `pytest` — 315 passed, 5 skipped (provider extras absent), 6
+integration deselected, **0 failed** (was 291 passed + 1 failed).
+`ruff check .` clean, `mypy` clean across 56 source files,
+`scripts/smoke_flow.py --offline` SMOKE PASS. Manually exercised the new path
+end to end: `llmwiki --offline ingest --text -` from stdin and
+`--text "…" --title "…"` both reach `done`, with `meta.modality="text"` and
+the first line as the title. The URL-serves-a-PDF and blog-URL paths are
+covered by monkeypatched-fetch unit tests rather than live requests; neither
+has been run against the real network.
+
+---
+
 ## 2026-09-07 — SKILL.md-format prompts and query-agent skill invocation (R4-R5)
 
 **Goal.** Execute the two milestones `implement-plan-v1.4.md` §19.6 held back

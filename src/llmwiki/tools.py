@@ -93,10 +93,18 @@ def ingest_source(
     filename: str | None = None,
     mime: str = "",
     title: str = "",
+    text: str | None = None,
     cfg: Settings | None = None,
 ) -> SourceRef:
-    """Capture a source. Returns immediately; compilation happens in the background."""
-    return _pipeline(cfg).capture(url=url, file=file, filename=filename, mime=mime, title=title)
+    """Capture a source. Returns immediately; compilation happens in the background.
+
+    Exactly one of ``url`` (blog post, YouTube video, or a direct link to a
+    PDF), ``file`` (uploaded PDF or text file) or ``text`` (a string stored
+    verbatim). The modality is detected, never declared by the caller.
+    """
+    return _pipeline(cfg).capture(
+        url=url, file=file, filename=filename, mime=mime, title=title, text=text
+    )
 
 
 def compile_update(
@@ -140,6 +148,7 @@ def ingest_now(
     filename: str | None = None,
     mime: str = "",
     title: str = "",
+    text: str | None = None,
     cfg: Settings | None = None,
 ) -> SourceStatus:
     """Capture *and* process one source synchronously.
@@ -148,7 +157,7 @@ def ingest_now(
     uses ``ingest_source`` plus a background task instead.
     """
     return _pipeline(cfg).ingest_now(
-        url=url, file=file, filename=filename, mime=mime, title=title
+        url=url, file=file, filename=filename, mime=mime, title=title, text=text
     )
 
 

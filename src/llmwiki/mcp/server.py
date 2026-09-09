@@ -30,9 +30,15 @@ def build_server() -> Any:
         return tools.get_page(slug).model_dump(mode="json")
 
     @mcp.tool()
-    def ingest_source(url: str, title: str = "") -> dict:
-        """Capture a URL into the knowledge base. Compilation continues in the background."""
-        ref = tools.ingest_source(url=url, title=title)
+    def ingest_source(url: str | None = None, text: str | None = None, title: str = "") -> dict:
+        """Capture a source into the knowledge base, then compile it.
+
+        Pass exactly one of: `url` - a blog post, a YouTube video, or a direct
+        link to a PDF, fetched and stored as captured; or `text` - a block of
+        text stored verbatim as its own source. Files are uploaded over the
+        REST API's /upload instead. Returns the source_id to poll or cite.
+        """
+        ref = tools.ingest_source(url=url, text=text, title=title)
         if not ref.duplicate:
             tools.process_source(ref.source_id)
         return ref.model_dump(mode="json")

@@ -19,7 +19,14 @@ from llmwiki.config import Settings
 from llmwiki.embedding.base import Embedder
 from llmwiki.extractors.base import ExtractionError, detect_modality, get_extractor
 from llmwiki.llm.base import LLMClient
-from llmwiki.models.source import ExtractedDoc, SourceMeta, SourceRef, SourceState, SourceStatus
+from llmwiki.models.source import (
+    ExtractedDoc,
+    Modality,
+    SourceMeta,
+    SourceRef,
+    SourceState,
+    SourceStatus,
+)
 from llmwiki.pipeline.chunker import chunk_document
 from llmwiki.storage.base import ObjectNotFound, ObjectStore
 from llmwiki.storage.layout import (
@@ -64,25 +71,42 @@ class IngestPipeline:
         filename: str | None = None,
         mime: str = "",
         title: str = "",
+        text: str | None = None,
     ) -> SourceRef:
-        """Write the immutable raw objects. Returns immediately; nothing is compiled yet."""
-        if not url and file is None:
-            raise ValueError("provide either url or file")
+        """Write the immutable raw objects. Returns immediately; nothing is compiled yet.
 
-        if file is not None:
-            source_id = source_id_for_bytes(file)
-            data = file
-            modality = detect_modality(mime, filename, None)
-            resolved_mime = mime or "application/octet-stream"
-        else:
-            assert url is not None
-            source_id = source_id_for_url(url)
-            modality = detect_modality(mime, filename, url)
-            data, resolved_mime = self._fetch(url, modality)
+        Exactly one of three inputs names the source, which between them cover
+        the five capture kinds:
 
+        * ``url`` - a blog post, a YouTube video, or a direct link to a PDF.
+          Which one it is comes from the URL shape and the served content type,
+          not from the caller (see :func:`detect_modality`).
+        * ``file`` - uploaded bytes: a PDF, or a ``.txt``/``.md`` text file.
+        * ``text`` - a string pasted straight in, stored verbatim as its own
+          immutable source.
+        """
+        source_id = self._source_id(url=url, file=file, text=text)
+
+        # Checked before any fetch: a URL already captured must not be pulled
+        # over the network a second time just to be discarded as a duplicate.
         if self.store.exists(raw_meta(source_id)):
             logger.info("capture: source_id=%s duplicate, skipping", source_id)
             return SourceRef(source_id=source_id, status="done", duplicate=True)
+
+        if text is not None:
+            data = text.encode("utf-8")
+            resolved_mime = mime or "text/plain"
+            modality: Modality = "text"
+        elif file is not None:
+            data = file
+            resolved_mime = mime or "application/octet-stream"
+            modality = detect_modality(resolved_mime, filename, None)
+        else:
+            assert url is not None
+            data, resolved_mime = self._fetch(url, detect_modality(mime, filename, url))
+            # Re-detected against what the server actually served: a link to a
+            # PDF and a link to a blog post are indistinguishable until then.
+            modality = detect_modality(resolved_mime or mime, filename, url)
 
         if not title:
             title = _title_from_source(modality, url, data)
@@ -105,6 +129,30 @@ class IngestPipeline:
         self.set_status(SourceStatus(source_id=source_id, state="queued"))
         logger.info("capture: source_id=%s modality=%s queued", source_id, modality)
         return SourceRef(source_id=source_id, status="queued")
+
+    @staticmethod
+    def _source_id(*, url: str | None, file: bytes | None, text: str | None) -> str:
+        """Validate the inputs and content-address the source before anything is fetched."""
+        supplied = [
+            name for name, value in (("url", url), ("file", file), ("text", text))
+            if value is not None
+        ]
+        if len(supplied) != 1:
+            raise ValueError(
+                f"provide exactly one of url, file or text (got {', '.join(supplied) or 'none'})"
+            )
+        if text is not None:
+            if not text.strip():
+                raise ValueError("text is empty")
+            return source_id_for_bytes(text.encode("utf-8"))
+        if file is not None:
+            if not file:
+                raise ValueError("file is empty")
+            return source_id_for_bytes(file)
+        assert url is not None
+        if not url.strip():
+            raise ValueError("url is empty")
+        return source_id_for_url(url)
 
     def _fetch(self, url: str, modality: str) -> tuple[bytes, str]:
         """Fetch remote content at capture time so extraction stays reproducible."""
@@ -223,6 +271,10 @@ class IngestPipeline:
 
 def _title_from_source(modality: str, url: str | None, data: bytes) -> str:
     """Fill ``meta.title`` at capture so ``raw/`` never needs a later rewrite."""
+    if modality == "text":
+        from llmwiki.extractors.text import first_line
+
+        return first_line(data.decode("utf-8", errors="replace"))
     if modality == "web":
         from llmwiki.extractors.web import title_from_html
 

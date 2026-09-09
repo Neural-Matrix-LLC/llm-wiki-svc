@@ -16,7 +16,7 @@ fallback — and every answer carries citations that resolve back to a real sour
 # dev extra (pytest, mypy, ruff, ...) - plain `uv sync` skips it
 uv venv
 source .venv/bin/activate
-uv sync --extra dev
+uv sync
 cp .env.example .env
 
 pytest                                  # unit tests, no network
@@ -28,15 +28,29 @@ llmwiki --offline concepts
 `--offline` swaps in a filesystem store, an in-memory vector index, a hash-based
 embedder and a scripted LLM. `.data/wiki/` opens directly as an Obsidian vault.
 
-URL ingest uses the same command. `--url` still fetches the page or YouTube
-transcript over the network; `--offline` only keeps storage and the LLM local
-and fake. Drop `--offline` once `.env` has real credentials.
+Five kinds of source go in through the same command — a PDF file, a blog URL,
+a YouTube URL, pasted text, and a text file. What a source *is* is detected,
+never declared: a link is fetched first and routed by the content type the
+server actually returns, so a link to a paper is read as a PDF and a link to a
+post is read as a page.
 
 ```bash
-llmwiki --offline ingest --url "https://www.youtube.com/watch?v=fvIVGmwgk4w"
-llmwiki --offline ingest --url "https://karpathy.github.io/2019/04/25/recipe/"
+llmwiki --offline ingest --file paper.pdf                                   # PDF file
+llmwiki --offline ingest --url "https://karpathy.github.io/2019/04/25/recipe/"   # blog
+llmwiki --offline ingest --url "https://www.youtube.com/watch?v=fvIVGmwgk4w"     # YouTube
+llmwiki --offline ingest --text "Kelly sizing maximizes long-run log wealth."    # pure text
+llmwiki --offline ingest --file notes.md                                    # text file
+git log --oneline | llmwiki --offline ingest --text -                       # pure text, from stdin
 llmwiki --offline concepts
 ```
+
+`--url` still fetches the page or YouTube transcript over the network;
+`--offline` only keeps storage and the LLM local and fake. Drop `--offline`
+once `.env` has real credentials.
+
+Over HTTP: `POST /ingest` takes `{"url": ...}` or `{"text": ...}`, and
+`POST /upload` takes a file. The MCP `ingest_source` tool takes `url` or
+`text`. All of them call the same `tools.ingest_source()`.
 
 ## Running against real backends
 

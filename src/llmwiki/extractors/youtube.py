@@ -13,7 +13,22 @@ from llmwiki.extractors.base import ExtractionError
 from llmwiki.extractors.text import normalize
 from llmwiki.models.source import ExtractedDoc, SourceMeta
 
-_VIDEO_ID = re.compile(r"(?:v=|youtu\.be/|/embed/)([A-Za-z0-9_-]{11})")
+_VIDEO_ID = re.compile(r"(?:v=|youtu\.be/|/embed/|/shorts/|/live/|/v/)([A-Za-z0-9_-]{11})")
+_YOUTUBE_HOST = re.compile(
+    r"^(?:https?://)?(?:[a-z0-9-]+\.)*(?:youtube\.com|youtube-nocookie\.com|youtu\.be)/",
+    re.IGNORECASE,
+)
+
+
+def is_youtube_url(url: str) -> bool:
+    """True for any YouTube URL a video id can be read out of.
+
+    Host *and* id are both required: a channel or playlist page is a web page,
+    not a transcript, and must fall through to the web extractor rather than
+    fail later in ``fetch_transcript``.
+    """
+    stripped = url.strip()
+    return bool(_YOUTUBE_HOST.match(stripped) and _VIDEO_ID.search(stripped))
 
 
 def video_id(url: str) -> str:

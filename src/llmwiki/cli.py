@@ -31,8 +31,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     ingest = sub.add_parser("ingest", help="capture and compile a source")
     group = ingest.add_mutually_exclusive_group(required=True)
-    group.add_argument("--url")
-    group.add_argument("--file", type=Path)
+    group.add_argument("--url", help="blog post, YouTube video, or a direct link to a PDF")
+    group.add_argument("--file", type=Path, help="a PDF or a .txt/.md text file")
+    group.add_argument("--text", help="text to store verbatim; '-' reads stdin")
     ingest.add_argument("--title", default="")
 
     search = sub.add_parser("search", help="search the knowledge base")
@@ -86,6 +87,9 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "ingest":
         if args.url:
             status = tools.ingest_now(url=args.url, title=args.title, cfg=cfg)
+        elif args.text is not None:
+            text = sys.stdin.read() if args.text == "-" else args.text
+            status = tools.ingest_now(text=text, title=args.title, cfg=cfg)
         else:
             data = args.file.read_bytes()
             status = tools.ingest_now(

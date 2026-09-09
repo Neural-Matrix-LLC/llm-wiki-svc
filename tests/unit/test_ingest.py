@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -35,9 +36,13 @@ def test_identical_bytes_are_deduplicated(pipeline) -> None:
     assert second.duplicate is True
 
 
-def test_capture_requires_a_url_or_a_file(pipeline) -> None:
-    with pytest.raises(ValueError):
+def test_capture_requires_exactly_one_input(pipeline) -> None:
+    with pytest.raises(ValueError, match="exactly one"):
         pipeline.capture()
+    with pytest.raises(ValueError, match="exactly one"):
+        pipeline.capture(url="https://example.org/a", text="pasted")
+    with pytest.raises(ValueError, match="exactly one"):
+        pipeline.capture(file=b"bytes", text="pasted")
 
 
 def test_process_runs_the_full_flow_and_reaches_done(pipeline, store) -> None:
@@ -125,3 +130,110 @@ def test_extraction_is_a_pure_function_of_stored_bytes(pipeline, store) -> None:
 
     doc = pipeline.extract(meta)
     assert "Structural splitting" in doc.text
+
+
+# --- pure text: a source with no file and no URL ---------------------------
+
+
+TEXT = "Retrieval augmented generation\n\nGrounding an answer in retrieved documents.\n"
+
+
+def test_capture_stores_pasted_text_as_its_own_source(pipeline, store) -> None:
+    ref = pipeline.capture(text=TEXT)
+
+    meta = SourceMeta(**json.loads(store.get(raw_meta(ref.source_id)).decode()))
+    assert meta.modality == "text"
+    assert meta.url is None and meta.filename is None
+    assert store.get(f"raw/{ref.source_id}/original.txt").decode() == TEXT
+
+
+def test_pasted_text_takes_its_title_from_the_first_line(pipeline, store) -> None:
+    ref = pipeline.capture(text=TEXT)
+
+    meta = SourceMeta(**json.loads(store.get(raw_meta(ref.source_id)).decode()))
+    assert meta.title == "Retrieval augmented generation"
+
+
+def test_identical_text_is_deduplicated(pipeline) -> None:
+    first = pipeline.capture(text=TEXT)
+    second = pipeline.capture(text=TEXT, title="different title")
+
+    assert second.source_id == first.source_id
+    assert second.duplicate is True
+
+
+def test_empty_text_is_rejected_at_capture(pipeline) -> None:
+    with pytest.raises(ValueError, match="empty"):
+        pipeline.capture(text="   \n  ")
+
+
+def test_pasted_text_runs_the_full_flow_and_reaches_done(pipeline, store) -> None:
+    ref = pipeline.capture(text=TEXT)
+    status = pipeline.process(ref.source_id)
+
+    assert status.state == "done", status.error
+    assert status.chunk_count > 0
+    assert store.get(raw_extracted(ref.source_id)).decode().startswith("Retrieval")
+
+
+def test_a_text_file_upload_is_extracted_as_text(pipeline, store) -> None:
+    ref = pipeline.capture(
+        file=TEXT.encode(), filename="notes.txt", mime="text/plain"
+    )
+    status = pipeline.process(ref.source_id)
+
+    meta = SourceMeta(**json.loads(store.get(raw_meta(ref.source_id)).decode()))
+    assert meta.modality == "text"
+    assert status.state == "done", status.error
+
+
+# --- URL sources: the served content type decides the modality -------------
+
+
+def test_a_url_that_serves_a_pdf_is_captured_as_a_pdf(pipeline, store, monkeypatch) -> None:
+    """A link to a paper and a link to a blog post are the same input shape.
+
+    Trusting the URL alone sent every arXiv-style link through the HTML
+    extractor, where trafilatura found no readable content and the source
+    failed - the bytes were a PDF all along.
+    """
+    data = (FIXTURES / "sample.pdf").read_bytes()
+    monkeypatch.setattr(
+        "llmwiki.extractors.web.fetch", lambda url: (data, "application/pdf")
+    )
+
+    ref = pipeline.capture(url="https://arxiv.org/pdf/2401.00001")
+    status = pipeline.process(ref.source_id)
+
+    meta = SourceMeta(**json.loads(store.get(raw_meta(ref.source_id)).decode()))
+    assert meta.modality == "pdf"
+    assert status.state == "done", status.error
+    assert "### Page 1" in store.get(raw_extracted(ref.source_id)).decode()
+
+
+def test_a_blog_url_is_still_captured_as_a_web_page(pipeline, store, monkeypatch) -> None:
+    data = (FIXTURES / "sample.html").read_bytes()
+    monkeypatch.setattr("llmwiki.extractors.web.fetch", lambda url: (data, "text/html"))
+
+    ref = pipeline.capture(url="https://blog.example.org/chunking")
+
+    meta = SourceMeta(**json.loads(store.get(raw_meta(ref.source_id)).decode()))
+    assert meta.modality == "web"
+    assert meta.title == "Chunking Strategies for Retrieval"
+
+
+def test_a_duplicate_url_is_not_fetched_again(pipeline, monkeypatch) -> None:
+    """The duplicate check runs before the fetch, or every recapture costs a request."""
+    data = (FIXTURES / "sample.html").read_bytes()
+    calls = []
+
+    def counting_fetch(url: str) -> tuple[bytes, str]:
+        calls.append(url)
+        return data, "text/html"
+
+    monkeypatch.setattr("llmwiki.extractors.web.fetch", counting_fetch)
+    pipeline.capture(url="https://blog.example.org/chunking")
+    second = pipeline.capture(url="https://blog.example.org/chunking")
+
+    assert second.duplicate is True
+    assert len(calls) == 1, "a duplicate URL was fetched a second time"

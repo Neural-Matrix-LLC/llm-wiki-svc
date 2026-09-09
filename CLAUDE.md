@@ -11,6 +11,14 @@ runs 291 unit tests with no network access (a handful skip when the optional
 --offline` walks the whole flow end to end with fake adapters. Integration
 tests exist but have never run — they need Cloudflare and Anthropic
 credentials that do not exist yet.
+LLM routing, SKILL.md-format prompts, query-agent skill invocation) and the
+five-source-kind ingestion surface (2026-09-08: PDF file, blog URL, YouTube
+URL, pure text, text file — reachable from REST, MCP, CLI and Python alike;
+see the technical document §3.1.1). `pytest` runs 315 unit tests with no
+network access (a handful skip when a provider extra is absent,
+environment-dependent); `scripts/smoke_flow.py --offline` walks the whole flow
+end to end with fake adapters. Integration tests exist but have never run —
+they need Cloudflare and Anthropic credentials that do not exist yet.
 
 The LLM layer is multi-provider: `LLM_PROVIDER` selects `anthropic` (native
 adapter — prompt caching, measured USD cost), `openai`, `google`, `nvidia`,
@@ -61,6 +69,11 @@ Four tests are load-bearing and must not be weakened to make a change pass:
   still imported only inside `build()`; if this fails, a provider SDK has
   acquired a module-level import and merely importing `llmwiki` got heavier
   for everyone.
+
+One more is worth knowing when touching the capture path:
+`tests/unit/test_tools_and_mcp.py::test_every_transport_can_ingest_all_five_source_kinds`
+— a source kind reachable from one transport but not the others is how that
+surface drifts.
 
 ## What This Project Is
 

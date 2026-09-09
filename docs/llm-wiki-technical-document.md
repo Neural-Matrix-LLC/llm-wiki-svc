@@ -20,8 +20,9 @@ from today's code, that is called out explicitly rather than blended in.
 
 ## 1. System Overview
 
-llmwiki is a **research knowledge base**: sources you capture (PDFs, web
-pages, YouTube transcripts, plain text) are stored immutably, then an LLM
+llmwiki is a **research knowledge base**: sources you capture (PDF files,
+blog/article URLs, YouTube videos, pasted text and text files — §3.1.1) are
+stored immutably, then an LLM
 incrementally compiles them into an interlinked markdown wiki. A query agent
 answers questions from that wiki first, falling back to raw vector search,
 and every citation it returns is verified to resolve back to a real captured
@@ -282,17 +283,21 @@ other.
 
 Entry points: `POST /ingest` or `POST /upload` (`api/routes.py`), the MCP
 tool `ingest_source`, or `llmwiki ingest` (`cli.py`). All three call into
-`tools.py`.
+`tools.py`. What they accept is one of three *inputs* covering five *source
+kinds* — see §3.1.1.
 
 ```
 api/routes.py:ingest()              ┐
 mcp/server.py:ingest_source()       ├─► tools.py:ingest_source()  ──► IngestPipeline.capture()
 cli.py (ingest command)             ┘        (or tools.ingest_now, which also runs process())
 
-IngestPipeline.capture()  [pipeline/ingest.py]
-  ├─► storage.layout.source_id_for_bytes / source_id_for_url   (content-address the source)
+IngestPipeline.capture(url= | file= | text=)  [pipeline/ingest.py]
+  ├─► IngestPipeline._source_id()                              (validate exactly one input,
+  │      storage.layout.source_id_for_bytes / source_id_for_url  then content-address it)
+  ├─► ObjectStore.exists(raw/{id}/meta.json)  → duplicate?     (BEFORE any fetch)
   ├─► extractors.base.detect_modality                          (pick pdf/web/youtube/text)
   ├─► extractors.web.fetch / extractors.youtube.fetch_transcript  (URL sources only, at capture time)
+  ├─► extractors.base.detect_modality  (again, on the SERVED content type — see §3.1.1)
   └─► ObjectStore.put()  → raw/{id}/original.*, raw/{id}/meta.json     (immutable, written once)
   returns SourceRef{source_id, status="queued"} immediately
 
@@ -311,6 +316,54 @@ IngestPipeline.process(source_id)  [pipeline/ingest.py]
   │
   └─► Compiler.compile_source(doc)     [wiki/compiler.py]  — see §3.2
 ```
+
+### 3.1.1 The five source kinds
+
+`capture()` takes **exactly one** of three inputs — more than one, or none,
+is a `ValueError` (a 422 over REST). Those three inputs cover five source
+kinds, and which kind a source *is* is always **detected, never declared by
+the caller**:
+
+| Source kind | Input | Modality | Stored as | Extractor |
+|---|---|---|---|---|
+| PDF file | `file=` bytes (+ `filename`/`mime`) | `pdf` | `original.pdf` | `extractors/pdf.py` — text layer per page, `### Page N` markers; a scan with no text layer fails loudly (no OCR in Phase 0) |
+| Blog / article URL | `url=` | `web` | `original.html` | `extractors/web.py` — trafilatura to markdown |
+| YouTube URL | `url=` | `youtube` | `original.json` (the transcript) | `extractors/youtube.py` — timestamped `### HH:MM:SS` paragraphs |
+| Pure text | `text=` | `text` | `original.txt` | `extractors/text.py` — decode + normalize |
+| Text file | `file=` bytes (`.txt`/`.md`) | `text` | `original.txt`/`.md` | same as above |
+
+**How the modality is decided** (`extractors/base.py:detect_modality`, ordered):
+
+1. **URL shape wins first.** `youtube.py:is_youtube_url()` requires *both* a
+   YouTube host and an extractable 11-character video id, so `/watch`,
+   `youtu.be/`, `/shorts/`, `/live/`, `/embed/` and `m.` hosts are all
+   transcripts — while a channel or playlist page, having no video id, falls
+   through and is captured as an ordinary web page.
+2. `application/pdf`, or a `.pdf` filename → `pdf`.
+3. `image/*` → `image`.
+4. `text/html`, `application/xhtml+xml` → `web`.
+5. Any other `text/*` (`text/plain`, `text/markdown`, …) → `text`. This is
+   why a link to a `.txt`/`.md` file is not run through boilerplate removal,
+   which would throw the content away.
+6. Anything else: `web` if it came from a URL, otherwise `text`.
+
+**Two behaviours worth knowing when you touch this path:**
+
+- *The modality of a URL is re-detected after the fetch*, against the content
+  type the server actually returned. A link to a blog post and a link to a
+  PDF are the same input shape; only the response distinguishes them. Without
+  the second pass, every `arxiv.org/pdf/...`-style link went to the HTML
+  extractor and failed with "no readable content".
+- *The duplicate check runs before the fetch.* `source_id` for a URL is a
+  hash of its canonical form (`layout.canonical_url`), so re-capturing a
+  known URL costs no network request. File and text sources are hashed by
+  content, so identical bytes — or the identical string pasted twice — are
+  the same source.
+
+`meta.title` is filled at capture time and never rewritten (`raw/` is
+append-only): from the caller's `title` if given, else the HTML `<title>` /
+trafilatura metadata for web, the oEmbed video title for YouTube, and the
+first non-empty line for text.
 
 ### 3.2 The Incremental Compiler (five stages, `wiki/compiler.py:Compiler`)
 
@@ -659,7 +712,10 @@ call site that does `llm.complete(op="new_thing", ...)`:
    existing extractor.
 2. Add the modality to `models/source.py:Modality` (a `Literal`).
 3. Wire detection into `extractors/base.py:detect_modality()` — mind the
-   comment about ordering ("URL shape beats mime").
+   ordering rules in §3.1.1. Note the function is called **twice** for a URL
+   source (once on the declared mime to choose a fetch strategy, once on the
+   served content type), so it must be a pure function of its arguments and
+   tolerate an empty `mime`.
 4. Wire dispatch into `extractors/base.py:get_extractor()`.
 5. If the modality needs a network fetch at capture time (like `web.py`'s
    `fetch()` or `youtube.py`'s `fetch_transcript()`), add that function here
@@ -853,7 +909,7 @@ suite and the CLI's `--offline` flag work).
 |---|---|---|---|
 | `search_wiki` | `(query: str, k: int = 5, cfg=None)` | `list[SearchHit]` | Wiki-first; chunk fallback only if the top wiki hit is weak. |
 | `get_page` | `(slug: str, cfg=None)` | `WikiPage` | Raises `tools.PageNotFound` (a `KeyError`) if absent. |
-| `ingest_source` | `(url=None, file=None, filename=None, mime="", title="", cfg=None)` | `SourceRef` | Capture only — returns before extraction/compilation run. |
+| `ingest_source` | `(url=None, file=None, filename=None, mime="", title="", text=None, cfg=None)` | `SourceRef` | Capture only — returns before extraction/compilation run. Exactly one of `url`/`file`/`text` (§3.1.1). |
 | `compile_update` | `(source_id: str, force: bool = False, cfg=None)` | `CompileResult` | Re-runs the 5-stage compiler for an already-captured source. |
 | `list_concepts` | `(prefix: str \| None = None, cfg=None)` | `list[PageGist]` | One object read (`gists.json`); no LLM call regardless of wiki size. |
 | `lint_wiki` | `(dry_run: bool = True, cfg=None)` | `LintReport` | The only function allowed to scan all of `wiki/`. Not on the ingest path. |
@@ -862,7 +918,7 @@ suite and the CLI's `--offline` flag work).
 
 | Function | Signature | Returns | Notes |
 |---|---|---|---|
-| `ingest_now` | `(url=None, file=None, filename=None, mime="", title="", cfg=None)` | `SourceStatus` | Capture **and** process, synchronously. Used by CLI and the smoke script. |
+| `ingest_now` | `(url=None, file=None, filename=None, mime="", title="", text=None, cfg=None)` | `SourceStatus` | Capture **and** process, synchronously. Used by CLI and the smoke script. |
 | `process_source` | `(source_id: str, cfg=None)` | `SourceStatus` | The expensive half of ingest; called by the API's background task. |
 | `get_source_status` | `(source_id: str, cfg=None)` | `SourceStatus` | Poll pipeline state. |
 | `answer` | `(query: str, k: int = 5, cfg=None)` | `Answer` | Full RAG answer with verified citations. |
@@ -882,8 +938,8 @@ marked 🔒 below.
 | Method & path | Auth | Body / Query | Response model | Calls |
 |---|:-:|---|---|---|
 | `GET /healthz` | — | — | `dict` | `tools.health()` |
-| `POST /ingest` | 🔒 | JSON `{url, title?}` | `SourceRef` | `tools.ingest_source()` + background `process_source` |
-| `POST /upload` | 🔒 | multipart `file`, `title?` | `SourceRef` | same, for file uploads |
+| `POST /ingest` | 🔒 | JSON `{url, title?}` **or** `{text, title?}` | `SourceRef` | `tools.ingest_source()` + background `process_source`. Exactly one of `url`/`text`, enforced by a model validator → 422. |
+| `POST /upload` | 🔒 | multipart `file`, `title?` | `SourceRef` | same, for the file kinds (PDF, `.txt`/`.md`, HTML, image) |
 | `GET /sources/{source_id}` | — | — | `SourceStatus` | `tools.get_source_status()` |
 | `GET /search` | — | `q`, `k=5` | `list[SearchHit]` | `tools.search_wiki()` |
 | `GET /answer` | — | `q`, `k=5` | `Answer` | `tools.answer()` |
@@ -908,7 +964,7 @@ Exactly six tools, deliberately no more (§5.7):
 |---|---|---|
 | `search_wiki` | `query: str, k: int = 5` | `tools.search_wiki` |
 | `get_page` | `slug: str` | `tools.get_page` |
-| `ingest_source` | `url: str, title: str = ""` | `tools.ingest_source` (and synchronously runs `process_source` before returning — MCP has no background-task concept here) |
+| `ingest_source` | `url: str \| None = None, text: str \| None = None, title: str = ""` | `tools.ingest_source` (and synchronously runs `process_source` before returning — MCP has no background-task concept here). `url` covers blog/YouTube/PDF links; `text` stores a pasted string verbatim; files go over REST `/upload`. |
 | `compile_update` | `source_id: str, force: bool = False` | `tools.compile_update` |
 | `list_concepts` | `prefix: str \| None = None` | `tools.list_concepts` |
 | `lint_wiki` | `dry_run: bool = True` | `tools.lint_wiki` |
@@ -921,7 +977,7 @@ llmwiki [--offline] <command> [args]
 
 | Command | Args | Calls |
 |---|---|---|
-| `ingest` | `--url URL \| --file PATH`, `--title` | `tools.ingest_now` |
+| `ingest` | `--url URL \| --file PATH \| --text STR` (`--text -` reads stdin), `--title` | `tools.ingest_now` |
 | `search` | `query`, `-k N` | `tools.search_wiki` |
 | `ask` | `query` | `tools.answer` |
 | `page` | `slug` | `tools.get_page` (prints rendered markdown) |
@@ -1001,7 +1057,7 @@ reaches a key unsanitized.
 ## 8. Testing
 
 ```bash
-pytest                                  # unit tests, ~270 tests, no network, ~5s
+pytest                                  # unit tests, ~315 tests, no network, ~5s
 pytest -m integration                   # needs a populated .env; costs money
 python scripts/smoke_flow.py --offline  # end-to-end, no keys, under 2s
 ruff check . && mypy                    # the rest of the pre-commit gate
@@ -1032,11 +1088,12 @@ object-builders used across the unit suite — check there before writing a
 new one, most scenarios (a spy store that counts reads, a scripted LLM with
 canned per-op responses) already exist.
 
-**Known current state:** `pytest` — 267 passed, 1 skipped (a provider extra
-not installed), 6 integration tests deselected, and **one pre-existing,
-unrelated failure**
-(`tests/unit/test_extractors.py::test_fetch_video_title_reads_oembed`) — see
-`docs/HISTORY.md` for its status before assuming a new change caused it.
+**Known current state:** `pytest` — 315 passed, 5 skipped (provider extras
+not installed), 6 integration tests deselected, no failures. The
+long-standing failure in
+`tests/unit/test_extractors.py::test_fetch_video_title_reads_oembed` was
+fixed on 2026-09-08 (the fake `httpx.Response` had no `request` set, so
+`raise_for_status()` raised `RuntimeError` and the lookup was swallowed).
 
 ---
 

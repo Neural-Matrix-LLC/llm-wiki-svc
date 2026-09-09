@@ -34,6 +34,21 @@ def meta(modality: str, **kwargs) -> SourceMeta:
         ("", None, "https://youtu.be/dQw4w9WgXcQ", "youtube"),
         ("image/png", "shot.png", None, "image"),
         ("text/plain", "notes.txt", None, "text"),
+        # A link whose server answered with a PDF is a PDF, not a web page.
+        ("application/pdf", None, "https://arxiv.org/pdf/2401.00001", "pdf"),
+        ("application/pdf; charset=binary", None, None, "pdf"),
+        # A served text file is a text source; boilerplate removal would gut it.
+        ("text/plain", None, "https://example.org/notes.txt", "text"),
+        ("text/markdown", None, "https://example.org/readme.md", "text"),
+        # Unknown content type behind a URL is still assumed to be a page.
+        ("", None, "https://blog.example.org/post", "web"),
+        ("application/octet-stream", None, None, "text"),
+        # YouTube shapes beyond /watch and youtu.be.
+        ("", None, "https://www.youtube.com/shorts/dQw4w9WgXcQ", "youtube"),
+        ("", None, "https://m.youtube.com/watch?v=dQw4w9WgXcQ", "youtube"),
+        ("", None, "https://www.youtube.com/live/dQw4w9WgXcQ", "youtube"),
+        # A channel page has no video id: it is a page, not a transcript.
+        ("", None, "https://www.youtube.com/@karpathy", "web"),
     ],
 )
 def test_modality_detection(mime, filename, url, expected) -> None:
@@ -100,7 +115,13 @@ def test_fetch_video_title_reads_oembed(monkeypatch: pytest.MonkeyPatch) -> None
 
     def fake_get(url: str, **kwargs: object) -> httpx.Response:
         assert "oembed" in url
-        return httpx.Response(200, json={"title": "Never Gonna Give You Up"})
+        # The request must be set, or raise_for_status() raises RuntimeError and
+        # fetch_video_title swallows it as a failed lookup.
+        return httpx.Response(
+            200,
+            json={"title": "Never Gonna Give You Up"},
+            request=httpx.Request("GET", url),
+        )
 
     monkeypatch.setattr(httpx, "get", fake_get)
     assert fetch_video_title("https://youtu.be/dQw4w9WgXcQ") == "Never Gonna Give You Up"
@@ -130,6 +151,24 @@ def test_youtube_transcript_becomes_timestamped_paragraphs() -> None:
 def test_youtube_empty_transcript_fails() -> None:
     with pytest.raises(ExtractionError):
         YouTubeExtractor().extract(meta("youtube"), json.dumps([]).encode())
+
+
+@pytest.mark.parametrize(
+    ("url", "expected"),
+    [
+        ("https://www.youtube.com/watch?v=dQw4w9WgXcQ", True),
+        ("https://youtu.be/dQw4w9WgXcQ", True),
+        ("https://www.youtube.com/shorts/dQw4w9WgXcQ", True),
+        ("https://www.youtube-nocookie.com/embed/dQw4w9WgXcQ", True),
+        ("https://www.youtube.com/playlist?list=PL1234", False),
+        # The host must match too, or a query string could smuggle an id in.
+        ("https://example.org/read?ref=youtu.be/dQw4w9WgXcQ", False),
+    ],
+)
+def test_is_youtube_url(url, expected) -> None:
+    from llmwiki.extractors.youtube import is_youtube_url
+
+    assert is_youtube_url(url) is expected
 
 
 def test_video_id_extraction() -> None:

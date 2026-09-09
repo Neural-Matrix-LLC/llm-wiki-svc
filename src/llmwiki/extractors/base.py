@@ -6,6 +6,8 @@ from typing import Protocol, runtime_checkable
 
 from llmwiki.models.source import ExtractedDoc, Modality, SourceMeta
 
+_HTML_MIMES = frozenset({"text/html", "application/xhtml+xml"})
+
 
 class ExtractionError(RuntimeError):
     """Raised when a source cannot be extracted.
@@ -25,18 +27,31 @@ class Extractor(Protocol):
 
 
 def detect_modality(mime: str, filename: str | None, url: str | None) -> Modality:
-    """Pick a modality from what capture recorded. Order matters: URL shape beats mime."""
+    """Pick a modality from what capture recorded. Order matters: URL shape beats mime.
+
+    ``mime`` may be either what the caller declared or - for a URL the pipeline
+    has already fetched - what the server actually served.  Passing the served
+    content type is what lets a link to a PDF be ingested as a PDF: a blog link
+    and an arXiv link are the same input shape and differ only in the response.
+    """
     if url:
-        lowered = url.lower()
-        if "youtube.com/watch" in lowered or "youtu.be/" in lowered:
+        from llmwiki.extractors.youtube import is_youtube_url
+
+        if is_youtube_url(url):
             return "youtube"
-    if mime == "application/pdf" or (filename or "").lower().endswith(".pdf"):
+    base = mime.split(";")[0].strip().lower()
+    if base == "application/pdf" or (filename or "").lower().endswith(".pdf"):
         return "pdf"
-    if mime.startswith("image/"):
+    if base.startswith("image/"):
         return "image"
-    if url or mime in ("text/html", "application/xhtml+xml"):
+    if base in _HTML_MIMES:
         return "web"
-    return "text"
+    if base.startswith("text/"):
+        # text/plain, text/markdown, text/csv: a text file is a text source even
+        # when it arrived over HTTP - running boilerplate removal over it would
+        # only throw the content away.
+        return "text"
+    return "web" if url else "text"
 
 
 def get_extractor(modality: Modality) -> Extractor:
