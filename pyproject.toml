@@ -15,6 +15,12 @@ dependencies = [
     "fastapi",
     "fastmcp",
     "httpx",
+    "langchain-core>=0.3",
+    "langchain-openai",
+    "langchain-google-genai",
+    "langchain-nvidia-ai-endpoints",
+    "langchain-deepseek",
+    "langchain-openrouter",
     "numpy",
     "pydantic>=2",
     "pydantic-settings",
@@ -27,16 +33,13 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# Provider extras. Anthropic is the default and stays a hard dependency for now
-# (slimming the core is milestone N3/N8); every other provider is reached
-# through LangChain and costs nothing until you ask for it.
-langchain = ["langchain-core>=0.3"]
-openai = ["llmwiki[langchain]", "langchain-openai"]
-google = ["llmwiki[langchain]", "langchain-google-genai"]
-nvidia = ["llmwiki[langchain]", "langchain-nvidia-ai-endpoints"]
-deepseek = ["llmwiki[langchain]", "langchain-deepseek"]
-openrouter = ["llmwiki[langchain]", "langchain-openrouter"]
-all-providers = ["llmwiki[openai,google,nvidia,deepseek,openrouter]"]
+# Anthropic is native (llm/anthropic_client.py - prompt caching, measured USD
+# cost); every other provider goes through LangChain. As of 2026-09-09 all of
+# them - langchain-core and every provider integration above - are core
+# dependencies, not extras: `pip install llmwiki` / `uv sync` installs every
+# provider, and switching LLM_PROVIDER needs no separate install step.
+# llm/providers.py still imports each provider SDK lazily (inside build()), so
+# importing the registry stays cheap even though the packages are on disk.
 
 # Optional tracing. Independent of which LLM_PROVIDER is chosen: it wraps the
 # native Anthropic adapter directly and is picked up automatically by every
@@ -44,11 +47,10 @@ all-providers = ["llmwiki[openai,google,nvidia,deepseek,openrouter]"]
 # nothing and imports nothing - see llm/anthropic_client.py and factory.py.
 langsmith = ["langsmith>=0.3"]
 
-# langchain-core is a dev dependency so the adapter's unit tests run against a
-# scripted BaseChatModel with no provider SDK and no network. langsmith is a
-# dev dependency for the same reason: the tracing-wrap test monkeypatches it.
+# langsmith is a dev dependency so the tracing-wrap test can monkeypatch it
+# without requiring LANGSMITH_TRACING=true.
 dev = ["pytest", "pytest-mock", "pytest-asyncio", "mypy", "ruff", "respx",
-       "langchain-core>=0.3", "langsmith>=0.3"]
+       "langsmith>=0.3"]
 
 [project.scripts]
 llmwiki = "llmwiki.cli:main"

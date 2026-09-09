@@ -12,10 +12,11 @@ fallback — and every answer carries citations that resolve back to a real sour
 ## Quickstart (offline, no keys)
 
 ```bash
-# Creates the virtual environment and installs dependencies
+# Creates the virtual environment and installs dependencies, including the
+# dev extra (pytest, mypy, ruff, ...) - plain `uv sync` skips it
 uv venv
 source .venv/bin/activate
-uv sync
+uv sync --extra dev
 cp .env.example .env
 
 pytest                                  # unit tests, no network

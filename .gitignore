@@ -148,7 +148,7 @@ activemq-data/
 *.sage.py
 
 # Local object store (LOCAL_STORAGE_PATH) - runtime data, never committed
-.data/
+.data*/
 
 # Environments
 .env

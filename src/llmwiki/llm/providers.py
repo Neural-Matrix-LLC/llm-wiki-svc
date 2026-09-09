@@ -1,9 +1,10 @@
 """Which LangChain chat model backs each ``LLM_PROVIDER`` value.
 
-The registry is data.  Every provider import happens inside :func:`build`, so
-importing this module pulls in no provider SDK at all: ``pip install llmwiki``
-stays free of them, and a missing extra can only break the provider that needs
-it.  ``tests/unit/test_providers.py`` asserts both properties.
+The registry is data.  Every provider SDK is a core dependency of llmwiki (see
+``pyproject.toml``), but the actual import happens inside :func:`build`, so
+merely importing this module never eagerly loads a provider SDK - it stays
+cheap even though every SDK is on disk.  ``tests/unit/test_providers.py``
+asserts both properties.
 
 All five integrations accept the same constructor keywords - ``model``,
 ``api_key``, ``base_url`` and a token cap - which is why the spec is nearly
@@ -34,8 +35,7 @@ class ProviderSpec:
 
     module: str  # import package the integration ships
     cls: str  # the BaseChatModel subclass inside it
-    extra: str  # pip install "llmwiki[<extra>]"
-    distribution: str  # what that extra installs, named in the error
+    distribution: str  # the pip/PyPI package name, named in the error
     # ChatOpenAI deprecated ``max_tokens`` in favour of the OpenAI spelling;
     # every other integration still wants ``max_tokens``.
     max_tokens_arg: str = "max_tokens"
@@ -45,40 +45,42 @@ REGISTRY: dict[str, ProviderSpec] = {
     "openai": ProviderSpec(
         "langchain_openai",
         "ChatOpenAI",
-        "openai",
         "langchain-openai",
         max_tokens_arg="max_completion_tokens",
     ),
     "google": ProviderSpec(
         "langchain_google_genai",
         "ChatGoogleGenerativeAI",
-        "google",
         "langchain-google-genai",
     ),
     "nvidia": ProviderSpec(
         "langchain_nvidia_ai_endpoints",
         "ChatNVIDIA",
-        "nvidia",
         "langchain-nvidia-ai-endpoints",
     ),
-    "deepseek": ProviderSpec(
-        "langchain_deepseek", "ChatDeepSeek", "deepseek", "langchain-deepseek"
-    ),
+    "deepseek": ProviderSpec("langchain_deepseek", "ChatDeepSeek", "langchain-deepseek"),
     "openrouter": ProviderSpec(
-        "langchain_openrouter", "ChatOpenRouter", "openrouter", "langchain-openrouter"
+        "langchain_openrouter", "ChatOpenRouter", "langchain-openrouter"
     ),
 }
 
 
 def load_class(provider: str) -> type:
-    """Import one provider's chat model class, or explain which extra is missing."""
+    """Import one provider's chat model class, or explain why it failed.
+
+    Every entry in ``REGISTRY`` is a core dependency (see ``pyproject.toml``),
+    so an ``ImportError`` here means the installation itself is broken or
+    incomplete, not that an optional extra was skipped.
+    """
     spec = REGISTRY[provider]
     try:
         module = __import__(spec.module, fromlist=[spec.cls])
-    except ImportError as exc:  # the extra was not installed
+    except ImportError as exc:
         raise RuntimeError(
-            f"LLM_PROVIDER={provider!r} needs {spec.distribution}, which is not "
-            f'installed. Run: pip install "llmwiki[{spec.extra}]"'
+            f"LLM_PROVIDER={provider!r} needs {spec.distribution}, which failed to "
+            "import even though it is a core llmwiki dependency. Reinstall llmwiki "
+            '(e.g. `pip install --force-reinstall llmwiki` or `uv sync`) and check '
+            "for an environment/import error."
         ) from exc
     return getattr(module, spec.cls)  # type: ignore[no-any-return]
 

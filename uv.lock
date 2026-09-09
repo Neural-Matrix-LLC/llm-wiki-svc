@@ -1707,6 +1707,12 @@ dependencies = [
     { name = "fastapi" },
     { name = "fastmcp" },
     { name = "httpx" },
+    { name = "langchain-core" },
+    { name = "langchain-deepseek" },
+    { name = "langchain-google-genai" },
+    { name = "langchain-nvidia-ai-endpoints" },
+    { name = "langchain-openai" },
+    { name = "langchain-openrouter" },
     { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.12'" },
     { name = "numpy", version = "2.5.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
     { name = "pydantic" },
@@ -1720,20 +1726,7 @@ dependencies = [
 ]
 
 [package.optional-dependencies]
-all-providers = [
-    { name = "langchain-core" },
-    { name = "langchain-deepseek" },
-    { name = "langchain-google-genai" },
-    { name = "langchain-nvidia-ai-endpoints" },
-    { name = "langchain-openai" },
-    { name = "langchain-openrouter" },
-]
-deepseek = [
-    { name = "langchain-core" },
-    { name = "langchain-deepseek" },
-]
 dev = [
-    { name = "langchain-core" },
     { name = "langsmith" },
     { name = "mypy" },
     { name = "pytest" },
@@ -1742,27 +1735,8 @@ dev = [
     { name = "respx" },
     { name = "ruff" },
 ]
-google = [
-    { name = "langchain-core" },
-    { name = "langchain-google-genai" },
-]
-langchain = [
-    { name = "langchain-core" },
-]
 langsmith = [
     { name = "langsmith" },
-]
-nvidia = [
-    { name = "langchain-core" },
-    { name = "langchain-nvidia-ai-endpoints" },
-]
-openai = [
-    { name = "langchain-core" },
-    { name = "langchain-openai" },
-]
-openrouter = [
-    { name = "langchain-core" },
-    { name = "langchain-openrouter" },
 ]
 
 [package.metadata]
@@ -1772,21 +1746,14 @@ requires-dist = [
     { name = "fastapi" },
     { name = "fastmcp" },
     { name = "httpx" },
-    { name = "langchain-core", marker = "extra == 'dev'", specifier = ">=0.3" },
-    { name = "langchain-core", marker = "extra == 'langchain'", specifier = ">=0.3" },
-    { name = "langchain-deepseek", marker = "extra == 'deepseek'" },
-    { name = "langchain-google-genai", marker = "extra == 'google'" },
-    { name = "langchain-nvidia-ai-endpoints", marker = "extra == 'nvidia'" },
-    { name = "langchain-openai", marker = "extra == 'openai'" },
-    { name = "langchain-openrouter", marker = "extra == 'openrouter'" },
+    { name = "langchain-core", specifier = ">=0.3" },
+    { name = "langchain-deepseek" },
+    { name = "langchain-google-genai" },
+    { name = "langchain-nvidia-ai-endpoints" },
+    { name = "langchain-openai" },
+    { name = "langchain-openrouter" },
     { name = "langsmith", marker = "extra == 'dev'", specifier = ">=0.3" },
     { name = "langsmith", marker = "extra == 'langsmith'", specifier = ">=0.3" },
-    { name = "llmwiki", extras = ["deepseek", "google", "nvidia", "openai", "openrouter"], marker = "extra == 'all-providers'" },
-    { name = "llmwiki", extras = ["langchain"], marker = "extra == 'deepseek'" },
-    { name = "llmwiki", extras = ["langchain"], marker = "extra == 'google'" },
-    { name = "llmwiki", extras = ["langchain"], marker = "extra == 'nvidia'" },
-    { name = "llmwiki", extras = ["langchain"], marker = "extra == 'openai'" },
-    { name = "llmwiki", extras = ["langchain"], marker = "extra == 'openrouter'" },
     { name = "mypy", marker = "extra == 'dev'" },
     { name = "numpy" },
     { name = "pydantic", specifier = ">=2" },
@@ -1803,7 +1770,7 @@ requires-dist = [
     { name = "uvicorn" },
     { name = "youtube-transcript-api" },
 ]
-provides-extras = ["langchain", "openai", "google", "nvidia", "deepseek", "openrouter", "all-providers", "langsmith", "dev"]
+provides-extras = ["langsmith", "dev"]
 
 [[package]]
 name = "lxml"

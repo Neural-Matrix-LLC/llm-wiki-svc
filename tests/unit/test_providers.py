@@ -52,8 +52,8 @@ def test_every_registered_provider_is_an_accepted_config_value() -> None:
     assert set(providers.REGISTRY) <= set(get_args(Provider))
 
 
-def test_a_missing_extra_names_the_pip_command() -> None:
-    """A missing integration must not surface as a bare ModuleNotFoundError."""
+def test_a_broken_install_names_the_distribution_and_suggests_reinstalling() -> None:
+    """A missing/broken core dependency must not surface as a bare ModuleNotFoundError."""
     absent = [
         name
         for name, spec in providers.REGISTRY.items()
@@ -66,15 +66,15 @@ def test_a_missing_extra_names_the_pip_command() -> None:
         except RuntimeError as exc:
             message = str(exc)
             assert providers.REGISTRY[name].distribution in message
-            assert f'pip install "llmwiki[{providers.REGISTRY[name].extra}]"' in message
+            assert "reinstall llmwiki" in message.lower()
             checked += 1
         except Exception:  # pragma: no cover - the integration is installed
             pass
-    if checked == 0:  # pragma: no cover - every extra installed
-        pytest.skip("all provider extras are installed in this environment")
+    if checked == 0:  # pragma: no cover - every provider is a core dependency
+        pytest.skip("all provider dependencies are installed in this environment")
 
 
-def test_the_factory_reports_a_missing_extra_rather_than_failing_at_the_socket() -> None:
+def test_the_factory_reports_a_broken_dependency_rather_than_failing_at_the_socket() -> None:
     from llmwiki import factory
 
     cfg = Settings(_env_file=None, llm_provider="openai", llm_api_key="sk-openai")

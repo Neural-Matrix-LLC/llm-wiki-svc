@@ -6,16 +6,19 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Phase 0 is **implemented**, plus plan-v1.4 §19's R1–R5 (multi-provider/per-op
 LLM routing, SKILL.md-format prompts, query-agent skill invocation). `pytest`
-runs 291 unit tests with no network access (a handful skip when a provider
-extra is absent, environment-dependent); `scripts/smoke_flow.py --offline`
-walks the whole flow end to end with fake adapters. Integration tests exist but
-have never run — they need Cloudflare and Anthropic credentials that do not
-exist yet.
+runs 291 unit tests with no network access (a handful skip when the optional
+`langsmith` extra is absent, environment-dependent); `scripts/smoke_flow.py
+--offline` walks the whole flow end to end with fake adapters. Integration
+tests exist but have never run — they need Cloudflare and Anthropic
+credentials that do not exist yet.
 
 The LLM layer is multi-provider: `LLM_PROVIDER` selects `anthropic` (native
 adapter — prompt caching, measured USD cost), `openai`, `google`, `nvidia`,
-`deepseek` or `openrouter` (all via LangChain, each behind its own extra), or
-`fake`. See `.env.example` for the table and `docs/implement-plan-v1.4.md` §7.5.
+`deepseek` or `openrouter` (all via LangChain), or `fake`. As of 2026-09-09
+langchain-core and every provider integration are core dependencies (not
+extras) — `uv sync` / `pip install llmwiki` installs all of them, and
+switching `LLM_PROVIDER` needs no separate install step. See `.env.example`
+for the table and `docs/implement-plan-v1.4.md` §7.5.
 
 - `llmwiki-KB-design.md` — architecture and scope. **Authoritative.** Read it
   before making design decisions; bump version + date when major decisions lock.
@@ -33,8 +36,8 @@ pytest -m integration                   # needs a populated .env; costs money
 python scripts/smoke_flow.py --offline  # end-to-end, no keys, under 2 seconds
 ruff check . && mypy                    # the rest of the pre-commit gate
 
-# Trying a non-default provider:
-uv pip install -e ".[openai]"           # or google / nvidia / deepseek / openrouter
+# Every LangChain provider ships in the base install already - trying a
+# non-default provider is just LLM_PROVIDER=openai (etc.) in .env, no install.
 ```
 
 The interpreter is pinned in `.python-version` (committed), and
@@ -54,8 +57,10 @@ Four tests are load-bearing and must not be weakened to make a change pass:
 - `tests/unit/test_agent.py::test_every_citation_resolves_to_a_real_raw_object` —
   guards the answer-with-citations contract.
 - `tests/unit/test_providers.py::test_importing_the_registry_imports_no_provider_sdk` —
-  guards the extras. If it fails, a provider SDK has acquired a module-level
-  import and `pip install llmwiki` just got heavier for everyone.
+  guards lazy loading. Every provider SDK is a core dependency now, but each is
+  still imported only inside `build()`; if this fails, a provider SDK has
+  acquired a module-level import and merely importing `llmwiki` got heavier
+  for everyone.
 
 ## What This Project Is
 
