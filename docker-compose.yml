@@ -21,11 +21,19 @@ services:
       API_PORT: "8000"
     ports:
       # 0.0.0.0 on the host so the Windows browser can reach the WSL2 container.
-      - "${API_PORT:-8000}:8000"
+      # Host-side default is 8010, not 8000: on Hostinger (deployment-plan-
+      # container-hosting.md) port 8000 on the box is already assigned to
+      # something else. The container's own internal port stays 8000
+      # (Dockerfile EXPOSE/CMD/HEALTHCHECK) - only the host-facing mapping
+      # changes, via API_PORT in .env.
+      - "${API_PORT:-8010}:8000"
     volumes:
       # Only used when STORAGE_BACKEND=local. With STORAGE_BACKEND=r2 the
-      # container is stateless and this volume stays empty.
-      - llmwiki-data:/data
+      # container is stateless and this bind mount stays empty. Bind-mounted
+      # (not a named volume) so raw/wiki/status are directly inspectable on
+      # the host at ./.data - matches the path host-side (non-docker) runs
+      # already use, per LOCAL_STORAGE_PATH in .env.example.
+      - ./.data:/data
     restart: unless-stopped
 
   # Offline mode: no keys, no network, fake adapters. Useful for a demo, for
@@ -74,9 +82,8 @@ services:
     environment:
       LOCAL_STORAGE_PATH: /data
     volumes:
-      - llmwiki-data:/data
+      - ./.data:/data
     entrypoint: ["llmwiki", "lint"]
 
 volumes:
-  llmwiki-data:
   llmwiki-offline-data:

@@ -58,12 +58,14 @@ Fill `.env` with Cloudflare and Anthropic credentials, then:
 
 ```bash
 python scripts/bootstrap_indexes.py --check   # verify Vectorize indexes exist
-llmwiki serve                                 # REST on :8000, MCP at /mcp
+llmwiki serve                                 # REST on :8010 (API_PORT in .env.example), MCP at /mcp
 ```
 
 `implement-plan.md` §6 is the full operational runbook — creating the R2 bucket,
 minting both kinds of Cloudflare token, and confirming the embedding dimension
-before any index is created.
+before any index is created. `scripts/README.md` documents every script under
+`scripts/` (setup, diagnostics, browsing what's in Vectorize, bulk backfill)
+with usage examples.
 
 ## Docker
 

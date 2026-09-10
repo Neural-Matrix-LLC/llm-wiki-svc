@@ -550,10 +550,25 @@ the entire wiki is derived from.
 The R2 credentials above are S3 keys and do **not** work for Vectorize or Workers AI, which use a
 Cloudflare API token.
 
-> Dashboard → **My Profile** → **API Tokens** → **Create Token** → **Create Custom Token**
-> - Permissions:
->   - `Account` → **Vectorize** → **Edit**
+**Use an Account API Token, not a User API Token.** A user token is tied to whoever created it and
+stops working if that person ever loses access to the account; an account token is owned by the
+account itself, acts as a service principal, and is Cloudflare's own recommendation for exactly
+this case — a long-lived credential baked into a server's `.env`
+([Account API tokens](https://developers.cloudflare.com/fundamentals/api/get-started/account-owned-tokens/)).
+Creating one requires **Super Administrator** on the account.
+
+> Dashboard → **Manage Account** → **Account API Tokens** → **Create Token** → **Create Custom Token**
+> - Permissions — three separate grants, because the two products name their
+>   permission groups inconsistently (Vectorize uses Read/Write, Workers AI uses
+>   Read/Edit) and because running a model via the REST API needs *both* of
+>   Workers AI's, per Cloudflare's own quickstart ("that token will need
+>   permissions for both `Workers AI - Read` and `Workers AI - Edit`" —
+>   [source](https://developers.cloudflare.com/workers-ai/get-started/rest-api/)):
+>   - `Account` → **Vectorize** → **Write** (covers read+write for Vectorize —
+>     query/describe accept either Read or Write, so Vectorize Read alone is
+>     not needed in addition; search "Vectorize" if it isn't in the initial list)
 >   - `Account` → **Workers AI** → **Read**
+>   - `Account` → **Workers AI** → **Edit**
 > - Account Resources: your account
 > - TTL: no expiry for Phase 0
 
@@ -562,7 +577,16 @@ CF_API_TOKEN=<token>
 CF_ACCOUNT_ID=<account id from `wrangler whoami`>
 ```
 
-Verify the token and, critically, the **embedding dimension**:
+Verify the token — note the endpoint is account-scoped (`/accounts/{account_id}/tokens/verify`),
+**not** the `/user/tokens/verify` path documented for user tokens:
+
+```bash
+curl -s "https://api.cloudflare.com/client/v4/accounts/$CF_ACCOUNT_ID/tokens/verify" \
+  -H "Authorization: Bearer $CF_API_TOKEN" | python -m json.tool
+# expect: "status": "active"
+```
+
+Then verify, critically, the **embedding dimension**:
 
 ```bash
 curl -s -X POST \
@@ -1378,7 +1402,7 @@ COMPILE_EXECUTOR_MODEL=claude-haiku-4-5     # set to claude-sonnet-5 to escalate
 
 # --- Cloudflare (R2 + Vectorize + Workers AI) — see §6.2–§6.4 ---
 CF_ACCOUNT_ID=changeme
-CF_API_TOKEN=changeme                        # Vectorize Edit + Workers AI Read (§6.3)
+CF_API_TOKEN=changeme                        # Vectorize Write + Workers AI Read + Workers AI Edit (§6.3)
 R2_ACCESS_KEY_ID=changeme                    # S3-compatible creds, separate from CF_API_TOKEN (§6.2)
 R2_SECRET_ACCESS_KEY=changeme
 R2_BUCKET=llmwiki
