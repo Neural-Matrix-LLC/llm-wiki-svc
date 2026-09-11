@@ -5,6 +5,95 @@ reverse-chronological order. See `CLAUDE.md` for the rule this file follows.
 
 ---
 
+## 2026-09-11 — Phase 1, part 1: Telegram + email capture channels, local-LLM routing docs
+
+**Goal:** land the first three of Phase 1's four workstreams from
+`docs/llmwiki-KB-design.md` §5 (see the approved plan at
+`~/.claude/plans/we-can-start-to-functional-goblet.md`): a Telegram capture
+channel (webhook mode, in-process with FastAPI), an email capture channel
+(provider webhook, Mailgun inbound-parse convention), and the documentation/
+config groundwork for routing bulk LLM ops to a local vLLM/llama.cpp endpoint
+on an RTX 3090 host. The fourth workstream (LangGraph query flow + lean
+LangSmith eval) is deferred to a follow-up entry.
+
+**Implementation detail:**
+- New `src/llmwiki/channels/` package — a new L4 transport layer, peer to
+  `api/`/`mcp/`. `channels/telegram.py`: `build_router(cfg) -> APIRouter |
+  None`, mounted only when `TELEGRAM_BOT_TOKEN` is set. `POST
+  /channels/telegram/webhook` verifies Telegram's `X-Telegram-Bot-Api-Secret-
+  Token` header (constant-time compare against `TELEGRAM_WEBHOOK_SECRET`),
+  then maps an `Update` onto `tools.ingest_source(...)`: plain text → `text=`,
+  a lone bare URL → `url=` (modality auto-detected downstream, including
+  YouTube), a forwarded document/photo → downloaded via the Bot API's
+  `getFile` and passed as `file=`. Uses raw `httpx` (already a core
+  dependency), not a Telegram SDK, since webhook mode never needs polling
+  machinery. `channels/email.py`: same `build_router` shape, mounted when
+  `MAILGUN_SIGNING_KEY` is set; `POST /channels/email/inbound` verifies
+  Mailgun's HMAC-SHA256 signature over `timestamp+token`, then ingests each
+  attachment as its own source plus the body (as a URL or as text) whenever
+  it isn't just a caption for the attachment(s).
+- `src/llmwiki/config.py` — three new optional `Settings` fields:
+  `telegram_bot_token`, `telegram_webhook_secret`, `mailgun_signing_key`
+  (all `SecretStr`, default empty — absence disables the channel).
+- `src/llmwiki/api/app.py` — `create_app()` now also calls
+  `_mount_channels(app)`, which builds and conditionally includes both
+  channel routers, re-reading `llmwiki.config.settings` at call time (not a
+  module-level snapshot) so a test that monkeypatches `config.settings`
+  before calling `create_app()` again sees its own channel configuration.
+- Local LLM (RTX 3090, vLLM primary / llama.cpp fallback): confirmed this
+  needs **zero new adapter code** — `config/providers.py`'s existing `openai`
+  row is the mechanism (`OPENAI_BASE_URL` pointed at the self-hosted
+  OpenAI-compatible endpoint). Added clarifying comments to
+  `config/providers.py`, `config/providers.py.example`, `.env.example`
+  (near `OPENAI_API_KEY`/`OPENAI_BASE_URL`) documenting the repurposing, and
+  a commented-out routing example in `config/ops.py` /
+  `config/ops.py.example` showing how to point `summarize_source`/
+  `plan_compile` at the local endpoint once it's live. The live `config/
+  ops.py` routing itself (still 100% `openrouter`) was deliberately **not**
+  flipped in this change — `OPENAI_BASE_URL` is still blank, and routing an
+  op to an inactive provider fails loudly at startup (`routing_config.py`),
+  which would break both `pytest`'s and `smoke_flow.py --offline`'s default
+  `Settings()` build. Flip it once the vLLM/llama.cpp server is actually
+  reachable.
+- `.env.example` — new `TELEGRAM_BOT_TOKEN`, `TELEGRAM_WEBHOOK_SECRET`,
+  `MAILGUN_SIGNING_KEY` (with `setWebhook`/Mailgun-dashboard registration
+  notes), plus the local-LLM comment above.
+- `tests/unit/test_layering.py` — added a `"channels"` layer to `FORBIDDEN`
+  (same posture as `mcp`: reaches `tools`/`models`/`config`, never the L1
+  primitives or `pipeline`), added `"channels"` to the banned-import sets of
+  `models`/`storage`/`extractors`/`embedding`/`vector`/`llm`/`wiki`/`agent`/
+  `pipeline`/`tools` (nothing below L4 may import it), and added
+  `"channels"` to `test_transport_layer_only_calls_tools`'s allowed-imports
+  set and module-selection filter so the new package is actually scanned.
+  Extends the boundary under the existing rule; nothing was weakened.
+
+**Related files:** `src/llmwiki/channels/__init__.py`,
+`src/llmwiki/channels/telegram.py`, `src/llmwiki/channels/email.py`,
+`src/llmwiki/config.py`, `src/llmwiki/api/app.py`, `config/providers.py`,
+`config/providers.py.example`, `config/ops.py`, `config/ops.py.example`,
+`.env.example`, `tests/unit/test_layering.py`, `tests/unit/test_channels.py`
+(new).
+
+**Test coverage:**
+- No regressions: full suite went from 319 to 334 passed (1 skipped, 6
+  deselected/opt-in integration, unchanged); `ruff check .` and `mypy` both
+  clean.
+- New: `tests/unit/test_channels.py` (15 tests) — router is `None` when the
+  relevant secret is unset; webhook auth (missing/wrong header or signature
+  → 401) for both channels; each Telegram message shape (plain text, bare
+  URL, document, photo, "nothing to capture") mapped to the correct
+  `ingest_source(...)` call via a mocked `tools.ingest_source`; each Mailgun
+  payload shape (bare-URL body, attachment + cover note) likewise; the
+  optional-mount behavior verified end-to-end through `create_app()` (404
+  when unconfigured, mounted-and-401-on-missing-secret when configured).
+  `tests/unit/test_layering.py` gained the `"channels"` entries described
+  above (reviewed as ordinary test-suite changes, not exempted from review).
+- No obsolete tests — purely additive.
+- Documented here and in `CLAUDE.md`'s "Current State" (test count, working-
+  in-this-repository setup notes for the new channels and local-LLM routing).
+
+---
+
 ## 2026-09-09 — Plan + diagnostic script for standing up real Cloudflare Vectorize
 
 **Goal:** the service still runs entirely offline (`STORAGE_BACKEND=local`,

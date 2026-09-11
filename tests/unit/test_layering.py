@@ -19,25 +19,31 @@ SRC = Path(__file__).resolve().parents[2] / "src" / "llmwiki"
 # layer -> the llmwiki subpackages it must never import
 FORBIDDEN: dict[str, set[str]] = {
     "models": {"storage", "extractors", "embedding", "vector", "llm", "wiki", "agent",
-               "pipeline", "tools", "api", "mcp", "cli", "factory", "config", "chains"},
+               "pipeline", "tools", "api", "mcp", "cli", "channels", "factory", "config",
+               "chains"},
     "storage": {"extractors", "embedding", "vector", "llm", "wiki", "agent", "pipeline",
-                "tools", "api", "mcp", "cli", "factory"},
+                "tools", "api", "mcp", "cli", "channels", "factory"},
     "extractors": {"storage", "embedding", "vector", "llm", "wiki", "agent", "pipeline",
-                   "tools", "api", "mcp", "cli", "factory"},
+                   "tools", "api", "mcp", "cli", "channels", "factory"},
     "embedding": {"storage", "extractors", "vector", "llm", "wiki", "agent", "pipeline",
-                  "tools", "api", "mcp", "cli", "factory"},
+                  "tools", "api", "mcp", "cli", "channels", "factory"},
     "vector": {"storage", "extractors", "embedding", "llm", "wiki", "agent", "pipeline",
-               "tools", "api", "mcp", "cli", "factory"},
+               "tools", "api", "mcp", "cli", "channels", "factory"},
     "llm": {"storage", "extractors", "embedding", "vector", "wiki", "agent", "pipeline",
-            "tools", "api", "mcp", "cli", "factory"},
-    "wiki": {"api", "mcp", "cli", "pipeline", "agent", "tools", "factory"},
-    "agent": {"api", "mcp", "cli", "pipeline", "tools", "factory"},
-    "pipeline": {"api", "mcp", "cli", "tools", "factory"},
-    "tools": {"api", "mcp", "cli"},
+            "tools", "api", "mcp", "cli", "channels", "factory"},
+    "wiki": {"api", "mcp", "cli", "channels", "pipeline", "agent", "tools", "factory"},
+    "agent": {"api", "mcp", "cli", "channels", "pipeline", "tools", "factory"},
+    "pipeline": {"api", "mcp", "cli", "channels", "tools", "factory"},
+    "tools": {"api", "mcp", "cli", "channels"},
     "api": {"storage", "extractors", "embedding", "vector", "llm", "pipeline", "factory"},
     "mcp": {"storage", "extractors", "embedding", "vector", "llm", "wiki", "agent",
             "pipeline", "factory"},
     "cli": {"storage", "extractors", "embedding", "vector", "llm", "pipeline"},
+    # New L4 transport layer (webhook capture channels: Telegram, email - Phase
+    # 1, KB design §5). Same posture as mcp: reaches tools/models/config, never
+    # the L1 primitives or pipeline.
+    "channels": {"storage", "extractors", "embedding", "vector", "llm", "wiki", "agent",
+                 "pipeline", "factory"},
 }
 
 # api/ and cli.py legitimately render a page; that is serialization, not logic.
@@ -103,14 +109,15 @@ def test_layer_does_not_import_upward(path: Path) -> None:
 
 
 def test_transport_layer_only_calls_tools() -> None:
-    """api/, mcp/ and cli.py reach the domain through tools.py, not around it.
+    """api/, mcp/, cli.py and channels/ reach the domain through tools.py, not around it.
 
-    Transport modules may import one another - mounting MCP inside the FastAPI
-    app in one process is decision D6, not a layering violation.
+    Transport modules may import one another - mounting MCP (and the Telegram/
+    email channels) inside the FastAPI app in one process is decision D6, not
+    a layering violation.
     """
-    allowed = {"tools", "models", "config", "wiki", "factory", "api", "mcp", "cli"}
+    allowed = {"tools", "models", "config", "wiki", "factory", "api", "mcp", "cli", "channels"}
     for path in _modules():
-        if _layer_of(path) not in {"api", "mcp", "cli"}:
+        if _layer_of(path) not in {"api", "mcp", "cli", "channels"}:
             continue
         imported = _imported_layers(path)
         assert imported <= allowed, (

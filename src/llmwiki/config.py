@@ -134,6 +134,14 @@ class Settings(BaseSettings):
     api_host: str = "0.0.0.0"
     api_port: int = 8000
 
+    # --- Capture channels (Phase 1, KB design §5): each is optional and
+    # independently disabled by leaving its secret unset - api/app.py mounts
+    # a channel's router only when llmwiki.channels.<name>.build_router(cfg)
+    # returns non-None, the same degrade-gracefully posture as the MCP mount. ---
+    telegram_bot_token: SecretStr = SecretStr("")
+    telegram_webhook_secret: SecretStr = SecretStr("")
+    mailgun_signing_key: SecretStr = SecretStr("")
+
     # --- Observability: stdlib logging ---
     # Consumed by llmwiki.logging_config.configure_logging, called once by each
     # entry point (cli.main, api/app.py). Independent of LangSmith tracing

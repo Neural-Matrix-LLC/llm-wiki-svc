@@ -5,20 +5,23 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## Current State
 
 Phase 0 is **implemented**, plus plan-v1.4 §19's R1–R5 (multi-provider/per-op
-LLM routing, SKILL.md-format prompts, query-agent skill invocation). `pytest`
-runs 291 unit tests with no network access (a handful skip when the optional
-`langsmith` extra is absent, environment-dependent); `scripts/smoke_flow.py
---offline` walks the whole flow end to end with fake adapters. Integration
-tests exist but have never run — they need Cloudflare and Anthropic
-credentials that do not exist yet.
 LLM routing, SKILL.md-format prompts, query-agent skill invocation) and the
 five-source-kind ingestion surface (2026-09-08: PDF file, blog URL, YouTube
 URL, pure text, text file — reachable from REST, MCP, CLI and Python alike;
-see the technical document §3.1.1). `pytest` runs 315 unit tests with no
-network access (a handful skip when a provider extra is absent,
-environment-dependent); `scripts/smoke_flow.py --offline` walks the whole flow
-end to end with fake adapters. Integration tests exist but have never run —
-they need Cloudflare and Anthropic credentials that do not exist yet.
+see the technical document §3.1.1). Phase 1 (KB design §5) is **in
+progress**: Telegram and email capture channels (webhook mode, in-process
+with FastAPI — `src/llmwiki/channels/`) landed 2026-09-11; local-LLM routing
+(RTX 3090 host, vLLM primary/llama.cpp fallback) has its config/docs groundwork
+in place but is not yet flipped on (see `config/ops.py`'s commented example);
+a LangGraph query flow plus lean LangSmith eval is not yet started. See
+`HISTORY.md`'s 2026-09-11 entry and `~/.claude/plans/we-can-start-to-functional-goblet.md`
+for the full four-workstream plan.
+
+`pytest` runs 334 unit tests with no network access (a handful skip when a
+provider extra is absent, environment-dependent); `scripts/smoke_flow.py
+--offline` walks the whole flow end to end with fake adapters. Integration
+tests exist but have never run — they need Cloudflare and Anthropic
+credentials that do not exist yet.
 
 The LLM layer is multi-provider: `LLM_PROVIDER` selects `anthropic` (native
 adapter — prompt caching, measured USD cost), `openai`, `google`, `nvidia`,
@@ -73,7 +76,16 @@ Four tests are load-bearing and must not be weakened to make a change pass:
 One more is worth knowing when touching the capture path:
 `tests/unit/test_tools_and_mcp.py::test_every_transport_can_ingest_all_five_source_kinds`
 — a source kind reachable from one transport but not the others is how that
-surface drifts.
+surface drifts. `tests/unit/test_channels.py` covers the Telegram/email
+webhook channels (auth, message-shape → `ingest_source(...)` mapping,
+optional mount) the same way.
+
+Telegram and email capture channels (`src/llmwiki/channels/`) are optional and
+webhook-based — nothing to run locally, but each needs a one-time registration
+step once `TELEGRAM_BOT_TOKEN`/`TELEGRAM_WEBHOOK_SECRET` or
+`MAILGUN_SIGNING_KEY` are set in `.env` and the service is reachable over
+public HTTPS (a tunnel for local dev): see the `curl setWebhook`/Mailgun-
+dashboard notes next to those variables in `.env.example`.
 
 ## What This Project Is
 

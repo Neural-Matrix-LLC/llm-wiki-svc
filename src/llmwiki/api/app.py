@@ -37,7 +37,29 @@ def create_app() -> FastAPI:
         from llmwiki.mcp.server import mount
 
         mount(app, mcp_app)
+
+    _mount_channels(app)
     return app
+
+
+def _mount_channels(app: FastAPI) -> None:
+    """Mount optional capture channels (Telegram, email) - Phase 1, KB design §5.
+
+    Each channel degrades to "not mounted" when its own secret is unset, the
+    same posture as the optional MCP mount above. Settings is re-imported
+    here (not taken from the module-level ``default_settings`` above) so a
+    test that monkeypatches ``llmwiki.config.settings`` before calling
+    ``create_app()`` again sees its own channel configuration, matching how
+    ``api/routes.py`` reads ``settings`` as a live module attribute.
+    """
+    from llmwiki.channels import email as email_channel
+    from llmwiki.channels import telegram as telegram_channel
+    from llmwiki.config import settings as current_settings
+
+    for build in (telegram_channel.build_router, email_channel.build_router):
+        channel_router = build(current_settings)
+        if channel_router is not None:
+            app.include_router(channel_router)
 
 
 def _build_mcp_app():  # type: ignore[no-untyped-def]

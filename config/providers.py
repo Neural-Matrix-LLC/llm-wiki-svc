@@ -37,36 +37,41 @@ PROVIDERS = [
     # prompt caching, cost priced only for models in llm/pricing.py. Uncomment
     # a row and `pip install "llmwiki[<extra>]"` to use it.
 
-    # {
-    #     "provider": "openai",  # pip install "llmwiki[openai]"
-    #     "api_key_env": "OPENAI_API_KEY",
-    #     # self-hosted (vLLM/Ollama/LM Studio): point this at its OpenAI-compatible endpoint.
-    #     # Phase 1 local LLM plan: this is the row a self-hosted vLLM/llama.cpp
-    #     # server on a local GPU host uses too - same mechanism, just point
-    #     # OPENAI_BASE_URL at the LAN endpoint instead of cloud OpenAI.
-    #     "base_url_env": "OPENAI_BASE_URL",
-    # },
-    # {
-    #     "provider": "google",  # pip install "llmwiki[google]"
-    #     "api_key_env": "GOOGLE_API_KEY",
-    # },
-    # {
-    #     "provider": "nvidia",  # pip install "llmwiki[nvidia]"
-    #     "api_key_env": "NVIDIA_API_KEY",
-    #     "base_url_env": "NVIDIA_BASE_URL",
-    # },
-    # {
-    #     "provider": "deepseek",  # pip install "llmwiki[deepseek]"
-    #     "api_key_env": "DEEPSEEK_API_KEY",
-    # },
-    # {
-    #     "provider": "openrouter",  # pip install "llmwiki[openrouter]"
-    #     "api_key_env": "OPENROUTER_API_KEY",
-    # },
+    {
+        "provider": "openai",  # pip install "llmwiki[openai]"
+        "api_key_env": "OPENAI_API_KEY",
+        # self-hosted (vLLM/Ollama/LM Studio): point this at its OpenAI-compatible endpoint
+        # Phase 1 local LLM (docs/implement-plan-v1.4.md Phase 1 plan): this row is
+        # repurposed for the RTX 3090 host's vLLM server (llama.cpp as fallback,
+        # same mechanism) - OPENAI_BASE_URL points at that box, not at cloud OpenAI.
+        # No op is routed here yet (see config/ops.py); flip summarize_source/
+        # plan_compile to provider "openai" once OPENAI_BASE_URL is live.
+        "base_url_env": "OPENAI_BASE_URL",
+    },
+    {
+        "provider": "google",  # pip install "llmwiki[google]"
+        "api_key_env": "GOOGLE_API_KEY",
+        "base_url_env": "GOOGLE_BASE_URL",
+    },
+    {
+        "provider": "nvidia",  # pip install "llmwiki[nvidia]"
+        "api_key_env": "NVIDIA_API_KEY",
+        "base_url_env": "NVIDIA_BASE_URL",
+    },
+    {
+        "provider": "deepseek",  # pip install "llmwiki[deepseek]"
+        "api_key_env": "DEEPSEEK_API_KEY",
+        "base_url_env": "DEEPSEEK_BASE_URL",
+    },
+    {
+        "provider": "openrouter",  # pip install "llmwiki[openrouter]"
+        "api_key_env": "OPENROUTER_API_KEY",
+        "base_url_env": "OPENROUTER_BASE_URL",
+    },
 
     # Offline double - no credentials, no network, no cost. Always active
     # regardless of the environment (needs no api_key_env). Handy for routing
     # one specific op (e.g. a bulk/dev op) to the fake adapter while the rest
     # use a real provider.
-    # {"provider": "fake"},
+    {"provider": "fake"},
 ]

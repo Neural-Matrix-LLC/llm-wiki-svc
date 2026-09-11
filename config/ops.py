@@ -19,20 +19,20 @@ expressed per-op instead of as one wiki-wide setting.
 
 OPS = [
     # Cheap stages: one call over bounded input (design doc §4.4's cost guarantee).
-    {"op": "summarize_source", "provider": "anthropic", "model": "claude-haiku-4-5",
+    {"op": "summarize_source", "provider": "openrouter", "model": "z-ai/glm-5.3-flash",
      "temperature": 1.0, "max_tokens": 2048},
-    {"op": "plan_compile", "provider": "anthropic", "model": "claude-haiku-4-5",
+    {"op": "plan_compile", "provider": "openrouter", "model": "z-ai/glm-5.3-flash",
      "temperature": 1.0, "max_tokens": 2048},
 
     # Executor stages: escalated to a stronger model (plan-1.1 D5's reasoning,
     # now a per-op row instead of the old COMPILE_EXECUTOR_MODEL setting).
-    {"op": "create_page", "provider": "anthropic", "model": "claude-sonnet-5",
+    {"op": "create_page", "provider": "openrouter", "model": "z-ai/glm-5.3-flash",
      "temperature": 1.0, "max_tokens": 4096},
-    {"op": "patch_page", "provider": "anthropic", "model": "claude-sonnet-5",
+    {"op": "patch_page", "provider": "openrouter", "model": "z-ai/glm-5.3-flash",
      "temperature": 1.0, "max_tokens": 4096},
 
     # Query agent - answers a question from retrieved wiki/chunk context.
-    {"op": "answer_query", "provider": "anthropic", "model": "claude-haiku-4-5",
+    {"op": "answer_query", "provider": "openrouter", "model": "z-ai/glm-5.3-flash",
      "temperature": 1.0, "max_tokens": 2048},
 
     # To route an op through a different provider, change its "provider" and
@@ -42,13 +42,13 @@ OPS = [
     # {"op": "answer_query", "provider": "openai", "model": "gpt-5",
     #  "temperature": 1.0, "max_tokens": 2048},
 
-    # Phase 1 local LLM: a self-hosted vLLM/llama.cpp server on a local GPU
-    # host is reached through the same "openai" provider row (OPENAI_BASE_URL
-    # pointed at the LAN endpoint instead of cloud OpenAI) - route the cheap,
-    # high-volume stages there and keep the escalated/query stages on a cloud
-    # provider for quality:
-    # {"op": "summarize_source", "provider": "openai", "model": "<served-model-name>",
+    # Phase 1 local LLM (RTX 3090 host, vLLM primary / llama.cpp fallback via
+    # the same OpenAI-compatible-endpoint mechanism - see config/providers.py's
+    # "openai" row and OPENAI_BASE_URL in .env): once that endpoint is live,
+    # repoint the two cheap stages at it and keep the escalated/query stages
+    # on the current cloud provider -
+    # {"op": "summarize_source", "provider": "openai", "model": "qwen2.5-14b-vllm",
     #  "temperature": 1.0, "max_tokens": 2048},
-    # {"op": "plan_compile", "provider": "openai", "model": "<served-model-name>",
+    # {"op": "plan_compile", "provider": "openai", "model": "qwen2.5-14b-vllm",
     #  "temperature": 1.0, "max_tokens": 2048},
 ]
