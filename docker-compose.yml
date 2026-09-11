@@ -1,19 +1,66 @@
 # Phase 0 runs as a single process (decision D7): FastAPI serves REST, mounts MCP
 # at /mcp, and runs ingest work in background tasks. There is no separate worker
 # service to keep in sync, and no queue broker to operate.
+#
+# Image naming (deployment-plan-container-hosting.md sections 6 and 8): the image is
+# built and pushed to Docker Hub from a dev machine, and only ever pulled on the
+# VPS. Every service therefore shares one fully-qualified name so that
+# `--profile test run --rm smoke` checks exactly the image that gets pushed:
+#
+#   DOCKER_USER=<dockerhub-user>   # Docker Hub account/org - required to push or pull
+#   IMAGE_TAG=latest               # optional; use a date or git SHA for a reversible push
+#
+# Both are read by Compose *interpolation*, which does not use `env_file:` - set them
+# in the shell or in the top-level ./.env that Compose loads automatically.
+#
+#   docker compose build api                      # local build, tagged for Docker Hub
+#   docker compose --profile test run --rm smoke  # gate it before it leaves the machine
+#   docker login && docker compose push api       # push to $DOCKER_USER on Docker Hub
+#   docker compose pull && docker compose up -d   # on the VPS; never builds
+#
+# After editing .env on the box, `up -d` is what applies it. `restart` does NOT:
+# a container's environment is fixed when the container is created, so restart
+# replays the old one. Add --force-recreate if Compose reports "up-to-date":
+#
+#   docker compose up -d --force-recreate         # apply an edited .env
+#   curl -s localhost:8010/healthz                # log_level echoes what took
+#
+# A shell variable does not reach the container either. `LOG_LEVEL=DEBUG docker
+# compose up -d` only feeds Compose's own ${...} interpolation; a container gets
+# a variable only from env_file: or environment:. To override one value without
+# editing .env, use `docker compose run --rm -e LOG_LEVEL=DEBUG api ...`.
+#
+# Day-to-day development does not use that loop at all - see the `dev` service
+# below, which bind-mounts the working tree so code changes need no rebuild:
+#
+#   docker compose --profile dev up dev           # edit code, uvicorn reloads
+#
+# With DOCKER_USER unset the name falls back to the unpushable `local/` namespace, so a
+# fresh clone can still build and run offline, and a misconfigured `pull` fails loudly
+# instead of fetching a stranger's image.
 
 services:
   api:
     build:
       context: .
       target: runtime
-    image: llmwiki:latest
+    image: ${DOCKER_USER:-local}/llmwiki:${IMAGE_TAG:-latest}
     env_file:
-      # required:false so the offline and test profiles work in a fresh clone
-      # that has no .env yet. The api service still needs real credentials.
+      # required:true - this service cannot work without real credentials, and
+      # Compose's default (false) starts it silently with NO environment at all
+      # if .env is missing or the command was run from another directory. That
+      # failure is invisible until a request fails deep in a backend call.
+      # Verified: an unselected service is not validated, so the offline and
+      # test profiles still work in a fresh clone with no .env; and `ps`/`down`
+      # keep working even when the file is missing, so this cannot strand a
+      # running deployment - only `up` refuses, naming the path it wanted.
       - path: .env
-        required: false
+        required: true
     environment:
+      # Anything listed here OVERRIDES the same key in .env - that is the point
+      # for LOCAL_STORAGE_PATH, but it also means a value set here can never be
+      # changed by editing .env on the box. Keep this list minimal.
+      #
       # Inside the container the local-storage path is the mounted volume,
       # regardless of what .env says for host-side runs.
       LOCAL_STORAGE_PATH: /data
@@ -34,7 +81,70 @@ services:
       # the host at ./.data - matches the path host-side (non-docker) runs
       # already use, per LOCAL_STORAGE_PATH in .env.example.
       - ./.data:/data
+      # config/ and skills/ are baked into the image (Dockerfile), so neither is
+      # mounted here. Uncomment either line to override the image's copy with a
+      # directory on the box - a different routing table for this deployment, or
+      # a new skill without a rebuild.
+      #
+      # Do NOT uncomment "just in case": Compose auto-creates a missing host
+      # directory as an empty one, and an empty mount SHADOWS the baked-in files.
+      # That silently restores the single-provider fallback - precisely the
+      # 2026-09-10 failure. `curl /healthz | jq .config` shows which is in force.
+      # - ./config:/app/config:ro
+      # - ./skills:/app/skills:ro
     restart: unless-stopped
+
+  # Dev mode: the working tree is mounted into the container, so a code edit is
+  # live immediately - no `build`, no `up --build`, no image push. uvicorn
+  # --reload (see the Dockerfile's dev stage) restarts the app in place.
+  #
+  #   docker compose --profile dev up dev        # http://localhost:8011
+  #   docker compose --profile test run --rm pytest    # see the pytest service
+  #   docker compose --profile dev run --rm dev python scripts/smoke_flow.py --offline
+  #   docker compose --profile dev run --rm dev llmwiki lint
+  #   docker compose --profile dev exec dev bash
+  #
+  # Rebuild only when requirements.txt or the Dockerfile changes:
+  #   docker compose --profile dev build dev
+  #
+  # Runs as the host's uid/gid so anything written through the mounts (.data/,
+  # .pytest_cache/, compiled wiki pages) is owned by you and not by root. The
+  # 1000:1000 default is right for a single-user WSL2/Ubuntu box; override in
+  # ./.env or the shell if `id -u` says otherwise:
+  #   DEV_UID=$(id -u) DEV_GID=$(id -g) docker compose --profile dev up dev
+  dev:
+    profiles: ["dev"]
+    build:
+      context: .
+      target: dev
+    # Deliberately NOT the ${DOCKER_USER} name the other services share: this
+    # image carries an editable install pointing at a bind mount and must never
+    # be pushed or deployed. Its own name keeps `compose push` from touching it.
+    image: local/llmwiki-dev:latest
+    user: "${DEV_UID:-1000}:${DEV_GID:-1000}"
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      LOCAL_STORAGE_PATH: /data
+      API_HOST: 0.0.0.0
+      API_PORT: "8000"
+      LOG_LEVEL: ${LOG_LEVEL:-DEBUG}
+      # The bind mount is a Linux-native path, so inotify works and watchfiles
+      # sees edits. Uncomment if the tree ever lives on a Windows drive
+      # (/mnt/c/...), where inotify events do not cross the 9p boundary.
+      # WATCHFILES_FORCE_POLLING: "true"
+    ports:
+      # Separate from the api service's 8010 so both can run at once.
+      - "${DEV_PORT:-8011}:8000"
+    volumes:
+      # The whole tree, not just src/: tests, scripts, skills/ and config/ are
+      # all read at run time, and all of them should be live-editable too.
+      - .:/app
+      # Same host directory as the api service uses, so a dev run and a
+      # production-image run see one corpus at ./.data.
+      - ./.data:/data
+    # No restart policy: in dev a crash should stay down and visible.
 
   # Offline mode: no keys, no network, fake adapters. Useful for a demo, for
   # reviewing the wiki format, or for checking the image itself works.
@@ -44,7 +154,7 @@ services:
     build:
       context: .
       target: runtime
-    image: llmwiki:latest
+    image: ${DOCKER_USER:-local}/llmwiki:${IMAGE_TAG:-latest}
     environment:
       STORAGE_BACKEND: local
       VECTOR_BACKEND: memory
@@ -52,10 +162,45 @@ services:
       LLM_BACKEND: fake
       LOCAL_STORAGE_PATH: /data
       INGEST_API_TOKEN: offline-token
+      # Required, not belt-and-braces: the routing table is baked into the image
+      # (Dockerfile), and routing takes precedence over LLM_BACKEND/LLM_PROVIDER
+      # in factory._build_llm_client - it is consulted first and returns before
+      # the "fake" branch is ever reached. Without these two, this service dies
+      # at startup with "op 'summarize_source' routes to provider 'openrouter',
+      # which is not active", because an offline box has no OPENROUTER_API_KEY.
+      # Pointing both at a path that cannot exist is what selects the fallback,
+      # and the fallback is what honours LLM_BACKEND=fake.
+      # (scripts/smoke_flow.py --offline needs no such override: it builds its
+      # own Settings with these fields set explicitly, which is why the `smoke`
+      # service below is unaffected.)
+      LLMWIKI_PROVIDERS_CONFIG: /nonexistent/providers.py
+      LLMWIKI_OPS_CONFIG: /nonexistent/ops.py
     ports:
       - "${OFFLINE_PORT:-8001}:8000"
     volumes:
       - llmwiki-offline-data:/data
+
+  # The unit suite against the mounted tree, in the dev image.
+  #   docker compose --profile test run --rm pytest          # all of it
+  #   docker compose --profile test run --rm pytest tests/unit/test_agent.py -x
+  #
+  # Deliberately has no `env_file:` and no ./.data mount, unlike the dev
+  # service. Compose's env_file promotes .env entries to real environment
+  # variables, and tests such as test_config.py::test_defaults_are_the_cloud_
+  # backends assert on defaults via Settings(_env_file=None) - which ignores the
+  # .env *file* but still reads the ambient environment. A developer's real
+  # LLM_PROVIDER would fail them for no reason. Unit tests need no credentials
+  # anyway (CLAUDE.md: they never make real API calls).
+  pytest:
+    profiles: ["test"]
+    build:
+      context: .
+      target: dev
+    image: local/llmwiki-dev:latest
+    user: "${DEV_UID:-1000}:${DEV_GID:-1000}"
+    volumes:
+      - .:/app
+    entrypoint: ["pytest"]
 
   # End-to-end flow check against the built image.
   #   docker compose --profile test run --rm smoke
@@ -64,7 +209,7 @@ services:
     build:
       context: .
       target: runtime
-    image: llmwiki:latest
+    image: ${DOCKER_USER:-local}/llmwiki:${IMAGE_TAG:-latest}
     environment:
       LOCAL_STORAGE_PATH: /data
     volumes:
@@ -75,14 +220,19 @@ services:
   #   docker compose --profile ops run --rm lint
   lint:
     profiles: ["ops"]
-    image: llmwiki:latest
+    image: ${DOCKER_USER:-local}/llmwiki:${IMAGE_TAG:-latest}
     env_file:
+      # required:true for the same reason as api - this one runs unattended
+      # from cron, where a silently credential-less run is worst of all.
       - path: .env
-        required: false
+        required: true
     environment:
       LOCAL_STORAGE_PATH: /data
     volumes:
       - ./.data:/data
+      # Routing table comes from the image, as for api. Same warning applies to
+      # uncommenting a host override here.
+      # - ./config:/app/config:ro
     entrypoint: ["llmwiki", "lint"]
 
 volumes:

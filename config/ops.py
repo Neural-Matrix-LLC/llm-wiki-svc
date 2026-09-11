@@ -1,8 +1,11 @@
 """Per-op routing table - design v1.4 §4.8.1, implement-plan-v1.4.md §19.2.
 
-Copy this file to ``config/ops.py`` (``cp config/ops.py.example
-config/ops.py``) alongside an active ``config/providers.py`` - both files are
-required together, or neither.
+This is the **tracked, active** per-op routing table (2026-09-10): committed
+alongside ``config/providers.py`` and copied into the image by the
+``Dockerfile``. It names providers and models, never credentials. Both files
+are required together, or neither - one without the other fails loudly at
+startup. (The former ``ops.py.example`` was deleted on 2026-09-10, once this
+file became the tracked one: two copies of the same table is one too many.)
 
 Every op the codebase actually calls needs **exactly one** row here - a
 missing or duplicate one fails loudly at startup, and so does an op whose
@@ -19,20 +22,20 @@ expressed per-op instead of as one wiki-wide setting.
 
 OPS = [
     # Cheap stages: one call over bounded input (design doc §4.4's cost guarantee).
-    {"op": "summarize_source", "provider": "anthropic", "model": "claude-haiku-4-5",
+    {"op": "summarize_source", "provider": "openrouter", "model": "z-ai/glm-5.3-flash",
      "temperature": 1.0, "max_tokens": 2048},
-    {"op": "plan_compile", "provider": "anthropic", "model": "claude-haiku-4-5",
+    {"op": "plan_compile", "provider": "openrouter", "model": "z-ai/glm-5.3-flash",
      "temperature": 1.0, "max_tokens": 2048},
 
     # Executor stages: escalated to a stronger model (plan-1.1 D5's reasoning,
     # now a per-op row instead of the old COMPILE_EXECUTOR_MODEL setting).
-    {"op": "create_page", "provider": "anthropic", "model": "claude-sonnet-5",
+    {"op": "create_page", "provider": "openrouter", "model": "z-ai/glm-5.3-flash",
      "temperature": 1.0, "max_tokens": 4096},
-    {"op": "patch_page", "provider": "anthropic", "model": "claude-sonnet-5",
+    {"op": "patch_page", "provider": "openrouter", "model": "z-ai/glm-5.3-flash",
      "temperature": 1.0, "max_tokens": 4096},
 
     # Query agent - answers a question from retrieved wiki/chunk context.
-    {"op": "answer_query", "provider": "anthropic", "model": "claude-haiku-4-5",
+    {"op": "answer_query", "provider": "openrouter", "model": "z-ai/glm-5.3-flash",
      "temperature": 1.0, "max_tokens": 2048},
 
     # To route an op through a different provider, change its "provider" and

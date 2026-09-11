@@ -42,6 +42,11 @@ source .venv/bin/activate               # python 3.11.14; the system python is 3
 pytest                                  # unit tests only (integration is opt-in)
 pytest -m integration                   # needs a populated .env; costs money
 python scripts/smoke_flow.py --offline  # end-to-end, no keys, under 2 seconds
+
+# Same loop inside Docker, with this tree bind-mounted so edits need no rebuild
+# (README "Dev mode"): the dev image installs llmwiki editable and reloads.
+docker compose --profile dev up dev        # http://localhost:8011
+docker compose --profile test run --rm pytest   # clean-env suite in that image
 ruff check . && mypy                    # the rest of the pre-commit gate
 
 # Every LangChain provider ships in the base install already - trying a

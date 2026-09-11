@@ -652,8 +652,9 @@ as the template.
    mandated by `CLAUDE.md` §"`.env.example` is mandatory and must stay in
    sync" independent of this repo's own conventions).
 
-5. **`config/providers.py.example`** — add a commented-out row so a
-   multi-provider deployment can enable it by uncommenting.
+5. **`config/providers.py`** — add a row. It can stay uncommented: a
+   provider whose `api_key_env` is unset in the environment is silently
+   inactive, so listing one costs nothing until someone supplies the key.
 
 6. **`src/llmwiki/llm/pricing.py`** — optional but recommended: add
    `RATES` entries for the models you'll actually use, or every call through
@@ -696,9 +697,9 @@ matters for validation: `llm/routing_config.py:KNOWN_OPS`. If you add a sixth
 call site that does `llm.complete(op="new_thing", ...)`:
 
 1. Add `"new_thing"` to `KNOWN_OPS` in `llm/routing_config.py`.
-2. Add a row for it to `config/ops.py.example` (and any real
-   `config/ops.py` a deployment has — `_resolve_ops` fails loudly at startup
-   if a known op has no row, by design).
+2. Add a row for it to `config/ops.py` (plus any overriding copy a
+   deployment bind-mounts — `_resolve_ops` fails loudly at startup if a known
+   op has no row, by design).
 3. If it needs a prompt template, add `chains/prompts/new_thing.md` and call
    `load_prompt("new_thing")` at the call site.
 4. Existing single-provider fallback needs no change — `Settings.llm_model`/
@@ -747,19 +748,24 @@ providers actually usable in combination. It exists outside `src/llmwiki`
 entirely (design v1.4 §4.8: this is *this application's* concern, not part
 of the shareable LLM contract).
 
-```bash
-cp config/providers.py.example config/providers.py
-cp config/ops.py.example config/ops.py
-```
+Both files are tracked in git and baked into the image by the `Dockerfile`
+(2026-09-10) — they name only *which env var* carries each key, never a value,
+so there is nothing to copy and nothing to scp onto a box. Edit them in place
+and rebuild; `docker-compose.yml` carries a commented-out
+`./config:/app/config:ro` for a deployment that must diverge without one.
 
 - `config/providers.py` defines `PROVIDERS: list[dict]` — which providers are
   available and which **environment variable name** (not value) carries each
   one's credentials. It holds no secrets.
 - `config/ops.py` defines `OPS: list[dict]` — one row per op in `KNOWN_OPS`
   (§5.3), naming provider/model/temperature/max_tokens.
-- **Presence of both files is the switch.** Absent (the default, a fresh
-  clone) → today's single-provider path from `Settings` — zero behaviour
-  change. Present → `llm/routing_config.load_routing_config()` builds a
+- **Presence of both files is the switch** — and since 2026-09-10 they are
+  present by default, so a fresh clone is in *routed* mode, not the fallback.
+  Reaching the fallback now takes pointing `LLMWIKI_PROVIDERS_CONFIG` /
+  `LLMWIKI_OPS_CONFIG` at a path that does not exist; leaving them unset does
+  not do it, because unset resolves to `./config/`, which now exists. Absent →
+  the single-provider path from `Settings`. Present →
+  `llm/routing_config.load_routing_config()` builds a
   `RoutingConfig`, and `factory._build_routed_llm_client()` constructs one
   concrete client per *active* provider and wraps them in
   `llm.router.RoutingLLMClient`.
@@ -775,7 +781,12 @@ cp config/ops.py.example config/ops.py
   paths at a nonexistent path for every test, and `--offline` does the same
   — so this is handled, but if you ever see a test unexpectedly trying real
   network calls, check whether that guard got bypassed (e.g. a test
-  constructing `Settings` some new way).
+  constructing `Settings` some new way). The same bypass is needed by anything
+  else that means "offline": routing is consulted *before* `LLM_PROVIDER` /
+  `LLM_BACKEND` in `factory._build_llm_client` and returns first, so
+  `LLM_BACKEND=fake` alone no longer selects the offline double. The
+  `api-offline` compose service hit exactly this when the table moved into the
+  image and now pins both paths at `/nonexistent/...`.
 - Credential resolution precedence: a real `os.environ` value wins over one
   read from `.env` (via `dotenv_values()`, which never mutates
   `os.environ`) — matching pydantic-settings' own source order. This is why
