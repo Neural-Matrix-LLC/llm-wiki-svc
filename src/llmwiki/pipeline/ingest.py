@@ -28,6 +28,14 @@ from llmwiki.models.source import (
     SourceState,
     SourceStatus,
 )
+from llmwiki.models.source import (
+    ExtractedDoc,
+    Modality,
+    SourceMeta,
+    SourceRef,
+    SourceState,
+    SourceStatus,
+)
 from llmwiki.pipeline.chunker import chunk_document
 from llmwiki.storage.base import ObjectNotFound, ObjectStore
 from llmwiki.storage.layout import (
@@ -76,6 +84,7 @@ class IngestPipeline:
         mime: str = "",
         title: str = "",
         text: str | None = None,
+        text: str | None = None,
     ) -> SourceRef:
         """Write the immutable raw objects. Returns immediately; nothing is compiled yet.
 
@@ -100,6 +109,21 @@ class IngestPipeline:
         if existing is not None:
             logger.info("capture: source_id=%s duplicate, skipping", existing)
             return SourceRef(source_id=existing, status="done", duplicate=True)
+
+        if text is not None:
+            data = text.encode("utf-8")
+            resolved_mime = mime or "text/plain"
+            modality: Modality = "text"
+        elif file is not None:
+            data = file
+            resolved_mime = mime or "application/octet-stream"
+            modality = detect_modality(resolved_mime, filename, None)
+        else:
+            assert url is not None
+            data, resolved_mime = self._fetch(url, detect_modality(mime, filename, url))
+            # Re-detected against what the server actually served: a link to a
+            # PDF and a link to a blog post are indistinguishable until then.
+            modality = detect_modality(resolved_mime or mime, filename, url)
 
         if text is not None:
             data = text.encode("utf-8")

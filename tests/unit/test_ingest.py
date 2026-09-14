@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import json
 from pathlib import Path
 
 import pytest
@@ -38,7 +39,13 @@ def test_identical_bytes_are_deduplicated(pipeline) -> None:
 
 def test_capture_requires_exactly_one_input(pipeline) -> None:
     with pytest.raises(ValueError, match="exactly one"):
+def test_capture_requires_exactly_one_input(pipeline) -> None:
+    with pytest.raises(ValueError, match="exactly one"):
         pipeline.capture()
+    with pytest.raises(ValueError, match="exactly one"):
+        pipeline.capture(url="https://example.org/a", text="pasted")
+    with pytest.raises(ValueError, match="exactly one"):
+        pipeline.capture(file=b"bytes", text="pasted")
     with pytest.raises(ValueError, match="exactly one"):
         pipeline.capture(url="https://example.org/a", text="pasted")
     with pytest.raises(ValueError, match="exactly one"):

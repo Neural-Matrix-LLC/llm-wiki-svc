@@ -68,6 +68,30 @@ curl -sS -X POST http://localhost:8010/ingest \
 curl -sS http://localhost:8010/sources/<source_id>   # poll to `done`
 ```
 
+`--url` still fetches the page or YouTube transcript over the network;
+`--offline` only keeps storage and the LLM local and fake. Drop `--offline`
+once `.env` has real credentials.
+
+Over HTTP: `POST /ingest` takes `{"url": ...}` or `{"text": ...}`, and
+`POST /upload` takes a file. The MCP `ingest_source` tool takes `url` or
+`text`. All of them call the same `tools.ingest_source()`.
+
+The two are not interchangeable — `/ingest` reads a JSON body, so a file has to
+go to `/upload` as multipart, not to `/ingest`:
+
+```bash
+TOKEN=...   # INGEST_API_TOKEN from .env
+curl -sS -X POST http://localhost:8010/upload \
+     -H "Authorization: Bearer $TOKEN" \
+     -F "file=@practical-guide.pdf" -F "title=practical guide pdf"
+
+curl -sS -X POST http://localhost:8010/ingest \
+     -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+     -d '{"url": "https://karpathy.github.io/2019/04/25/recipe/"}'
+
+curl -sS http://localhost:8010/sources/<source_id>   # poll to `done`
+```
+
 ## Running against real backends
 
 Fill `.env` with Cloudflare and Anthropic credentials, then:

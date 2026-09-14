@@ -23,6 +23,9 @@ from today's code, that is called out explicitly rather than blended in.
 llmwiki is a **research knowledge base**: sources you capture (PDF files,
 blog/article URLs, YouTube videos, pasted text and text files — §3.1.1) are
 stored immutably, then an LLM
+llmwiki is a **research knowledge base**: sources you capture (PDF files,
+blog/article URLs, YouTube videos, pasted text and text files — §3.1.1) are
+stored immutably, then an LLM
 incrementally compiles them into an interlinked markdown wiki. A query agent
 answers questions from that wiki first, falling back to raw vector search,
 and every citation it returns is verified to resolve back to a real captured
@@ -285,6 +288,8 @@ Entry points: `POST /ingest` or `POST /upload` (`api/routes.py`), the MCP
 tool `ingest_source`, or `llmwiki ingest` (`cli.py`). All three call into
 `tools.py`. What they accept is one of three *inputs* covering five *source
 kinds* — see §3.1.1.
+`tools.py`. What they accept is one of three *inputs* covering five *source
+kinds* — see §3.1.1.
 
 ```
 api/routes.py:ingest()              ┐
@@ -299,10 +304,6 @@ IngestPipeline.capture(url= | file= | text=)  [pipeline/ingest.py]
   │                                                              the id is not known yet)
   ├─► extractors.base.detect_modality                          (pick pdf/web/youtube/text)
   ├─► extractors.web.fetch / extractors.youtube.fetch_transcript  (URL sources only, at capture time)
-  ├─► extractors.base.detect_modality  (again, on the SERVED content type — see §3.1.1)
-  ├─► source_id = layout.source_id_for(hash, title)            ({hash}-{slug}; title from the
-  │                                                              caller, the page, the filename
-  │                                                              stem or the URL tail, in that order)
   └─► ObjectStore.put()  → raw/{id}/original.*, raw/{id}/meta.json     (immutable, written once)
   returns SourceRef{source_id, status="queued"} immediately
 

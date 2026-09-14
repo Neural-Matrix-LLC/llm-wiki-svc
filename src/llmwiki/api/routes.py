@@ -61,7 +61,16 @@ class IngestRequest(BaseModel):
 
     url: str | None = None
     text: str | None = None
+    url: str | None = None
+    text: str | None = None
     title: str = ""
+
+    @model_validator(mode="after")
+    def _exactly_one_source(self) -> IngestRequest:
+        """Reject a body naming both or neither, so the 422 comes from validation."""
+        if (self.url is None) == (self.text is None):
+            raise ValueError("provide exactly one of url or text")
+        return self
 
     @model_validator(mode="after")
     def _exactly_one_source(self) -> IngestRequest:
@@ -85,6 +94,7 @@ def ingest(request: IngestRequest, background: BackgroundTasks) -> SourceRef:
     PDF; ``{"text": ...}`` stores the string itself as the immutable source.
     Files go to ``POST /upload`` instead.
     """
+    
     logger.debug(" /ingest request: %s", request)
     ref = tools.ingest_source(url=request.url, text=request.text, title=request.title)
     if not ref.duplicate:
