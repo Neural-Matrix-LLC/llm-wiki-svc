@@ -12,7 +12,7 @@ from today's code, that is called out explicitly rather than blended in.
 | Document | What it's for |
 |---|---|
 | `docs/llmwiki-KB-design_v1.4.md` | Why the system is shaped this way — architecture rationale, phase plan. Read before making a *design* decision. |
-| `docs/implement-plan-v1.4.md` | The packaging/extraction plan (mostly not yet executed — see §9). |
+| `docs/implement-plan-v1.4.md` | The packaging/extraction plan (mostly not yet executed — see §10). |
 | `docs/HISTORY.md` | Chronological log of every change, bug, and deviation. The ground truth for "why is this line like this". |
 | **This document** | The map: which class calls which, how to extend each seam, and the full API surface. Optimized for "I need to change X" and "what does Y expose". |
 
@@ -1124,21 +1124,304 @@ fixed on 2026-09-08 (the fake `httpx.Response` had no `request` set, so
 
 ---
 
-## 9. Deployment
+## 9. Deployment — Docker and `docker-compose.yml`
+
+The container story is two files: `Dockerfile` (what goes *in* the image)
+and `docker-compose.yml` (how the image is *run*, on a dev box and on the
+VPS). Both carry long in-line comments that are the ground truth for
+individual decisions; this section is the map that ties them together, and
+answers the questions that come up when a second engineer first meets them:
+which services actually run in production, where `.env` is read, what
+`target: runtime` refers to, and why `up -d` alone can run a stale image.
+`docs/deployment-plan-container-hosting.md` §6 has the step-by-step VPS
+runbook; `docs/HISTORY.md` (2026-09-10 and 2026-09-13 entries) has the
+incidents that shaped each line.
+
+### 9.1 `Dockerfile` — three stages
+
+One multi-stage `Dockerfile`; the stage names are what
+`docker-compose.yml`'s `build.target:` keys refer to.
+
+| Stage | `FROM` | What it does | Who uses it |
+|---|---|---|---|
+| `build` | `python:3.11-slim` | Creates `/opt/venv`, installs `requirements.txt` (pinned lockfile, copied *before* `src/` so a code edit does not invalidate the dependency layer), then `pip install --no-deps .`. Carries the pip cache and any compilers. Never run directly. | Source for the other two stages' `COPY --from=build /opt/venv`. |
+| `dev` | `python:3.11-slim` | Copies the venv, then reinstalls the package **editable** (`pip install -e .`), so `import llmwiki` resolves to `/app/src` — which Compose bind-mounts from the host. `CMD` is `uvicorn --reload --reload-dir /app/src`. No fixed user; `/data` is `0777` so any host uid can write. | `dev` and `pytest` services (`target: dev`). |
+| `runtime` | `python:3.11-slim` | Copies the venv; bakes in `scripts/`, `tests/fixtures/`, **`skills/`** and **`config/`** (see below); creates non-root user `llmwiki` (uid/gid 10001) and owns `/data`; `HEALTHCHECK` against `/healthz`; plain `uvicorn` on 8000. | `api`, `init-data`, `api-offline`, `smoke`, `lint` — every service that is (or checks) the shipped image. |
+
+Two things in the `runtime` stage are there because of production incidents
+and are easy to undo by accident:
+
+- **`skills/` and `config/` are `COPY`ed explicitly.** Neither is package
+  data: `skills/` is an operator-editable discovery directory by design
+  (v1.4 §4.8.2) and `config/providers.py` / `config/ops.py` live at the repo
+  root. A `pip install` therefore does *not* carry them into `/opt/venv`.
+  Without these two `COPY` lines the deployed container had no skills
+  directory (the query agent silently fell back to the fixed prompt) and no
+  routing table (single-provider fallback) — the 2026-09-10 Hostinger symptom.
+  Consequence: the routing table is part of the image, so changing a model
+  is a rebuild + push, not an edit on the box (§9.5 has the override).
+- **`USER llmwiki` (uid 10001).** The service accepts uploads from the
+  network; running as root is a larger blast radius than needed. This is
+  why `docker-compose.yml` defaults `API_UID`/`API_GID` to 10001 and why
+  the `init-data` one-shot exists (§9.3).
+
+`.dockerignore` keeps `.venv/`, `.data/`, `.git/`, caches and **`.env`** out
+of the build context — `.env` never enters an image.
+
+### 9.2 `docker-compose.yml` — the service map
+
+Seven services, one image name for everything that ships. The `profiles:`
+key is what decides which services a given command touches: a service with
+no profile is always selected; a service with a profile is selected only
+when that profile is named on the command line.
+
+| Service | Profile | Image | Built from | Purpose |
+|---|---|---|---|---|
+| `init-data` | *(none)* | `${DOCKER_USER}/llmwiki:${IMAGE_TAG}` | — (pull only) | One-shot, runs as root before `api`: `chown`s anything in `./.data` not owned by `API_UID:API_GID`, then exits. |
+| `api` | *(none)* | `${DOCKER_USER}/llmwiki:${IMAGE_TAG}` | `target: runtime` | **The production service.** REST + MCP at `/mcp`, ingest in `BackgroundTasks`. |
+| `dev` | `dev` | `local/llmwiki-dev:latest` | `target: dev` | Working tree bind-mounted at `/app`; uvicorn reloads on edit. Port 8011. |
+| `api-offline` | `offline` | `${DOCKER_USER}/llmwiki:${IMAGE_TAG}` | `target: runtime` | The shipped image with fake adapters and no keys; a demo / image sanity check. Port 8001. |
+| `pytest` | `test` | `local/llmwiki-dev:latest` | `target: dev` | Unit suite against the mounted tree. Deliberately no `env_file` and no `./.data`. |
+| `smoke` | `test` | `${DOCKER_USER}/llmwiki:${IMAGE_TAG}` | `target: runtime` | `scripts/smoke_flow.py --offline` inside the exact image that gets pushed. |
+| `lint` | `ops` | `${DOCKER_USER}/llmwiki:${IMAGE_TAG}` | — (pull only) | `llmwiki lint` — the scheduled global lint (plan §6.8), run from host cron, never on ingest. |
+
+Verify the selection rather than reasoning about it:
 
 ```bash
-docker compose up --build                        # reads .env, real backends
-docker compose --profile offline up api-offline   # no keys, fake adapters, :8001
-docker compose --profile test run --rm smoke      # runs scripts/smoke_flow.py --offline in the image
-docker compose --profile ops run --rm lint        # llmwiki lint — intended as a scheduled job, not on ingest
+docker compose config --services                 # → init-data, api
+docker compose --profile ops config --services   # → init-data, api, lint
+docker compose --profile dev config --services   # → init-data, api, dev
 ```
 
-Single-process design (`docker-compose.yml`'s own comment: "there is no
-separate worker service to keep in sync, and no queue broker to operate") —
+The `dev` image has a **different name on purpose** (`local/llmwiki-dev`,
+not `${DOCKER_USER}/…`): it carries an editable install pointing at a bind
+mount and must never be pushed. Its own name keeps `docker compose push`
+from touching it. Conversely, with `DOCKER_USER` unset the shipped name
+falls back to `local/llmwiki`, so a fresh clone still builds and runs
+offline, and a misconfigured `pull` on a VPS fails loudly instead of
+fetching a stranger's image.
+
+### 9.3 What production actually runs
+
+On the VPS the command is the profile-less one:
+
+```bash
+docker compose pull && docker compose up -d      # never builds on the box
+```
+
+That selects exactly **`init-data` and `api`**. Nothing else in the file is
+touched — the other five services are profile-gated and inert, and the
+top-level `volumes: llmwiki-offline-data` is only referenced by
+`api-offline`/`smoke`, so it is not even created (`docker compose config
+--volumes` prints nothing).
+
+Order: `api` declares `depends_on: init-data: condition:
+service_completed_successfully`, so `init-data` runs to completion first. An
+exited `init-data` in `docker compose ps -a` is the expected steady state.
+It exists because the runtime image is uid 10001 while a bind-mount source
+that does not yet exist at `up` time is created by the Docker *daemon* as
+`root:root 0755` — on a fresh box that gave a container that started,
+passed `/healthz`, and failed its first ingest with `PermissionError` on
+`/data` (2026-09-13). `find ! -user … -exec chown` touches only what is
+wrong, so a restart over a large corpus is one stat pass and no writes.
+
+What each key of `api` contributes on the box:
+
+| Key | On the VPS |
+|---|---|
+| `image:` | What `pull` fetches. `DOCKER_USER` and `IMAGE_TAG` come from `./.env` by interpolation (§9.4). |
+| `build:` | **Ignored** as long as the image is present locally — which is what `pull` first guarantees. See §9.6 for what happens if it is not. |
+| `user:` | `${API_UID:-10001}:${API_GID:-10001}` — the image's own user unless `.env` overrides. |
+| `env_file: .env, required: true` | Every credential and backend selector. `required: true` is deliberate: Compose's default (`false`) would start the service silently with **no** environment if `.env` were missing or the command were run from another directory, and the failure surfaces only deep in a backend call. `ps`/`down` still work without the file; only `up` refuses, naming the path. |
+| `environment:` | Three keys that **override** `.env`: `LOCAL_STORAGE_PATH=/data`, `API_HOST=0.0.0.0`, `API_PORT=8000`. Anything listed here can never be changed by editing `.env` on the box — keep it minimal. |
+| `ports:` | `${API_PORT:-8010}:8000`. Host-side default is 8010 because 8000 on the Hostinger box is already taken; the container side is fixed at 8000. |
+| `volumes: ./.data:/data` | The corpus when `STORAGE_BACKEND=local`. Stays empty with `STORAGE_BACKEND=r2` (container is stateless). Bind-mounted, not a named volume, so `raw/` / `wiki/` / `status/` are inspectable on the host. |
+| `restart: unless-stopped` | Survives daemon and box restarts. |
+
+A site-side `docker-compose.yml` that contains only `init-data` and `api`
+(plus `lint` if the weekly cron is wanted) is a valid and arguably better
+production file: drop the `build:` block (there is no source on the box for
+it to build from) and the unused top-level `volumes:`. The repo's full file
+also works unchanged — the profiles make the rest inert — so this is a
+readability choice, not a behavioural one.
+
+### 9.4 `.env` is read in two different ways
+
+The same `./.env` feeds Compose and the container, through two mechanisms
+that do not overlap:
+
+1. **Compose interpolation** — every `${VAR}` in the YAML. Compose loads
+   `./.env` from the project directory automatically for this. Keys used
+   this way: `DOCKER_USER`, `IMAGE_TAG`, `API_UID`, `API_GID`, `API_PORT`,
+   `DEV_UID`, `DEV_GID`, `DEV_PORT`, `OFFLINE_PORT`, `LOG_LEVEL` (dev only).
+   A shell export also satisfies these.
+2. **`env_file:`** — promotes the file's entries to real environment
+   variables *inside* the container. This is how `STORAGE_BACKEND`,
+   `LLM_PROVIDER`, every API key, `INGEST_API_TOKEN`, etc. reach
+   `config.Settings` (§6.5).
+
+Three consequences that are not obvious from the file alone:
+
+- **`API_PORT` does double duty.** As an interpolation value it sets the
+  *host* port (default 8010); the container-side copy is pinned to `8000`
+  by `environment:`, so `.env`'s `API_PORT=8010` never reaches uvicorn.
+- **Precedence inside the container** is `environment:` > `env_file:` >
+  image `ENV`. The `Dockerfile`'s `ENV LOCAL_STORAGE_PATH=/data` is the
+  lowest tier and is restated in `environment:` so an `.env` written for
+  host-side runs (`LOCAL_STORAGE_PATH=./.data`) cannot override it.
+- **A shell variable does not reach the container.** `LOG_LEVEL=DEBUG
+  docker compose up -d` only feeds interpolation; a container gets a
+  variable only from `env_file:` or `environment:`. For a one-off override
+  use `docker compose run --rm -e LOG_LEVEL=DEBUG api …`.
+
+And the rule that cost a day on 2026-09-10: **editing `.env` on the box
+changes nothing until the container is recreated.** A container's
+environment is fixed at creation; `docker compose restart` replays the old
+one. `docker compose up -d` applies the edit (add `--force-recreate` if
+Compose reports "up-to-date"), and `curl -s localhost:8010/healthz` echoes
+`log_level` so you can see what took. Full diagnosis flow:
+`deployment-plan-container-hosting.md` §6 Phase 3b.
+
+### 9.5 Volumes — bind mounts, the named volume, and the `config/` / `skills/` override
+
+Two mount forms appear, and the prefix is what distinguishes them:
+
+```yaml
+- ./.data:/data                 # bind mount: this host directory
+- llmwiki-offline-data:/data    # named volume: Docker-managed storage
+```
+
+A source with a `./` or `/` prefix is a **bind mount** to a host path;
+anything else is a **named volume** and must be declared in the top-level
+`volumes:` block. Docker creates a named volume under
+`/var/lib/docker/volumes/<project>_<name>/` on first use; it persists
+across `up`/`down` (until `down -v`) and is not browsable from the host the
+way `./.data` is. `api-offline` and `smoke` use the named volume
+deliberately: they run with fake adapters and must not write throwaway
+output into the real `./.data` corpus, and a Docker-created volume needs no
+ownership fix-up.
+
+`config/` and `skills/` are **not** mounted — they are baked into the image
+(§9.1). `api` and `lint` carry commented-out overrides:
+
+```yaml
+# - ./config:/app/config:ro
+# - ./skills:/app/skills:ro
+```
+
+Uncomment one only to deliberately replace the image's copy (a different
+routing table for this deployment; a new skill without a rebuild). Do
+**not** uncomment "just in case": Compose auto-creates a missing host
+directory as an empty one, and an empty bind mount **shadows** the
+baked-in files — which silently restores the single-provider fallback,
+precisely the 2026-09-10 failure. `curl /healthz | jq .config` shows which
+routing table is in force.
+
+### 9.6 Image lifecycle — build, gate, push, pull; and why `up -d` alone can run a stale image
+
+The image is built and pushed from a dev machine and only ever pulled on
+the VPS (`deployment-plan-container-hosting.md` §6, §8). Every shipping
+service shares the one fully-qualified name so the gate checks exactly the
+bytes that get pushed:
+
+```bash
+# dev machine
+docker compose build api                          # Dockerfile target=runtime → ${DOCKER_USER}/llmwiki:${IMAGE_TAG}
+docker compose --profile test run --rm smoke      # scripts/smoke_flow.py --offline, inside that image
+docker login && docker compose push api           # to Docker Hub
+
+# VPS
+docker compose pull && docker compose up -d
+```
+
+`docker compose build api` is what reads `api`'s `build:` block: context `.`
+(so the `Dockerfile`'s `COPY src/ …` resolve against the repo root), stop at
+stage `runtime`, tag the result with the service's `image:` name. `push`
+pushes that tag.
+
+**Which image `up` uses.** This is command-dependent and is the part worth
+being precise about:
+
+- `docker compose pull` always contacts the registry, compares digests, and
+  downloads if the remote tag differs. It is the only step that refreshes an
+  outdated local copy.
+- `docker compose up -d` on its own does **not** check the registry. Its
+  default pull policy is `missing`: if an image with that `name:tag` exists
+  locally it is used as-is, however old. And because `api` declares
+  `build:`, if the image is *missing* Compose will try to **build** it —
+  which on a VPS with no source tree fails, and on a dev box quietly
+  produces a local image that may not match what was pushed.
+
+So `pull && up -d` in the runbook is load-bearing. Two ways to make plain
+`up -d` do the right thing: `docker compose up -d --pull always`, or in a
+site-side compose file remove `build:` and add `pull_policy: always` to
+`api` and `init-data`.
+
+**Tags.** `.env.example` tracks `DOCKER_USER` and `IMAGE_TAG` as the release
+coordinates (currently `0.1.0`). Prefer a real tag over `latest`: `latest`
+can silently mean two different images on two machines, whereas `0.1.0` is
+either present or it isn't, and rollback is editing `IMAGE_TAG` in `.env`
+and re-running `up -d`.
+
+### 9.7 The development loop (`--profile dev`)
+
+Day-to-day work does not use the build/push loop at all:
+
+```bash
+docker compose --profile dev up dev                                   # http://localhost:8011, uvicorn --reload
+docker compose --profile test run --rm pytest                         # unit suite in the dev image
+docker compose --profile test run --rm pytest tests/unit/test_agent.py -x
+docker compose --profile dev run --rm dev python scripts/smoke_flow.py --offline
+docker compose --profile dev run --rm dev llmwiki lint
+docker compose --profile dev exec dev bash
+docker compose --profile dev build dev                                # only when requirements.txt / Dockerfile change
+```
+
+How it holds together: the `dev` stage installs the package editable
+(§9.1); the `dev` service bind-mounts the **whole tree** at `/app` (not just
+`src/` — tests, scripts, `skills/`, `config/` are all read at run time and
+should all be live-editable) and the same `./.data` the `api` service uses,
+so a dev run and a production-image run see one corpus. It runs as
+`${DEV_UID:-1000}:${DEV_GID:-1000}` so everything written through the
+mounts belongs to the developer, not root; override with `DEV_UID=$(id -u)
+DEV_GID=$(id -g)` if `id -u` says otherwise. On a dev box that also runs
+`api` against the same `./.data`, set `API_UID`/`API_GID` to the same
+values so both can write to it.
+
+`dev`'s `env_file` is `required: false`, unlike `api`: `--profile dev up
+dev` must still start in a fresh clone with no `.env`. "Proper" dev setup
+is therefore about the *contents* of `.env` (a provider, its key, a storage
+backend — `.env.example`), not the wiring; without them the container
+starts but the baked-in routing table fails at the first LLM call for lack
+of a key. `LOCAL_STORAGE_PATH`, `API_HOST`, `API_PORT` and `LOG_LEVEL`
+(default `DEBUG` in dev) are pinned by `environment:` and win over `.env`.
+There is no `restart:` policy: in dev a crash should stay down and visible.
+
+`pytest` deliberately has **no** `env_file` and no `./.data` mount:
+`env_file` promotes `.env` entries to real environment variables, and tests
+such as `test_config.py::test_defaults_are_the_cloud_backends` assert on
+defaults via `Settings(_env_file=None)` — which ignores the `.env` *file*
+but still reads the ambient environment. A developer's real `LLM_PROVIDER`
+would fail them for no reason, and unit tests need no credentials anyway
+(§8).
+
+`api-offline` needs one non-obvious pair of overrides beyond the fake
+backends: `LLMWIKI_PROVIDERS_CONFIG` and `LLMWIKI_OPS_CONFIG` pointed at a
+path that cannot exist. The routing table is baked into the image and
+`factory._build_llm_client` consults it *before* the `LLM_BACKEND=fake`
+branch (§3.5), so without the overrides the service dies at startup with
+"op 'summarize_source' routes to provider 'openrouter', which is not
+active". `smoke` needs no such thing — `smoke_flow.py --offline` builds its
+own `Settings` with those fields set explicitly.
+
+### 9.8 Single-process design
+
 FastAPI serves REST, mounts MCP at `/mcp`, and runs ingest processing in
-FastAPI `BackgroundTasks`. `Dockerfile` is a two-stage build (build stage has
-compilers/pip cache; runtime stage ships only the built venv, runs as a
-non-root user, health-checks `/healthz`).
+FastAPI `BackgroundTasks` (decision D7). There is no separate worker service
+to keep in sync and no queue broker to operate — one container is the whole
+Phase 0 deployment. The image's `HEALTHCHECK` hits `/healthz`, which makes
+no network calls, so an unhealthy container means the process is genuinely
+wedged, not that Cloudflare is.
 
 ---
 

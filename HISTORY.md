@@ -5,6 +5,63 @@ reverse-chronological order. See `CLAUDE.md` for the rule this file follows.
 
 ---
 
+## 2026-09-13 — Technical document §9 rewritten as the Docker / `docker-compose.yml` map
+
+**Goal:** `docs/llm-wiki-technical-document.md` §9 ("Deployment") was four
+commands and a paragraph, and already stale — it described the `Dockerfile`
+as two-stage (it has been three since the 2026-09-10 dev-mode change) and
+led with `docker compose up --build`, which is the one command the VPS
+runbook says never to run there. Meanwhile the answers to the questions a
+second engineer actually asks about the container setup — which services a
+plain `up -d` selects, where `.env` is read, what `target: runtime` names,
+why `up -d` alone can run a stale image — lived only in the in-line comments
+of `docker-compose.yml` and `Dockerfile` and in two `HISTORY.md` incident
+entries. This change consolidates them into one section of the document
+whose stated audience is exactly that engineer.
+
+**Implementation detail:** §9 is now "Deployment — Docker and
+`docker-compose.yml`", eight subsections, documentation only (no code or
+config touched):
+- 9.1 the three `Dockerfile` stages (`build`, `dev`, `runtime`) as a table,
+  and the two `runtime` decisions that are easy to undo by accident — the
+  explicit `COPY skills/` / `COPY config/` (2026-09-10 root cause) and
+  `USER llmwiki` uid 10001.
+- 9.2 the seven-service map with profile, image name, build target and
+  purpose, plus `docker compose [--profile X] config --services` as the way
+  to verify selection rather than reason about it; why `dev` has a
+  different image name; why `DOCKER_USER` unset falls back to `local/`.
+- 9.3 what the profile-less `pull && up -d` runs on the VPS (`init-data`
+  then `api`, nothing else, named volume not created), the reason
+  `init-data` exists (2026-09-13 `PermissionError`), and a key-by-key table
+  of `api`; notes that a site-side file containing only those two services
+  (without `build:` and the unused `volumes:`) is a valid production file.
+- 9.4 the two ways `.env` is read (Compose interpolation vs `env_file:`),
+  the `environment:` > `env_file:` > image `ENV` precedence, `API_PORT`'s
+  double duty, shell variables not reaching the container, and the
+  `restart` vs `up -d --force-recreate` rule from 2026-09-10.
+- 9.5 bind mount vs named volume by prefix, why `api-offline`/`smoke` use
+  the named one, and the "empty mount shadows baked-in files" warning for
+  the commented `config/` / `skills/` overrides.
+- 9.6 build → smoke → push → pull lifecycle; `pull` vs `up -d`'s default
+  `missing` pull policy and the `build:` fallback; `--pull always` /
+  `pull_policy: always` as the fix; prefer a real `IMAGE_TAG` over `latest`.
+- 9.7 the `--profile dev` loop, `required: false` on `dev`'s `env_file`,
+  why `pytest` has no `env_file`, and the `LLMWIKI_*_CONFIG` overrides
+  `api-offline` needs.
+- 9.8 the single-process design paragraph, kept from the old §9.
+
+Also fixed the header table's pointer for the packaging plan's status from
+§9 to §10 (it had pointed at Deployment; the "Known Gap" section is §10).
+
+**Related files:** `docs/llm-wiki-technical-document.md`.
+
+**Test coverage:** documentation only — no tests added, removed or
+affected. Claims in 9.2/9.3 were checked against `docker compose config
+--services` with and without `--profile dev|test|ops`, and `docker compose
+config --volumes` (empty without a profile).
+
+---
+
 ## 2026-09-13 — `scripts/reset_vectorize.py`: wipe the Vectorize indexes for a fresh start
 
 **Goal:** one command that discards every vector on Cloudflare and leaves the
