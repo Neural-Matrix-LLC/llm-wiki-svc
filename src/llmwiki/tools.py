@@ -26,6 +26,7 @@ from llmwiki.models.plan import Answer, CompileResult, CostSummary
 from llmwiki.models.source import SourceRef, SourceStatus
 from llmwiki.pipeline.ingest import IngestPipeline
 from llmwiki.storage.base import ObjectNotFound
+from llmwiki.storage.layout import is_source_id
 from llmwiki.wiki import gists as gists_mod
 from llmwiki.wiki import lint as lint_mod
 from llmwiki.wiki.compiler import Compiler, read_cost_ledger
@@ -84,7 +85,7 @@ def get_page(slug: str, cfg: Settings | None = None) -> WikiPage:
 
 
 def _looks_like_source_id(slug: str) -> bool:
-    return len(slug) == 16 and all(character in "0123456789abcdef" for character in slug)
+    return is_source_id(slug)
 
 
 def ingest_source(

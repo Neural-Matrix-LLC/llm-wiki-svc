@@ -18,6 +18,10 @@
 #   docker login && docker compose push api       # push to $DOCKER_USER on Docker Hub
 #   docker compose pull && docker compose up -d   # on the VPS; never builds
 #
+# `up` runs the init-data one-shot first (see below), so ./.data need not exist
+# or be chown'ed by hand before the first start - an exited init-data in
+# `docker compose ps -a` is expected.
+#
 # After editing .env on the box, `up -d` is what applies it. `restart` does NOT:
 # a container's environment is fixed when the container is created, so restart
 # replays the old one. Add --force-recreate if Compose reports "up-to-date":
@@ -40,11 +44,39 @@
 # instead of fetching a stranger's image.
 
 services:
+  # One-shot that runs before api and lint and hands ./.data to the uid they
+  # run as. Needed because the runtime image is non-root (uid 10001) while the
+  # bind-mount source is created by the Docker *daemon* - as root:root 0755 -
+  # whenever ./.data does not exist at `up` time. The result on a fresh box was
+  # a container that starts, passes /healthz, and fails its first ingest with
+  # PermissionError on /data (2026-09-13, staging). Same image, so `pull`
+  # fetches nothing extra; `find ! -user` touches only what is wrong, so a
+  # restart over a large corpus is one stat pass and no writes.
+  init-data:
+    image: ${DOCKER_USER:-local}/llmwiki:${IMAGE_TAG:-latest}
+    user: root
+    environment:
+      API_UID: ${API_UID:-10001}
+      API_GID: ${API_GID:-10001}
+    volumes:
+      - ./.data:/data
+    entrypoint:
+      - sh
+      - -c
+      - 'find /data \( ! -user "$$API_UID" -o ! -group "$$API_GID" \) -exec chown "$$API_UID:$$API_GID" {} +'
+
   api:
     build:
       context: .
       target: runtime
     image: ${DOCKER_USER:-local}/llmwiki:${IMAGE_TAG:-latest}
+    # Defaults to the image's own non-root user, so a deploy box sets nothing.
+    # On a dev box that also runs the `dev` service against the same ./.data,
+    # set API_UID/API_GID to DEV_UID/DEV_GID so the two can both write to it.
+    user: "${API_UID:-10001}:${API_GID:-10001}"
+    depends_on:
+      init-data:
+        condition: service_completed_successfully
     env_file:
       # required:true - this service cannot work without real credentials, and
       # Compose's default (false) starts it silently with NO environment at all
@@ -221,6 +253,10 @@ services:
   lint:
     profiles: ["ops"]
     image: ${DOCKER_USER:-local}/llmwiki:${IMAGE_TAG:-latest}
+    user: "${API_UID:-10001}:${API_GID:-10001}"
+    depends_on:
+      init-data:
+        condition: service_completed_successfully
     env_file:
       # required:true for the same reason as api - this one runs unattended
       # from cron, where a silently credential-less run is worst of all.

@@ -5,6 +5,185 @@ reverse-chronological order. See `CLAUDE.md` for the rule this file follows.
 
 ---
 
+## 2026-09-13 — `scripts/reset_vectorize.py`: wipe the Vectorize indexes for a fresh start
+
+**Goal:** one command that discards every vector on Cloudflare and leaves the
+two indexes empty and correctly set up, without touching `raw/` or `wiki/`.
+
+**Implementation detail:**
+- `scripts/reset_vectorize.py` — Vectorize has no delete-all and no listing,
+  so the reset is DELETE `/indexes/{name}` then POST `/indexes` at
+  `EMBEDDING_DIM`, followed by the same three string metadata indexes
+  `bootstrap_indexes.py` creates (`FILTERABLE` duplicated with a keep-in-sync
+  note, as `check_cloudflare_setup.py` already does - scripts stay
+  standalone). Both steps are asynchronous on Cloudflare's side, so the script
+  polls `describe` until the old index is gone and retries the create while
+  the name is still being released (120 s budget). Default run is a report
+  (`GET /indexes/{name}/info` for the vector count) and changes nothing;
+  `--yes` is required to delete; `--index chunks|gists` narrows it. Exits 1
+  if a recreated index is missing or mis-dimensioned.
+- `scripts/README.md` — table row and a section; also named as the fix for
+  `bootstrap_indexes.py --check`'s `DIMENSION MISMATCH`.
+
+- First real run failed after the delete: Cloudflare answers **410 Gone**,
+  not 404, for an index that has been deleted (during teardown and after),
+  and `describe()` treated only 404 as absent, so the poll loop raised on its
+  first check. `describe` and the DELETE now accept both; the same 404-only
+  check in `scripts/bootstrap_indexes.py` got the same fix, so `--check`
+  reports `MISSING` rather than crashing on a recently deleted index.
+
+**Related files:** `scripts/reset_vectorize.py`, `scripts/bootstrap_indexes.py`,
+`scripts/README.md`.
+
+**Test coverage:** scripts are not under the unit suite (they need real
+credentials; `scripts/README.md`). Verified by hand: `ruff` and `mypy` clean;
+the dry run reported `llmwiki-chunks: dimensions=768, vectors=595` and
+`llmwiki-gists: dimensions=768, vectors=116`; the real `--yes` run then
+deleted and recreated both (metadata indexes included) and verified them
+empty at 768 dimensions; `bootstrap_indexes.py --check` passes afterwards.
+Unit suite unaffected: 343 passed, 1 skipped.
+
+---
+
+## 2026-09-13 — source ids are `{hash}-{slug}`: `raw/`, `status/` and `wiki/sources/` become readable
+
+**Goal:** a human browsing the R2 bucket or the Obsidian vault should see
+`raw/06e09591603ad558-attention-is-all-you-need/` rather than a bare hex
+folder per ingest — without giving up content-addressed dedup or adding a
+per-ingest cost that grows with the corpus (design 4.4).
+
+**Root cause (of the unreadability):** the id was the first 16 hex chars of a
+SHA-256, and only that, because the hash is what lets capture recognise a
+duplicate before it fetches anything or spends a token. It was never random,
+but it read as if it were.
+
+**Implementation detail:**
+- `storage/layout.py` — `source_id_for(content_hash, title)` mints
+  `{hash}-{slug}`; `content_hash_for_bytes` / `content_hash_for_url` replace
+  `source_id_for_bytes` / `source_id_for_url` (same digests, honest names).
+  Hash first so the folder is prefix-listable by content alone; slug baked
+  into the id so every id-only caller (status polling, `GET /sources/{id}`,
+  citation resolution, the compiler's `Raw object:` link, `wiki/sources/`)
+  already holds the full key and nothing needs a lookup. `SOURCE_SLUG_MAX =
+  40` because chunk ids are `{source_id}:{n}` and Vectorize caps a vector id
+  at 64 bytes. `_ID_RE` accepts the old bare-hash form too, so existing
+  corpora keep resolving; new helpers `content_hash_of`, `raw_prefix_for_hash`,
+  `source_id_from_key`, `is_source_id`.
+- `pipeline/ingest.py` — the dedup probe is now one prefix list of
+  `raw/{hash}` (`_existing_source`) instead of a HEAD on `meta.json`: the slug
+  is not known before the fetch (for a URL it comes from the page title) and
+  must not matter — the same PDF under a new filename is the same source, and
+  the id it was first captured under is the one returned. The id is minted
+  after the title is known; `_slug_basis` falls back title → filename stem →
+  URL last path segment (`2401-00001` for an arXiv link) → `untitled`, since
+  a PDF has no title at capture. Cost: one R2 Class A op ($4.50/M) replaces
+  one Class B ($0.36/M) per ingest, against the cents the LLM stage costs.
+- `storage/local.py` — `list()` gained S3 prefix semantics for a partial
+  segment: `raw/06e0` now walks only the entries of `raw/` whose names start
+  with `06e0`, where before a non-directory prefix fell back to `rglob` over
+  the whole parent — which would have made the new dedup probe a full scan
+  of `raw/` on the local backend.
+- `tools.py` — `_looks_like_source_id` delegates to `layout.is_source_id`
+  instead of its own 16-hex check, so `get_page` still finds source notes.
+- Docs: technical document §3.1 flow and §7 layout; `docs/implement-plan.md`
+  key block; `CLAUDE.md` test count.
+- `.env.example` — `DOCKER_USER=thomaschoi`, `IMAGE_TAG=0.1.0` as the tracked
+  release coordinates (neither is a secret; a shell export still overrides).
+
+**Related files:** `src/llmwiki/storage/layout.py`,
+`src/llmwiki/pipeline/ingest.py`, `src/llmwiki/storage/local.py`,
+`src/llmwiki/tools.py`, `tests/unit/test_layout.py`,
+`tests/unit/test_ingest.py`, `tests/unit/test_local_store.py`,
+`tests/unit/test_routes.py`, `docs/llm-wiki-technical-document.md`,
+`docs/implement-plan.md`, `CLAUDE.md`, `.env.example`.
+
+**Test coverage:**
+- Renamed, not weakened: `test_source_id_is_content_addressed` →
+  `test_content_hash_is_content_addressed`; the two URL-canonicalisation tests
+  call the renamed helpers. Two `test_routes.py` assertions that pinned
+  `len(source_id) == 16` now assert `is_source_id(...)`.
+- Added in `test_layout.py`: `test_source_id_is_hash_then_slug_of_the_title`,
+  `test_source_slug_is_short_enough_for_a_vectorize_chunk_id`,
+  `test_empty_title_still_mints_a_valid_id`, `test_pre_slug_ids_stay_valid`,
+  `test_source_id_from_key_reads_either_format`,
+  `test_source_id_needs_a_real_hash`; four hostile-id cases added to the
+  parametrised rejection test (`-../escape`, upper case, trailing `-`, a
+  41-char slug).
+- Added in `test_ingest.py`:
+  `test_source_id_carries_the_title_slug_after_the_content_hash`,
+  `test_a_pdf_upload_takes_its_slug_from_the_filename`,
+  `test_a_url_only_pdf_takes_its_slug_from_the_url_tail`,
+  `test_dedup_ignores_the_slug` (same bytes, different filename → first id
+  wins), `test_a_source_captured_under_the_bare_hash_id_is_still_a_duplicate`
+  (a pre-2026-09-13 `raw/{hash}/` folder short-circuits capture and no
+  second folder appears).
+- Added in `test_local_store.py`:
+  `test_list_treats_the_prefix_as_a_string_not_a_folder` and
+  `test_partial_prefix_list_does_not_walk_sibling_folders` (spies on
+  `Path.rglob`: the probe walks exactly one folder out of twenty).
+- The four load-bearing tests are untouched and pass; `test_every_citation_
+  resolves_to_a_real_raw_object` exercises the new ids end to end.
+- Full gate: 343 passed, 1 skipped; mypy clean (56 files); ruff down to the
+  pre-existing `scripts/browse_vectors.py:135`; `scripts/smoke_flow.py
+  --offline` PASS.
+
+---
+
+## 2026-09-13 — `init-data` one-shot hands `./.data` to the runtime uid before `api` starts
+
+**Goal:** a deploy directory holding only `docker-compose.yml` and `.env` must
+come up writable with `docker compose up -d` alone — no `chown` by hand on the
+box.
+
+**Root cause:** the runtime image is deliberately non-root (`USER llmwiki`,
+uid 10001), but the bind-mount source `./.data` is created by the Docker
+*daemon* when it does not exist at `up` time — as `root:root 0755`. Found on
+the staging deploy dir: `.data/` root-owned and empty, and a probe run of the
+image confirmed `touch: cannot touch '/data/probe': Permission denied`. The
+container starts, `/healthz` passes (it makes no writes), and the first ingest
+would fail with `PermissionError`. The same latent state existed on the dev
+box in the other direction: `.data/` there is `1000:1000` for the `dev`
+service, so the `api` service — advertised as sharing "one corpus" with it —
+could not write either.
+
+**Implementation detail:**
+- `docker-compose.yml` — new `init-data` service: same image as `api` (so
+  `pull` fetches nothing extra and, like `lint`, it has no `build:`), runs as
+  `root`, mounts `./.data`, and runs one `find /data ! -user … -o ! -group …
+  -exec chown` — one stat pass over the corpus, writes only where ownership is
+  wrong, then exits. `api` and `lint` gain `depends_on: init-data:
+  condition: service_completed_successfully`, so `up`, `run` and cron all go
+  through it. Both also gain `user: "${API_UID:-10001}:${API_GID:-10001}"`;
+  the default is the image's own user so a deploy box sets nothing, and a dev
+  box can set both to `DEV_UID`/`DEV_GID` so `api` and `dev` genuinely share
+  `./.data`.
+- `.env.example` — `API_UID` / `API_GID` documented next to the Docker Hub
+  block.
+- `docs/deployment-plan-container-hosting.md` step 11 — why `.data/` needs no
+  preparation and why an `Exited (0)` init-data in `ps -a` is normal.
+- The dev `Dockerfile` stage is untouched: it already runs as the host uid and
+  has no fixed user to conflict with.
+
+**Related files:** `docker-compose.yml`, `.env.example`,
+`docs/deployment-plan-container-hosting.md`.
+
+**Test coverage:** no Python code changed; the unit suite is unaffected and
+was not the gate here. Verified by hand against the real image
+(`thomaschoi/llmwiki:0.1.0`):
+- Fresh deploy-dir simulation (compose file + `.env` only, no `.data/`):
+  `docker compose run --rm --entrypoint sh api -c 'id; touch /data/probe'` —
+  init-data ran and exited 0, the daemon-created `.data/` came out
+  `10001:10001`, and the write succeeded as `uid=10001(llmwiki)`. Before the
+  change the identical probe was `Permission denied`.
+- Dev-box path: `API_UID=1000 API_GID=1000` against the existing `1000:1000`
+  corpus — no chown performed, write succeeded as `uid=1000`, and
+  `from llmwiki.api.app import app` imports fine under a uid with no passwd
+  entry.
+- `docker compose config --quiet` passes; the `$$API_UID` escapes reach the
+  container shell as `$API_UID` (the chown above proves it).
+
+---
+
 ## 2026-09-10 — the auth DEBUG line masks the bearer token instead of printing it
 
 **Goal:** keep the `require_token` debug line useful for verifying which token

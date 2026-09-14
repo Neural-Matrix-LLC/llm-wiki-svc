@@ -292,12 +292,17 @@ mcp/server.py:ingest_source()       ├─► tools.py:ingest_source()  ──�
 cli.py (ingest command)             ┘        (or tools.ingest_now, which also runs process())
 
 IngestPipeline.capture(url= | file= | text=)  [pipeline/ingest.py]
-  ├─► IngestPipeline._source_id()                              (validate exactly one input,
-  │      storage.layout.source_id_for_bytes / source_id_for_url  then content-address it)
-  ├─► ObjectStore.exists(raw/{id}/meta.json)  → duplicate?     (BEFORE any fetch)
+  ├─► IngestPipeline._content_hash()                           (validate exactly one input,
+  │      storage.layout.content_hash_for_bytes / _for_url        then content-address it)
+  ├─► ObjectStore.list(raw/{hash})  → duplicate?                (BEFORE any fetch; a prefix
+  │                                                              list, since the slug half of
+  │                                                              the id is not known yet)
   ├─► extractors.base.detect_modality                          (pick pdf/web/youtube/text)
   ├─► extractors.web.fetch / extractors.youtube.fetch_transcript  (URL sources only, at capture time)
   ├─► extractors.base.detect_modality  (again, on the SERVED content type — see §3.1.1)
+  ├─► source_id = layout.source_id_for(hash, title)            ({hash}-{slug}; title from the
+  │                                                              caller, the page, the filename
+  │                                                              stem or the URL tail, in that order)
   └─► ObjectStore.put()  → raw/{id}/original.*, raw/{id}/meta.json     (immutable, written once)
   returns SourceRef{source_id, status="queued"} immediately
 
@@ -354,11 +359,14 @@ the caller**:
   PDF are the same input shape; only the response distinguishes them. Without
   the second pass, every `arxiv.org/pdf/...`-style link went to the HTML
   extractor and failed with "no readable content".
-- *The duplicate check runs before the fetch.* `source_id` for a URL is a
-  hash of its canonical form (`layout.canonical_url`), so re-capturing a
-  known URL costs no network request. File and text sources are hashed by
+- *The duplicate check runs before the fetch.* The hash half of a URL's id
+  is its canonical form (`layout.canonical_url`), so re-capturing a known
+  URL costs no network request. File and text sources are hashed by
   content, so identical bytes — or the identical string pasted twice — are
-  the same source.
+  the same source. The check is a prefix list of `raw/{hash}` rather than a
+  HEAD because the slug half is not known until after the fetch and must
+  not matter: the same PDF under a new filename is the same source, and the
+  id it was first captured under is the one returned.
 
 `meta.title` is filled at capture time and never rewritten (`raw/` is
 append-only): from the caller's `title` if given, else the HTML `<title>` /
@@ -1056,10 +1064,18 @@ wiki/_meta/gists.json              the manifest — one-line gist per page, read
 wiki/_meta/cost.jsonl              append-only cost ledger, one CostRecord per LLM call
 ```
 
-`source_id` is a 16-hex-char SHA-256 prefix (content address for files,
-canonical-URL address for URLs — see `source_id_for_bytes`/`source_id_for_url`)
-so re-capturing identical content or the same URL twice always resolves to
-the same source and never duplicates. `slugify()` is the one path from an
+`source_id` is `{hash}-{slug}` (2026-09-13; e.g.
+`06e09591603ad558-attention-is-all-you-need`): a 16-hex-char SHA-256 prefix
+(content address for files and text, canonical-URL address for URLs — see
+`content_hash_for_bytes`/`content_hash_for_url`) followed by a slug of the
+title, capped at `SOURCE_SLUG_MAX` = 40 so a chunk id `{source_id}:{n}` stays
+inside Vectorize's 64-byte vector-id limit. The hash is what dedups — capture
+lists `raw/{hash}` before it fetches or spends a token — and comes first so
+the folder is prefix-listable by content alone; the slug is baked into the id
+rather than looked up, so `raw/`, `status/` and `wiki/sources/` are readable
+in an object browser or Obsidian and no id-only caller needs a lookup.
+Ids minted before 2026-09-13 are the bare hash and stay valid
+(`layout.is_source_id` accepts both). `slugify()` is the one path from an
 arbitrary title to a filesystem/Obsidian-safe key; no caller-supplied string
 reaches a key unsanitized.
 

@@ -14,6 +14,7 @@ import hashlib
 import json
 import logging
 import time
+from urllib.parse import urlsplit
 
 from llmwiki.config import Settings
 from llmwiki.embedding.base import Embedder
@@ -30,12 +31,15 @@ from llmwiki.models.source import (
 from llmwiki.pipeline.chunker import chunk_document
 from llmwiki.storage.base import ObjectNotFound, ObjectStore
 from llmwiki.storage.layout import (
+    content_hash_for_bytes,
+    content_hash_for_url,
     ext_for,
     raw_extracted,
     raw_meta,
     raw_original,
-    source_id_for_bytes,
-    source_id_for_url,
+    raw_prefix_for_hash,
+    source_id_for,
+    source_id_from_key,
     status_key,
 )
 from llmwiki.vector.base import VectorStore
@@ -85,13 +89,17 @@ class IngestPipeline:
         * ``text`` - a string pasted straight in, stored verbatim as its own
           immutable source.
         """
-        source_id = self._source_id(url=url, file=file, text=text)
+        content_hash = self._content_hash(url=url, file=file, text=text)
 
         # Checked before any fetch: a URL already captured must not be pulled
         # over the network a second time just to be discarded as a duplicate.
-        if self.store.exists(raw_meta(source_id)):
-            logger.info("capture: source_id=%s duplicate, skipping", source_id)
-            return SourceRef(source_id=source_id, status="done", duplicate=True)
+        # A prefix list rather than a HEAD because the slug half of the id is
+        # not known yet (for a URL it comes from the page title) and must not
+        # matter: the same bytes under a new filename are the same source.
+        existing = self._existing_source(content_hash)
+        if existing is not None:
+            logger.info("capture: source_id=%s duplicate, skipping", existing)
+            return SourceRef(source_id=existing, status="done", duplicate=True)
 
         if text is not None:
             data = text.encode("utf-8")
@@ -110,6 +118,7 @@ class IngestPipeline:
 
         if not title:
             title = _title_from_source(modality, url, data)
+        source_id = source_id_for(content_hash, _slug_basis(title, filename, url))
 
         meta = SourceMeta(
             source_id=source_id,
@@ -130,8 +139,16 @@ class IngestPipeline:
         logger.info("capture: source_id=%s modality=%s queued", source_id, modality)
         return SourceRef(source_id=source_id, status="queued")
 
+    def _existing_source(self, content_hash: str) -> str | None:
+        """The id already holding this content, in either id format, or None."""
+        for key in self.store.list(raw_prefix_for_hash(content_hash)):
+            source_id = source_id_from_key(key)
+            if source_id is not None and source_id.startswith(content_hash):
+                return source_id
+        return None
+
     @staticmethod
-    def _source_id(*, url: str | None, file: bytes | None, text: str | None) -> str:
+    def _content_hash(*, url: str | None, file: bytes | None, text: str | None) -> str:
         """Validate the inputs and content-address the source before anything is fetched."""
         supplied = [
             name for name, value in (("url", url), ("file", file), ("text", text))
@@ -144,15 +161,15 @@ class IngestPipeline:
         if text is not None:
             if not text.strip():
                 raise ValueError("text is empty")
-            return source_id_for_bytes(text.encode("utf-8"))
+            return content_hash_for_bytes(text.encode("utf-8"))
         if file is not None:
             if not file:
                 raise ValueError("file is empty")
-            return source_id_for_bytes(file)
+            return content_hash_for_bytes(file)
         assert url is not None
         if not url.strip():
             raise ValueError("url is empty")
-        return source_id_for_url(url)
+        return content_hash_for_url(url)
 
     def _fetch(self, url: str, modality: str) -> tuple[bytes, str]:
         """Fetch remote content at capture time so extraction stays reproducible."""
@@ -267,6 +284,25 @@ class IngestPipeline:
 
     def load_meta(self, source_id: str) -> SourceMeta:
         return SourceMeta(**json.loads(self.store.get(raw_meta(source_id)).decode("utf-8")))
+
+
+def _slug_basis(title: str, filename: str | None, url: str | None) -> str:
+    """What the readable half of the id is made from, best available first.
+
+    A PDF has no title at capture (extraction is the expensive half and runs
+    later), so its filename stem is next; a URL-only PDF falls through to the
+    URL's last path segment, e.g. ``2301-12345`` for an arXiv link.
+    """
+    if title.strip():
+        return title
+    if filename:
+        stem = filename.rsplit("/", 1)[-1].rsplit(".", 1)[0]
+        if stem.strip():
+            return stem
+    if url:
+        tail = urlsplit(url).path.rstrip("/").rsplit("/", 1)[-1]
+        return tail or urlsplit(url).netloc
+    return ""
 
 
 def _title_from_source(modality: str, url: str | None, data: bytes) -> str:

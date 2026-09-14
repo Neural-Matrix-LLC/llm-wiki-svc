@@ -9,6 +9,7 @@ from fastapi.testclient import TestClient
 
 from llmwiki.api.app import create_app
 from llmwiki.config import Settings
+from llmwiki.storage.layout import is_source_id
 
 
 @pytest.fixture
@@ -191,7 +192,7 @@ def test_ingest_accepts_pure_text_and_reaches_done(client) -> None:
 
     assert response.status_code == 200, response.text
     source_id = response.json()["source_id"]
-    assert len(source_id) == 16
+    assert is_source_id(source_id)
     # TestClient runs background tasks before returning, so the poll is settled.
     status = client.get(f"/sources/{source_id}")
     assert status.json()["state"] == "done", status.json()
@@ -211,7 +212,7 @@ def test_upload_captures_and_returns_a_source_ref(client) -> None:
 
     assert response.status_code == 200
     body = response.json()
-    assert len(body["source_id"]) == 16
+    assert is_source_id(body["source_id"])
     assert body["status"] in ("queued", "done")
 
 

@@ -44,20 +44,30 @@ class LocalObjectStore:
         return self._path(key).is_file()
 
     def list(self, prefix: str) -> list[str]:
+        """Keys under ``prefix``, with S3 semantics: a plain string prefix, not a folder.
+
+        ``raw/06e0`` matches ``raw/06e0…-slug/meta.json``. Only the entries of
+        the parent folder whose names start with the partial segment are
+        walked, so capture's dedup probe (``raw/{hash}``) stays O(one source)
+        on this backend, as it is on R2, instead of walking all of ``raw/``.
+        """
         base = self._path(prefix)
         if base.is_dir():
-            root = base
+            roots = [base]
         else:
-            root = base.parent
-        if not root.is_dir():
-            return []
+            parent = base.parent
+            if not parent.is_dir():
+                return []
+            roots = [child for child in parent.iterdir() if child.name.startswith(base.name)]
         keys = []
-        for path in root.rglob("*"):
-            if not path.is_file() or path.suffix == ".tmp":
-                continue
-            key = path.relative_to(self.root).as_posix()
-            if key.startswith(prefix):
-                keys.append(key)
+        for root in roots:
+            candidates = root.rglob("*") if root.is_dir() else [root]
+            for path in candidates:
+                if not path.is_file() or path.suffix == ".tmp":
+                    continue
+                key = path.relative_to(self.root).as_posix()
+                if key.startswith(prefix):
+                    keys.append(key)
         return sorted(keys)
 
     def delete(self, key: str) -> None:

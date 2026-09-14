@@ -237,3 +237,67 @@ def test_a_duplicate_url_is_not_fetched_again(pipeline, monkeypatch) -> None:
 
     assert second.duplicate is True
     assert len(calls) == 1, "a duplicate URL was fetched a second time"
+
+
+# --- readable source ids: {hash}-{slug} (2026-09-13) --------------------------
+
+
+def test_source_id_carries_the_title_slug_after_the_content_hash(
+    pipeline, store, monkeypatch
+) -> None:
+    """``raw/`` and ``wiki/sources/`` are browsed by humans; the id must say what it is."""
+    data = (FIXTURES / "sample.html").read_bytes()
+    monkeypatch.setattr("llmwiki.extractors.web.fetch", lambda url: (data, "text/html"))
+
+    ref = pipeline.capture(url="https://blog.example.org/chunking")
+
+    digest, _, slug = ref.source_id.partition("-")
+    assert len(digest) == 16
+    assert slug == "chunking-strategies-for-retrieval"
+    assert store.exists(f"raw/{ref.source_id}/meta.json")
+
+
+def test_a_pdf_upload_takes_its_slug_from_the_filename(pipeline) -> None:
+    """A PDF has no title until extraction runs, so the filename stem is the readable half."""
+    data = (FIXTURES / "sample.pdf").read_bytes()
+    ref = pipeline.capture(file=data, filename="Attention Is All You Need.pdf",
+                           mime="application/pdf")
+    assert ref.source_id.endswith("-attention-is-all-you-need")
+
+
+def test_a_url_only_pdf_takes_its_slug_from_the_url_tail(pipeline, monkeypatch) -> None:
+    data = (FIXTURES / "sample.pdf").read_bytes()
+    monkeypatch.setattr("llmwiki.extractors.web.fetch", lambda url: (data, "application/pdf"))
+    ref = pipeline.capture(url="https://arxiv.org/pdf/2401.00001")
+    assert ref.source_id.endswith("-2401-00001")
+
+
+def test_dedup_ignores_the_slug(pipeline) -> None:
+    """Same bytes, different filename: one source, and the first id wins."""
+    data = (FIXTURES / "sample.pdf").read_bytes()
+    first = pipeline.capture(file=data, filename="draft-v1.pdf", mime="application/pdf")
+    second = pipeline.capture(file=data, filename="Final Version.pdf", mime="application/pdf")
+
+    assert first.source_id.endswith("-draft-v1")
+    assert second.source_id == first.source_id
+    assert second.duplicate is True
+
+
+def test_a_source_captured_under_the_bare_hash_id_is_still_a_duplicate(
+    pipeline, store
+) -> None:
+    """Corpora from before the slug: raw/{hash}/ with no slug must still short-circuit."""
+    from llmwiki.storage.layout import content_hash_for_bytes
+
+    data = (FIXTURES / "sample.pdf").read_bytes()
+    legacy_id = content_hash_for_bytes(data)
+    store.put(f"raw/{legacy_id}/original.pdf", data, "application/pdf")
+    store.put(f"raw/{legacy_id}/meta.json", b"{}", "application/json")
+
+    ref = pipeline.capture(file=data, filename="sample.pdf", mime="application/pdf")
+
+    assert ref.duplicate is True
+    assert ref.source_id == legacy_id
+    assert store.list("raw/") == [
+        f"raw/{legacy_id}/meta.json", f"raw/{legacy_id}/original.pdf"
+    ], "a second folder for the same bytes"

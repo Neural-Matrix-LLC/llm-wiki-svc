@@ -385,7 +385,8 @@ Settle these in M2 before anything writes to storage — everything downstream d
 ### 5.1 Object key layout (`storage/layout.py`)
 
 ```
-raw/{source_id}/original.{ext}      # immutable bytes exactly as captured
+raw/{source_id}/original.{ext}      # immutable bytes exactly as captured; source_id is
+                                    # {hash16}-{title-slug} since 2026-09-13 (bare hash before)
 raw/{source_id}/meta.json           # SourceMeta — capture time, url, mime, sha256, title
 raw/{source_id}/extracted.md        # normalized text; rewritable if the extractor improves
 wiki/index.md                       # hierarchical index, human-readable

@@ -12,6 +12,7 @@ see `implement-plan.md` §6), unless the script has an offline mode noted below.
 |---|---|---|
 | [`smoke_flow.py`](smoke_flow.py) | End-to-end flow check: ingest → compile → search → answer | `--offline` needs nothing; otherwise real backends |
 | [`bootstrap_indexes.py`](bootstrap_indexes.py) | Create/verify the two Vectorize indexes + their metadata indexes | Cloudflare creds |
+| [`reset_vectorize.py`](reset_vectorize.py) | Wipe both Vectorize indexes and recreate them empty (fresh start) | Cloudflare creds |
 | [`check_cloudflare_setup.py`](check_cloudflare_setup.py) | Diagnose R2 / Vectorize / Workers AI setup before flipping backends on | Cloudflare creds |
 | [`browse_vectors.py`](browse_vectors.py) | Read the actual content stored in a Vectorize index (chunk text, gist metadata) | Cloudflare creds |
 | [`backfill.py`](backfill.py) | Bulk re-compile every captured source (after a compiler/prompt change) | Real backends |
@@ -48,6 +49,25 @@ python scripts/bootstrap_indexes.py --create    # create whatever is missing
 `--check` reports `MISSING` or a `DIMENSION MISMATCH` per index; a dimension
 mismatch means the index must be deleted and recreated at the dimension
 `EMBEDDING_DIM` in `.env` specifies.
+
+## `reset_vectorize.py`
+
+Discards every vector and leaves the indexes empty, dimensioned and
+metadata-indexed exactly as `bootstrap_indexes.py` would make them. Vectorize
+has no "delete all" and no listing, so a reset is delete-index + create-index;
+the script polls until Cloudflare has released the name in between.
+
+```bash
+python scripts/reset_vectorize.py                  # report: dimensions and vector count per index, change nothing
+python scripts/reset_vectorize.py --yes            # delete and recreate both indexes
+python scripts/reset_vectorize.py --yes --index gists   # only one of them
+```
+
+There is no undo. Only Vectorize is touched — `raw/` and `wiki/` stay as they
+are, and are what the vectors get rebuilt from: `process_source` per source
+(or re-ingest) for chunks, `backfill.py --force` for gists. Also the fix for a
+`DIMENSION MISMATCH` from `bootstrap_indexes.py --check` after changing
+`EMBEDDING_DIM`.
 
 ## `check_cloudflare_setup.py`
 

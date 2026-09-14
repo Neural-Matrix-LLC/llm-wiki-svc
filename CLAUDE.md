@@ -14,7 +14,7 @@ credentials that do not exist yet.
 LLM routing, SKILL.md-format prompts, query-agent skill invocation) and the
 five-source-kind ingestion surface (2026-09-08: PDF file, blog URL, YouTube
 URL, pure text, text file — reachable from REST, MCP, CLI and Python alike;
-see the technical document §3.1.1). `pytest` runs 315 unit tests with no
+see the technical document §3.1.1). `pytest` runs 343 unit tests with no
 network access (a handful skip when a provider extra is absent,
 environment-dependent); `scripts/smoke_flow.py --offline` walks the whole flow
 end to end with fake adapters. Integration tests exist but have never run —

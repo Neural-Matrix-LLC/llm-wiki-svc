@@ -261,6 +261,14 @@ happens on your own machine.
     docker compose pull        # pulls the image just pushed, never builds
     docker compose up -d       # the api service — real backends
     ```
+
+    `.data/` needs no preparation. If it does not exist, the Docker daemon
+    creates the bind-mount source as `root:root 0755` — which the non-root
+    image (uid 10001) cannot write into, so the container starts, passes
+    `/healthz`, and fails its first ingest with `PermissionError` (2026-09-13,
+    staging). `up` therefore runs the `init-data` one-shot first, which chowns
+    `.data/` to `API_UID:API_GID` (default 10001) and exits; an
+    `Exited (0)` init-data in `docker compose ps -a` is normal.
 12. Confirm `curl -s http://127.0.0.1:8010/healthz` returns healthy before
     opening it to the internet.
 
