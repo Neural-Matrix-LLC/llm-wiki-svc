@@ -56,6 +56,8 @@ Provider = Literal[
     "anthropic",
     "fake",
     "openai",
+    "vllm",
+    "llamacpp",
     "google",
     "nvidia",
     "deepseek",

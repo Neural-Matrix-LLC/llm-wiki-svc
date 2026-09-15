@@ -48,13 +48,15 @@ OPS = [
     # {"op": "answer_query", "provider": "openai", "model": "gpt-5",
     #  "temperature": 1.0, "max_tokens": 2048},
 
-    # Phase 1 local LLM (RTX 3090 host, vLLM primary / llama.cpp fallback via
-    # the same OpenAI-compatible-endpoint mechanism - see config/providers.py's
-    # "openai" row and OPENAI_BASE_URL in .env): once that endpoint is live,
-    # repoint the two cheap stages at it and keep the escalated/query stages
-    # on the current cloud provider -
-    # {"op": "summarize_source", "provider": "openai", "model": "qwen2.5-14b-vllm",
+    # Phase 1 local LLM (RTX 3090 host, vLLM primary / llama.cpp fallback -
+    # see config/providers.py's "vllm"/"llamacpp" rows and VLLM_BASE_URL/
+    # LLAMACPP_BASE_URL in .env): once an endpoint is live, repoint the two
+    # cheap stages at it and keep the escalated/query stages on the current
+    # cloud provider. Each local server gets its own provider name (2026-09-14
+    # - previously both shared the "openai" row, which meant this and real
+    # cloud OpenAI could never both be active) -
+    # {"op": "summarize_source", "provider": "vllm", "model": "qwen2.5-14b",
     #  "temperature": 1.0, "max_tokens": 2048},
-    # {"op": "plan_compile", "provider": "openai", "model": "qwen2.5-14b-vllm",
+    # {"op": "plan_compile", "provider": "llamacpp", "model": "qwen2.5-14b-gguf",
     #  "temperature": 1.0, "max_tokens": 2048},
 ]

@@ -11,21 +11,28 @@ URL, pure text, text file — reachable from REST, MCP, CLI and Python alike;
 see the technical document §3.1.1). Phase 1 (KB design §5) is **in
 progress**: Telegram and email capture channels (webhook mode, in-process
 with FastAPI — `src/llmwiki/channels/`) landed 2026-09-11; local-LLM routing
-(RTX 3090 host, vLLM primary/llama.cpp fallback) has its config/docs groundwork
-in place but is not yet flipped on (see `config/ops.py`'s commented example);
-a LangGraph query flow plus lean LangSmith eval is not yet started. See
-`HISTORY.md`'s 2026-09-11 entry and `~/.claude/plans/we-can-start-to-functional-goblet.md`
-for the full four-workstream plan.
+(RTX 3090 host) has its own `vllm`/`llamacpp` provider entries as of
+2026-09-14 (`config/providers.py`, each with its own `*_API_KEY`/`*_BASE_URL`
+pair, distinct from real cloud OpenAI) but is not yet flipped on (see
+`config/ops.py`'s commented example — no endpoint is reachable yet); a
+LangGraph query flow plus lean LangSmith eval is not yet started. See
+`HISTORY.md`'s 2026-09-11 and 2026-09-14 entries and
+`~/.claude/plans/we-can-start-to-functional-goblet.md` for the full
+four-workstream plan.
 
-`pytest` runs 334 unit tests with no network access (a handful skip when a
+`pytest` runs 362 unit tests with no network access (a handful skip when a
 provider extra is absent, environment-dependent); `scripts/smoke_flow.py
 --offline` walks the whole flow end to end with fake adapters. Integration
 tests exist but have never run — they need Cloudflare and Anthropic
 credentials that do not exist yet.
 
 The LLM layer is multi-provider: `LLM_PROVIDER` selects `anthropic` (native
-adapter — prompt caching, measured USD cost), `openai`, `google`, `nvidia`,
-`deepseek` or `openrouter` (all via LangChain), or `fake`. As of 2026-09-09
+adapter — prompt caching, measured USD cost), `openai`, `vllm`, `llamacpp`,
+`google`, `nvidia`, `deepseek` or `openrouter` (all via LangChain), or `fake`.
+`vllm`/`llamacpp` are self-hosted, OpenAI-compatible-route servers and reuse
+`openai`'s `ChatOpenAI` class under a distinct registry key/env-var pair
+(2026-09-14) — see `docs/implement-plan-v1.4.md` §7.4's addendum. As of
+2026-09-09
 langchain-core and every provider integration are core dependencies (not
 extras) — `uv sync` / `pip install llmwiki` installs all of them, and
 switching `LLM_PROVIDER` needs no separate install step. See `.env.example`

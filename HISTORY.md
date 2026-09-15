@@ -5,6 +5,112 @@ reverse-chronological order. See `CLAUDE.md` for the rule this file follows.
 
 ---
 
+## 2026-09-14 — Phase 1 local-LLM routing: distinct `vllm` / `llamacpp` providers
+
+**Goal:** `config/ops.py`'s commented-out local-routing example, and
+`.env.example`'s local-LLM note, both pointed a self-hosted vLLM/llama.cpp
+server at the shared `"openai"` provider row (`OPENAI_BASE_URL`) — the
+2026-09-11 groundwork's own admission that a real cloud OpenAI key and a
+local endpoint could never both be active at once. The user asked for a
+distinct provider entry per local LLM instead, so `config/ops.py`/`.env`
+unambiguously show which server a given op is actually routed to.
+
+**Design-doc note.** This reverses `docs/implement-plan-v1.4.md` §7.4's
+recorded decision ("There is no `local` extra... `openai` plus `LLM_BASE_URL`
+is one code path fewer than a dedicated adapter"). Per that doc's own
+convention, the original reasoning is kept and annotated superseded rather
+than deleted — see the new 2026-09-14 addendum right after it.
+
+**Implementation detail:**
+- `src/llmwiki/llm/providers.py` — two new `REGISTRY` entries, `"vllm"` and
+  `"llamacpp"`, both wrapping the same `ChatOpenAI`/`langchain_openai` class
+  `"openai"` already uses (both servers expose an OpenAI-compatible route) —
+  no new PyPI dependency, `langchain-openai` is already a core dependency.
+  Lazy-import pattern unchanged (`load_class` already imports lazily).
+- `src/llmwiki/config.py` — added `"vllm"`, `"llamacpp"` to the `Provider`
+  `Literal`.
+- `config/providers.py` — `"openai"`'s row is now cloud-OpenAI-only (comment
+  updated); two new rows, `"vllm"`/`"llamacpp"`, each with its own
+  `api_key_env`/`base_url_env` (`VLLM_API_KEY`/`VLLM_BASE_URL`,
+  `LLAMACPP_API_KEY`/`LLAMACPP_BASE_URL`).
+- `config/ops.py` — the commented-out local-routing example now names
+  `"vllm"`/`"llamacpp"` instead of `"openai"` twice; still commented out, no
+  endpoint reachable yet (unchanged from 2026-09-11).
+- `.env.example` — new `VLLM_API_KEY`/`VLLM_BASE_URL` and
+  `LLAMACPP_API_KEY`/`LLAMACPP_BASE_URL` blocks; provider table updated;
+  self-hosted note and the old `OPENAI_BASE_URL` comment rewritten to point
+  at the new variables instead of describing a shared slot.
+- `docs/implement-plan-v1.4.md` §7.4 — dated addendum (above).
+
+**Related files:** `src/llmwiki/llm/providers.py`, `src/llmwiki/config.py`,
+`config/providers.py`, `config/ops.py`, `.env.example`,
+`docs/implement-plan-v1.4.md`, `tests/unit/test_providers.py`,
+`tests/unit/test_routing_config.py`.
+
+**Test coverage:**
+- No regressions: full `pytest` — 362 passed, 1 skipped, 6 deselected;
+  `ruff check .` and `mypy` both clean; `python scripts/smoke_flow.py
+  --offline` — SMOKE PASS (confirms the new registry entries don't break
+  default `Settings()` construction with both `*_BASE_URL`s unset).
+- No obsolete tests: additive to the registry, the `"openai"` path is
+  unchanged.
+- Updated: `tests/unit/test_providers.py::test_the_langchain_providers_are_all_registered`
+  now expects `"vllm"`/`"llamacpp"` in the set; the existing parametrized
+  tests (`test_registry_keywords_match_the_installed_class`, etc.) already
+  iterate `sorted(providers.REGISTRY)` and cover the new entries with no
+  changes needed.
+- New: `tests/unit/test_providers.py::test_vllm_and_llamacpp_reuse_the_openai_class`
+  (same underlying class as `"openai"`, distinct registry key).
+  `tests/unit/test_routing_config.py::test_the_tracked_providers_config_gives_vllm_and_llamacpp_their_own_env_vars`
+  — loads the real, tracked `config/providers.py` (not a `tmp_path` fixture,
+  unlike every other test in that file) with a throwaway `ops.py` routing to
+  `vllm`/`llamacpp`/`openai`, and asserts all three resolve simultaneously
+  with distinct `api_key`/`base_url` — the actual crux of the ask, and not
+  covered by any pre-existing test.
+
+## 2026-09-14 — Post-merge corruption cleanup: duplicated blocks from the `feat/phase1-capture-channels` merge
+
+**Goal:** merging `origin/main` into `feat/phase1-capture-channels` (and a
+follow-up "fixup" commit) left several duplicated code blocks behind —
+found while trying to run the full test suite after the merge, which
+initially failed to even collect.
+
+**Root cause:** a bad `git stash`/merge interaction around commit `89b7eac`
+("/ingest cleanup with usage after merge with stash") duplicated several
+blocks verbatim: an import block, a function signature's parameter, a
+method's body, a whole test function, a Pydantic validator, and two model
+field declarations. The "fixup" commit (`c886907`) caught and fixed some of
+these (the `test_ingest.py` duplicate `import json`, the duplicated
+`_exactly_one_source` validator method in `routes.py`, `ingest.py`'s
+duplicate `text` parameter and duplicated if/elif/else body) but not all —
+three instances were still live at `HEAD`:
+- `src/llmwiki/pipeline/ingest.py` — the `SourceMeta`/`ExtractedDoc` import
+  from `llmwiki.models.source` was duplicated verbatim (harmless at runtime,
+  but `ruff`'s `F811`/`I001` correctly flag it).
+- `tests/unit/test_ingest.py` — `test_capture_requires_exactly_one_input`'s
+  body was duplicated inline, breaking the `with` statement's indentation
+  (`IndentationError`, blocked `pytest` collection entirely).
+- `src/llmwiki/api/routes.py` — `IngestRequest`'s `url`/`text` fields were
+  each declared twice (`mypy` `no-redef`), and the class body ran straight
+  into the next route decorator with no blank line.
+
+**Implementation detail:** removed the duplicate import block from
+`ingest.py`; removed the duplicated body from `test_ingest.py`'s
+`test_capture_requires_exactly_one_input`, keeping the single original
+implementation; removed `routes.py`'s duplicate `url`/`text` field
+declarations and restored the blank line before `@router.get("/healthz")`.
+
+**Related files:** `src/llmwiki/pipeline/ingest.py`,
+`tests/unit/test_ingest.py`, `src/llmwiki/api/routes.py`.
+
+**Test coverage:** no tests added or removed — this is a pure dedup of
+already-existing code/tests, not a behavior change. `pytest` went from
+failing to collect (`IndentationError`) to 362 passed, 1 skipped, 6
+deselected; `ruff check .` and `mypy` both went from several errors to clean
+(one pre-existing, unrelated `E501` in `scripts/browse_vectors.py` remains —
+predates this branch, left untouched); `python scripts/smoke_flow.py
+--offline` — SMOKE PASS.
+
 ## 2026-09-13 — Technical document §9 rewritten as the Docker / `docker-compose.yml` map
 
 **Goal:** `docs/llm-wiki-technical-document.md` §9 ("Deployment") was four

@@ -396,6 +396,15 @@ There is no `local` extra. A self-hosted endpoint - vLLM, Ollama, LM Studio, lla
 `LLM_PROVIDER=openai` with `LLM_BASE_URL` pointed at its OpenAI-compatible route, which is one code
 path fewer than a dedicated adapter and the way all four of those servers expect to be called.
 
+**Superseded, 2026-09-14 (Phase 1 local-LLM routing).** The reasoning above traded a dedicated
+adapter for simplicity, but sharing the single `"openai"` row also meant a self-hosted endpoint and
+real cloud OpenAI could never both be active at once (one `OPENAI_BASE_URL`, one value). The user
+chose clarity over that one-code-path saving: `vllm` and `llamacpp` are now their own
+`llmwiki.llm.providers.REGISTRY` entries (`src/llmwiki/llm/providers.py`), each still wrapping
+`ChatOpenAI`/`langchain_openai` - no new adapter, no new dependency - but resolved in
+`config/providers.py` to its own `*_API_KEY`/`*_BASE_URL` pair (`VLLM_*`, `LLAMACPP_*`), leaving
+`OPENAI_API_KEY`/`OPENAI_BASE_URL` free for real cloud OpenAI. See `HISTORY.md`'s 2026-09-14 entry.
+
 `pydantic` alone as the hard dependency is the design goal: importing `agentkit.llm` must not import
 any provider SDK. `providers/anthropic.py` already does `import anthropic` *inside* `__init__`, so
 this holds today without modification.

@@ -17,7 +17,9 @@ import pytest
 from llmwiki.llm import routing_config
 from llmwiki.llm.routing_config import KNOWN_OPS, load_routing_config
 
-SRC = Path(__file__).resolve().parents[2] / "src" / "llmwiki"
+REPO_ROOT = Path(__file__).resolve().parents[2]
+SRC = REPO_ROOT / "src" / "llmwiki"
+CONFIG = REPO_ROOT / "config"
 
 
 def _write(path: Path, content: str) -> None:
@@ -184,6 +186,54 @@ def test_malformed_providers_module_names_the_file(tmp_path) -> None:
 
     with pytest.raises(RuntimeError, match="PROVIDERS"):
         load_routing_config(tmp_path / "providers.py", tmp_path / "ops.py")
+
+
+# --- the tracked config/providers.py + config/ops.py, not a tmp_path fixture:
+#     the 2026-09-14 provider split's actual point (every other test in this
+#     file writes its own throwaway files and never touches these real ones).
+
+
+def test_the_tracked_providers_config_gives_vllm_and_llamacpp_their_own_env_vars(
+    tmp_path, monkeypatch
+) -> None:
+    """vLLM, llama.cpp, and real cloud OpenAI can all be active at once.
+
+    Before 2026-09-14, "vllm"/"llamacpp" didn't exist as registry entries -
+    the only local-LLM mechanism was pointing the shared "openai" row's
+    OPENAI_BASE_URL at whichever self-hosted server was running, which meant
+    a local endpoint and a real cloud OpenAI key could never both be active.
+
+    ``config/providers.py`` is the real, tracked file - that's the point being
+    guarded. ``config/ops.py`` is *not* used real here: the real one doesn't
+    route anything to vllm/llamacpp yet (its local-routing example is still
+    commented out - no endpoint is reachable), and ``RoutingConfig.providers``
+    only keeps providers an op actually names (``load_routing_config``'s
+    ``used`` filter) - so a throwaway ops.py that routes to all three is what
+    it takes to observe them resolved side by side.
+    """
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-openai-cloud")
+    monkeypatch.setenv("VLLM_API_KEY", "sk-vllm")
+    monkeypatch.setenv("VLLM_BASE_URL", "http://vllm.local/v1")
+    monkeypatch.setenv("LLAMACPP_API_KEY", "sk-llamacpp")
+    monkeypatch.setenv("LLAMACPP_BASE_URL", "http://llamacpp.local/v1")
+    _write(
+        tmp_path / "ops.py",
+        'OPS = ['
+        '{"op": "summarize_source", "provider": "vllm", "model": "m"}, '
+        '{"op": "plan_compile", "provider": "llamacpp", "model": "m"}, '
+        '{"op": "create_page", "provider": "openai", "model": "m"}, '
+        '{"op": "patch_page", "provider": "openai", "model": "m"}, '
+        '{"op": "answer_query", "provider": "openai", "model": "m"}]\n',
+    )
+
+    routing = load_routing_config(CONFIG / "providers.py", tmp_path / "ops.py")
+
+    assert routing is not None
+    assert {"openai", "vllm", "llamacpp"} <= set(routing.providers)
+    assert routing.providers["vllm"].base_url == "http://vllm.local/v1"
+    assert routing.providers["llamacpp"].base_url == "http://llamacpp.local/v1"
+    assert routing.providers["vllm"].api_key != routing.providers["llamacpp"].api_key
+    assert routing.providers["vllm"].api_key != routing.providers["openai"].api_key
 
 
 # --- drift guard: KNOWN_OPS must equal what the codebase actually calls ----

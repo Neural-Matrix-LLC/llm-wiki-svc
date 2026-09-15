@@ -28,14 +28,6 @@ from llmwiki.models.source import (
     SourceState,
     SourceStatus,
 )
-from llmwiki.models.source import (
-    ExtractedDoc,
-    Modality,
-    SourceMeta,
-    SourceRef,
-    SourceState,
-    SourceStatus,
-)
 from llmwiki.pipeline.chunker import chunk_document
 from llmwiki.storage.base import ObjectNotFound, ObjectStore
 from llmwiki.storage.layout import (

@@ -36,11 +36,23 @@ def test_importing_the_registry_imports_no_provider_sdk() -> None:
 def test_the_langchain_providers_are_all_registered() -> None:
     assert set(providers.REGISTRY) == {
         "openai",
+        "vllm",
+        "llamacpp",
         "google",
         "nvidia",
         "deepseek",
         "openrouter",
     }
+
+
+def test_vllm_and_llamacpp_reuse_the_openai_class() -> None:
+    """Both are self-hosted, OpenAI-compatible-route servers (2026-09-14) -
+    same class as "openai", distinct registry key so config/providers.py can
+    give each its own credential/base-url env vars instead of sharing (and
+    fighting over) OPENAI_BASE_URL."""
+    for name in ("vllm", "llamacpp"):
+        assert providers.REGISTRY[name].module == providers.REGISTRY["openai"].module
+        assert providers.REGISTRY[name].cls == providers.REGISTRY["openai"].cls
 
 
 def test_anthropic_is_not_in_the_registry() -> None:

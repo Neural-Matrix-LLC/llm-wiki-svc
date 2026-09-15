@@ -19,8 +19,8 @@ changing a provider or model is a rebuild-and-push, not an edit on the box.
 override for deployments that need to diverge without a rebuild.
 
 Every ``provider`` name here must be either ``"anthropic"``, ``"fake"``, or a
-key in ``llmwiki.llm.providers.REGISTRY`` (currently: openai, google, nvidia,
-deepseek, openrouter) - anything else fails loudly at startup.
+key in ``llmwiki.llm.providers.REGISTRY`` (currently: openai, vllm, llamacpp,
+google, nvidia, deepseek, openrouter) - anything else fails loudly at startup.
 
 A provider whose ``api_key_env`` is unset or empty in the environment is
 **not an error** - it is silently dropped from the active set. Only an op in
@@ -56,8 +56,25 @@ PROVIDERS = [
     {
         "provider": "openai",  # pip install "llmwiki[openai]"
         "api_key_env": "OPENAI_API_KEY",
-        # self-hosted (vLLM/Ollama/LM Studio): point this at its OpenAI-compatible endpoint
+        # real cloud OpenAI only now - self-hosted local LLMs get their own
+        # rows below (2026-09-14) so this one no longer doubles for them.
         "base_url_env": "OPENAI_BASE_URL",
+    },
+
+    # Self-hosted, OpenAI-compatible-route servers (Phase 1 local-LLM routing,
+    # RTX 3090 host: vLLM primary, llama.cpp fallback). Same ChatOpenAI class
+    # as "openai" above (llmwiki.llm.providers.REGISTRY), distinct env vars so
+    # both - and real cloud OpenAI - can be active at the same time. Uncomment
+    # config/ops.py's local-routing example once the endpoint is reachable.
+    {
+        "provider": "vllm",
+        "api_key_env": "VLLM_API_KEY",  # any non-empty placeholder if the server checks none
+        "base_url_env": "VLLM_BASE_URL",  # e.g. http://<host>:<port>/v1
+    },
+    {
+        "provider": "llamacpp",
+        "api_key_env": "LLAMACPP_API_KEY",
+        "base_url_env": "LLAMACPP_BASE_URL",
     },
     {
         "provider": "google",  # pip install "llmwiki[google]"

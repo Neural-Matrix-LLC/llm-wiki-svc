@@ -61,8 +61,6 @@ class IngestRequest(BaseModel):
 
     url: str | None = None
     text: str | None = None
-    url: str | None = None
-    text: str | None = None
     title: str = ""
 
     @model_validator(mode="after")
@@ -71,6 +69,7 @@ class IngestRequest(BaseModel):
         if (self.url is None) == (self.text is None):
             raise ValueError("provide exactly one of url or text")
         return self
+
 
 @router.get("/healthz")
 def healthz() -> dict:

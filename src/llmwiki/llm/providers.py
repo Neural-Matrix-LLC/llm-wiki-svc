@@ -6,11 +6,21 @@ merely importing this module never eagerly loads a provider SDK - it stays
 cheap even though every SDK is on disk.  ``tests/unit/test_providers.py``
 asserts both properties.
 
-All five integrations accept the same constructor keywords - ``model``,
-``api_key``, ``base_url`` and a token cap - which is why the spec is nearly
-free of per-provider spellings.  That was verified against the installed
-classes rather than assumed, and ``tests/unit/test_providers.py`` re-checks it
-for whichever integrations happen to be present.
+All five underlying LangChain integrations accept the same constructor
+keywords - ``model``, ``api_key``, ``base_url`` and a token cap - which is why
+the spec is nearly free of per-provider spellings.  That was verified against
+the installed classes rather than assumed, and ``tests/unit/test_providers.py``
+re-checks it for whichever integrations happen to be present.
+
+``vllm`` and ``llamacpp`` are two of those seven registry *entries* rather than
+two more integrations: both point at ``langchain_openai.ChatOpenAI``, the same
+class ``openai`` uses, since a self-hosted vLLM or llama.cpp server exposes the
+same OpenAI-compatible route (2026-09-14, Phase 1 local-LLM routing). Giving
+each its own registry key - resolved in ``config/providers.py`` to its own
+``*_API_KEY``/``*_BASE_URL`` pair - is what lets a local vLLM endpoint, a local
+llama.cpp endpoint, and real cloud OpenAI all be active at once; sharing the
+single ``openai`` row (the original 2026-09-11 approach) could only ever point
+at one of the three.
 
 Anthropic is deliberately absent: it keeps its native adapter in
 ``anthropic_client.py``, which is where prompt caching, forced-tool structured
@@ -43,6 +53,22 @@ class ProviderSpec:
 
 REGISTRY: dict[str, ProviderSpec] = {
     "openai": ProviderSpec(
+        "langchain_openai",
+        "ChatOpenAI",
+        "langchain-openai",
+        max_tokens_arg="max_completion_tokens",
+    ),
+    # Self-hosted, OpenAI-compatible-route servers (Phase 1 local-LLM routing,
+    # RTX 3090 host) - same class as "openai" above, distinct registry key so
+    # config/providers.py can give each its own credential/base-url env vars
+    # instead of sharing (and fighting over) OPENAI_BASE_URL.
+    "vllm": ProviderSpec(
+        "langchain_openai",
+        "ChatOpenAI",
+        "langchain-openai",
+        max_tokens_arg="max_completion_tokens",
+    ),
+    "llamacpp": ProviderSpec(
         "langchain_openai",
         "ChatOpenAI",
         "langchain-openai",
