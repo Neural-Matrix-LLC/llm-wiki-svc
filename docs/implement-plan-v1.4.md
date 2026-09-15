@@ -231,7 +231,7 @@ llm-wiki-svc/
 │   ├── models/                          # source.py  chunk.py  page.py  plan.py
 │   ├── storage/
 │   │   └── layout.py                    # ← STAYS. Key construction is wiki domain knowledge
-│   ├── extractors/  embedding/  vector/
+│   ├── extractors/  embedding/  vector/FPhase
 │   ├── wiki/        chains/prompts/
 │   ├── pipeline/    agent/    tools.py
 │   ├── api/  mcp/  cli.py                # the service (§9) — installed by extra [service]

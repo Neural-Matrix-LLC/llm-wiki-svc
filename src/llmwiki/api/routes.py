@@ -72,14 +72,6 @@ class IngestRequest(BaseModel):
             raise ValueError("provide exactly one of url or text")
         return self
 
-    @model_validator(mode="after")
-    def _exactly_one_source(self) -> IngestRequest:
-        """Reject a body naming both or neither, so the 422 comes from validation."""
-        if (self.url is None) == (self.text is None):
-            raise ValueError("provide exactly one of url or text")
-        return self
-
-
 @router.get("/healthz")
 def healthz() -> dict:
     """Liveness plus the configured backends. Unauthenticated, no network calls."""
