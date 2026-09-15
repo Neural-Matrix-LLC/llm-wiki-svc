@@ -5,6 +5,7 @@ Phase 0 auth is a single static bearer token (design doc 5); real auth is Phase 
 
 from __future__ import annotations
 
+import logging
 import secrets
 
 from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, UploadFile
@@ -19,8 +20,29 @@ from llmwiki.models.page import LintReport, PageGist
 from llmwiki.models.plan import Answer, CompileResult
 from llmwiki.models.source import SourceRef, SourceStatus
 
+logger = logging.getLogger(__name__)
+
 router = APIRouter()
 _bearer = HTTPBearer(auto_error=False)
+
+#: Below this length, first-5 + last-5 would give away most of the secret (at
+#: 10 characters it would be the whole thing), so short tokens show length only.
+MIN_MASKABLE_TOKEN_CHARS = 16
+
+
+def mask(secret: str) -> str:
+    """Render a secret for a log: enough to tell two apart, not enough to use one.
+
+    A debug line that prints the token in full defeats the ``SecretStr`` the
+    setting is stored in, and DEBUG is exactly the level a deployment turns on
+    when authentication is misbehaving - the moment the log is most likely to
+    be pasted into a chat or a ticket.
+    """
+    if not secret:
+        return "<empty>"
+    if len(secret) < MIN_MASKABLE_TOKEN_CHARS:
+        return f"<{len(secret)} chars, too short to show safely>"
+    return f"{secret[:5]}...{secret[-5:]} ({len(secret)} chars)"
 
 
 def require_token(
@@ -29,6 +51,7 @@ def require_token(
     """Constant-time check of the static Phase 0 bearer token."""
     expected = settings.ingest_api_token.get_secret_value()
     supplied = credentials.credentials if credentials else ""
+    logger.debug("require_token: expected=%s supplied=%s", mask(expected), mask(supplied))
     if not secrets.compare_digest(supplied, expected):
         raise HTTPException(status_code=401, detail="invalid or missing bearer token")
 
@@ -38,7 +61,16 @@ class IngestRequest(BaseModel):
 
     url: str | None = None
     text: str | None = None
+    url: str | None = None
+    text: str | None = None
     title: str = ""
+
+    @model_validator(mode="after")
+    def _exactly_one_source(self) -> IngestRequest:
+        """Reject a body naming both or neither, so the 422 comes from validation."""
+        if (self.url is None) == (self.text is None):
+            raise ValueError("provide exactly one of url or text")
+        return self
 
     @model_validator(mode="after")
     def _exactly_one_source(self) -> IngestRequest:
@@ -62,6 +94,8 @@ def ingest(request: IngestRequest, background: BackgroundTasks) -> SourceRef:
     PDF; ``{"text": ...}`` stores the string itself as the immutable source.
     Files go to ``POST /upload`` instead.
     """
+    
+    logger.debug(" /ingest request: %s", request)
     ref = tools.ingest_source(url=request.url, text=request.text, title=request.title)
     if not ref.duplicate:
         background.add_task(tools.process_source, ref.source_id)
@@ -78,6 +112,7 @@ async def upload(
 
     The modality comes from the content type and filename, not from the caller.
     """
+    logger.debug(" /upload request: filename=%s, content_type=%s", file.filename, file.content_type)
     data = await file.read()
     ref = tools.ingest_source(
         file=data,

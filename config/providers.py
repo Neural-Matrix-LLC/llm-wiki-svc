@@ -1,10 +1,22 @@
 """Providers manifest - design v1.4 §4.8.1, implement-plan-v1.4.md §19.2.
 
-Copy this file to ``config/providers.py`` (``cp config/providers.py.example
-config/providers.py``) to activate multi-provider routing - same pattern as
-``.env.example`` -> ``.env``. The copy is safe to commit: this file holds
-**no secrets**, only which environment variable names carry each provider's
-real credentials. The values themselves stay in ``.env`` (never committed).
+This is the **tracked, active** providers manifest (2026-09-10): it is
+committed, and the ``Dockerfile`` copies ``config/`` into the image, so every
+deployment gets it from a ``docker compose pull`` instead of an scp. That is
+safe because this file holds **no secrets** - only which environment variable
+*names* carry each provider's real credentials. The values themselves stay in
+``.env``, which is never committed and never baked into an image.
+
+Every supported provider is listed below, so this file is also the reference:
+a row whose ``api_key_env`` is unset in the environment is silently inactive,
+which is what lets them all stay uncommented. (The former
+``providers.py.example`` was deleted on 2026-09-10 - it had become a second
+copy of this file that could drift out of step with it.)
+
+Trade-off worth knowing: because the routing table now ships *in the image*,
+changing a provider or model is a rebuild-and-push, not an edit on the box.
+``docker-compose.yml`` carries a commented-out ``./config:/app/config:ro``
+override for deployments that need to diverge without a rebuild.
 
 Every ``provider`` name here must be either ``"anthropic"``, ``"fake"``, or a
 key in ``llmwiki.llm.providers.REGISTRY`` (currently: openai, google, nvidia,
@@ -14,13 +26,17 @@ A provider whose ``api_key_env`` is unset or empty in the environment is
 **not an error** - it is silently dropped from the active set. Only an op in
 ``config/ops.py`` that names an inactive provider is an error.
 
-WARNING: once this file exists here, it also changes what `pytest` and
-`scripts/smoke_flow.py --offline` do when run from the repo root - both build
-a default ``Settings()`` that resolves this same relative path. If you want to
-keep this repository's own test suite on the single-provider fallback while
-still using routing for a real deployment, point ``LLMWIKI_PROVIDERS_CONFIG``
-/ ``LLMWIKI_OPS_CONFIG`` (in ``.env``) at a directory outside this checkout
-instead of relying on the ``./config/`` default.
+WARNING: this file's existence changes the default for anything that builds a
+plain ``Settings()`` from the repo root or from ``/app`` - routing is consulted
+*before* ``LLM_PROVIDER``/``LLM_BACKEND`` in ``factory._build_llm_client`` and
+returns first, so ``LLM_BACKEND=fake`` no longer selects the offline double
+while this file is present. Verified on 2026-09-10: ``pytest`` and
+``scripts/smoke_flow.py --offline`` are unaffected (both construct explicit
+``Settings`` with these fields set), but the ``api-offline`` compose service
+was, and now pins ``LLMWIKI_PROVIDERS_CONFIG``/``LLMWIKI_OPS_CONFIG`` at a
+nonexistent path to force the fallback back on. Any other offline entry point
+needs the same treatment - an unset env var will not do it, only a path that
+does not exist.
 """
 
 PROVIDERS = [
@@ -41,11 +57,6 @@ PROVIDERS = [
         "provider": "openai",  # pip install "llmwiki[openai]"
         "api_key_env": "OPENAI_API_KEY",
         # self-hosted (vLLM/Ollama/LM Studio): point this at its OpenAI-compatible endpoint
-        # Phase 1 local LLM (docs/implement-plan-v1.4.md Phase 1 plan): this row is
-        # repurposed for the RTX 3090 host's vLLM server (llama.cpp as fallback,
-        # same mechanism) - OPENAI_BASE_URL points at that box, not at cloud OpenAI.
-        # No op is routed here yet (see config/ops.py); flip summarize_source/
-        # plan_compile to provider "openai" once OPENAI_BASE_URL is live.
         "base_url_env": "OPENAI_BASE_URL",
     },
     {

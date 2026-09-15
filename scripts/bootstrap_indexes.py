@@ -33,7 +33,7 @@ def api(settings) -> httpx.Client:
 
 def describe(client: httpx.Client, name: str) -> dict | None:
     response = client.get(f"/indexes/{name}")
-    if response.status_code == 404:
+    if response.status_code in (404, 410):  # 410: deleted and still being torn down
         return None
     response.raise_for_status()
     return response.json().get("result")

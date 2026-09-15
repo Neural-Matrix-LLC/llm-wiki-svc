@@ -8,7 +8,10 @@ from __future__ import annotations
 
 import logging
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
+from fastapi.encoders import jsonable_encoder
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse
 
 from llmwiki import __version__
 from llmwiki.api.routes import router
@@ -17,6 +20,11 @@ from llmwiki.config import settings as default_settings
 
 configure_logging(default_settings.log_level)
 logger = logging.getLogger(__name__)
+
+#: How much of a rejected body to echo back. A validation error quotes what it
+#: rejected, which is a debugging aid for a small JSON body and a denial of
+#: service for a multi-megabyte upload.
+MAX_ECHOED_BODY_CHARS = 500
 
 
 def create_app() -> FastAPI:
@@ -32,6 +40,8 @@ def create_app() -> FastAPI:
         lifespan=None if mcp_app is None else mcp_app.lifespan,
     )
     app.include_router(router)
+    # Replaces FastAPI's default 422 handler; see _validation_error.
+    app.add_exception_handler(RequestValidationError, _validation_error)
 
     if mcp_app is not None:
         from llmwiki.mcp.server import mount
@@ -60,6 +70,32 @@ def _mount_channels(app: FastAPI) -> None:
         channel_router = build(current_settings)
         if channel_router is not None:
             app.include_router(channel_router)
+async def _validation_error(request: Request, exc: Exception) -> JSONResponse:
+    """Return 422 for an invalid body, including one that is not valid UTF-8.
+
+    FastAPI's stock handler encodes the rejected input with a bare
+    ``bytes.decode()``. A body whose content type is not JSON is never parsed,
+    so the raw bytes reach that call, and binary bytes raise UnicodeDecodeError
+    *inside the error handler* - turning a client mistake into a 500 with a
+    traceback and no usable message (2026-09-10: a PDF posted as multipart to
+    ``/ingest``, which takes JSON; files belong at ``/upload``).
+    """
+    assert isinstance(exc, RequestValidationError)  # registered for that type only
+    body: dict = {"detail": jsonable_encoder(exc.errors(), custom_encoder={bytes: _as_text})}
+    if request.headers.get("content-type", "").startswith("multipart/form-data"):
+        body["hint"] = "this endpoint takes a JSON body; POST a file to /upload instead"
+    return JSONResponse(status_code=422, content=body)
+
+
+def _as_text(raw: bytes) -> str:
+    """Render a rejected body as text that is always JSON-encodable, and bounded."""
+    try:
+        text = raw.decode()
+    except UnicodeDecodeError:
+        return f"<{len(raw)} bytes of non-UTF-8 data>"
+    if len(text) > MAX_ECHOED_BODY_CHARS:
+        return f"{text[:MAX_ECHOED_BODY_CHARS]}... <{len(text)} characters total>"
+    return text
 
 
 def _build_mcp_app():  # type: ignore[no-untyped-def]

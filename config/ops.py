@@ -3,6 +3,12 @@
 Copy this file to ``config/ops.py`` (``cp config/ops.py.example
 config/ops.py``) alongside an active ``config/providers.py`` - both files are
 required together, or neither.
+This is the **tracked, active** per-op routing table (2026-09-10): committed
+alongside ``config/providers.py`` and copied into the image by the
+``Dockerfile``. It names providers and models, never credentials. Both files
+are required together, or neither - one without the other fails loudly at
+startup. (The former ``ops.py.example`` was deleted on 2026-09-10, once this
+file became the tracked one: two copies of the same table is one too many.)
 
 Every op the codebase actually calls needs **exactly one** row here - a
 missing or duplicate one fails loudly at startup, and so does an op whose

@@ -52,6 +52,46 @@ Over HTTP: `POST /ingest` takes `{"url": ...}` or `{"text": ...}`, and
 `POST /upload` takes a file. The MCP `ingest_source` tool takes `url` or
 `text`. All of them call the same `tools.ingest_source()`.
 
+The two are not interchangeable — `/ingest` reads a JSON body, so a file has to
+go to `/upload` as multipart, not to `/ingest`:
+
+```bash
+TOKEN=...   # INGEST_API_TOKEN from .env
+curl -sS -X POST http://localhost:8010/upload \
+     -H "Authorization: Bearer $TOKEN" \
+     -F "file=@practical-guide.pdf" -F "title=practical guide pdf"
+
+curl -sS -X POST http://localhost:8010/ingest \
+     -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+     -d '{"url": "https://karpathy.github.io/2019/04/25/recipe/"}'
+
+curl -sS http://localhost:8010/sources/<source_id>   # poll to `done`
+```
+
+`--url` still fetches the page or YouTube transcript over the network;
+`--offline` only keeps storage and the LLM local and fake. Drop `--offline`
+once `.env` has real credentials.
+
+Over HTTP: `POST /ingest` takes `{"url": ...}` or `{"text": ...}`, and
+`POST /upload` takes a file. The MCP `ingest_source` tool takes `url` or
+`text`. All of them call the same `tools.ingest_source()`.
+
+The two are not interchangeable — `/ingest` reads a JSON body, so a file has to
+go to `/upload` as multipart, not to `/ingest`:
+
+```bash
+TOKEN=...   # INGEST_API_TOKEN from .env
+curl -sS -X POST http://localhost:8010/upload \
+     -H "Authorization: Bearer $TOKEN" \
+     -F "file=@practical-guide.pdf" -F "title=practical guide pdf"
+
+curl -sS -X POST http://localhost:8010/ingest \
+     -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+     -d '{"url": "https://karpathy.github.io/2019/04/25/recipe/"}'
+
+curl -sS http://localhost:8010/sources/<source_id>   # poll to `done`
+```
+
 ## Running against real backends
 
 Fill `.env` with Cloudflare and Anthropic credentials, then:
@@ -74,6 +114,24 @@ docker compose up --build                     # reads .env
 docker compose --profile offline up api-offline   # no keys needed, port 8001
 docker compose --profile test run --rm smoke      # end-to-end check in the image
 ```
+
+### Dev mode (no rebuild after a code change)
+
+The `dev` service bind-mounts this working tree into the container and installs
+`llmwiki` editable, so an edit under `src/` is live on the next request —
+uvicorn `--reload` restarts the app in place. Rebuild only when
+`requirements.txt` or the `Dockerfile` changes.
+
+```bash
+docker compose --profile dev up dev               # http://localhost:8011 (DEV_PORT)
+docker compose --profile test run --rm pytest     # the unit suite, in the same image
+docker compose --profile dev run --rm dev llmwiki lint
+docker compose --profile dev build dev            # only after a dependency change
+```
+
+It runs as `DEV_UID:DEV_GID` (default `1000:1000`) so files it writes through
+the mounts — `./.data`, caches — stay owned by you rather than by root. Check
+with `id -u` and override in `.env` if your ids differ.
 
 ## Layout
 

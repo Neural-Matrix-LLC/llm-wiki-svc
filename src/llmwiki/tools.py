@@ -26,6 +26,7 @@ from llmwiki.models.plan import Answer, CompileResult, CostSummary
 from llmwiki.models.source import SourceRef, SourceStatus
 from llmwiki.pipeline.ingest import IngestPipeline
 from llmwiki.storage.base import ObjectNotFound
+from llmwiki.storage.layout import is_source_id
 from llmwiki.wiki import gists as gists_mod
 from llmwiki.wiki import lint as lint_mod
 from llmwiki.wiki.compiler import Compiler, read_cost_ledger
@@ -84,7 +85,7 @@ def get_page(slug: str, cfg: Settings | None = None) -> WikiPage:
 
 
 def _looks_like_source_id(slug: str) -> bool:
-    return len(slug) == 16 and all(character in "0123456789abcdef" for character in slug)
+    return is_source_id(slug)
 
 
 def ingest_source(
@@ -228,5 +229,50 @@ def health(cfg: Settings | None = None) -> dict:
         "models": {
             "default": cfg.llm_model,
             "embedding": cfg.embedding_model,
+        },
+        # Echoed back deliberately, and not a secret. A container's environment
+        # is baked in at create time, so an edited .env that was never applied
+        # (`compose restart` instead of `compose up -d`) is otherwise invisible
+        # from outside the box - this makes one unauthenticated curl enough to
+        # tell which configuration the running process actually has.
+        "log_level": cfg.log_level,
+        "config": _config_state(cfg),
+    }
+
+
+def _config_state(cfg: Settings) -> dict:
+    """Which optional config files the process actually found, by resolved path.
+
+    These three paths live *outside* the package (design v1.4 4.8/4.8.2), so
+    unlike ``chains/prompts/*.md`` they are not package data and do not travel
+    with a ``pip install``.  Absence of each is a legitimate, documented
+    configuration - the single-provider fallback and the fixed answer_query
+    prompt - which is exactly what makes a *mistaken* absence so quiet: the
+    service is healthy, answers questions, and silently ignores the routing
+    table and skills the operator believes are in force.
+
+    That happened on the first Hostinger deploy (2026-09-10): the container had
+    no ``config/`` or ``skills/`` at all, so every request took the fallback
+    path.  Paths are reported ``resolve()``d because they are relative by
+    default and therefore mean different things depending on the working
+    directory - ``./skills`` is ``/app/skills`` under the container's WORKDIR,
+    and seeing that spelled out is most of the diagnosis.
+    """
+    providers_config = cfg.llm_providers_config.resolve()
+    ops_config = cfg.llm_ops_config.resolve()
+    skills_dir = cfg.agent_skills_dir.resolve()
+    routed = providers_config.exists() and ops_config.exists()
+    # Counts files rather than parsing them: /healthz is polled by the Docker
+    # HEALTHCHECK every 30s, and discover_skills() would re-read and re-validate
+    # every file on each poll, logging a warning per malformed file each time.
+    skill_files = len(list(skills_dir.glob("*.md"))) if skills_dir.is_dir() else 0
+    return {
+        "llm_routing": "per-op table" if routed else "single-provider fallback",
+        "providers_config": {"path": str(providers_config), "present": providers_config.exists()},
+        "ops_config": {"path": str(ops_config), "present": ops_config.exists()},
+        "skills_dir": {
+            "path": str(skills_dir),
+            "present": skills_dir.is_dir(),
+            "skill_files": skill_files,
         },
     }

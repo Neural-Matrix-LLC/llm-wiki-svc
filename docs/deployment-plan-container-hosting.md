@@ -1,11 +1,12 @@
 # Deployment Plan — llmwiki as a Docker Container: Cloudflare vs Hostinger
 
-Status: **proposal, not yet approved or implemented.** Nothing in this document
-has been executed. Per `CLAUDE.md`'s rule that any plan touching more than
-~3 files gets proposed first, this is that proposal — implementation starts
-only after the recommended path is confirmed. No `HISTORY.md` entry exists
-yet because no change has been made; one is added when a path is actually
-deployed.
+Status: **proposal; the recommended path is not yet deployed.** Per
+`CLAUDE.md`'s rule that any plan touching more than ~3 files gets proposed
+first, this is that proposal. One piece has since been executed ahead of the
+deploy — the `docker-compose.yml` / `.env.example` image-naming change in §8,
+on 2026-09-10, so that `docker compose push` resolves to Docker Hub — and is
+logged in `HISTORY.md`. Nothing else here (no VPS, no Tunnel, no Access
+policy) has been done.
 
 ## 0. tl;dr
 
@@ -48,9 +49,9 @@ Grounded in the repo as it exists today, not in the abstract:
   `api`/`lint` services pull a prebuilt image from Docker Hub instead of
   building on the box (§6 Phase 3) — `build:` stays in the file for local
   dev (`docker compose up --build` keeps working exactly as today);
-  `image:` is what actually gets pulled on the VPS, and needs a real Docker
-  Hub repo path instead of the current bare local tag `llmwiki:latest`
-  (§8).
+  `image:` is what actually gets pulled on the VPS, and is now
+  `${DOCKER_USER:-local}/llmwiki:${IMAGE_TAG:-latest}` rather than the bare
+  local tag `llmwiki:latest` (§8).
 - **Storage is already Cloudflare, regardless of where compute runs.**
   `STORAGE_BACKEND=r2`, `VECTOR_BACKEND=vectorize`,
   `EMBEDDING_BACKEND=workers_ai` in `.env.example` mean R2 + Vectorize +
@@ -184,10 +185,23 @@ billing, true scale-to-zero, no separate box to patch/reboot).
    only, populate real Cloudflare (`CF_ACCOUNT_ID`, `CF_API_TOKEN`,
    `R2_*`) and LLM provider credentials, and a real (non-default)
    `INGEST_API_TOKEN`.
-4. If `config/providers.py` / `config/ops.py` routing is used in
-   production, copy those over too (they hold no secrets themselves, per
-   their own docstrings) — confirmed present as untracked files in this
-   repo already (`config/ops.py`, `config/providers.py`).
+4. Nothing to do for `config/providers.py` / `config/ops.py`. As of
+   2026-09-10 both are tracked in git and copied into the image by the
+   `Dockerfile`, because they name only *which env var* carries each key -
+   the values live in `.env` and are never committed or baked. The box
+   therefore gets the routing table from `docker compose pull`.
+
+   The trade: the routing table is part of the image, so changing a provider
+   or model means rebuild → smoke → push → pull, not an edit on the VPS. If a
+   deployment must diverge without a rebuild, uncomment
+   `./config:/app/config:ro` in `docker-compose.yml` and put the two files
+   next to `docker-compose.yml` on the box. Never uncomment it speculatively:
+   Compose auto-creates a missing host directory empty, and an empty mount
+   shadows the baked-in files, silently restoring the single-provider
+   fallback.
+
+   `skills/` ships the same way and needs no step either.
+
 5. Decide whether the Docker Hub repo is public or private. Public is
    simplest (no auth needed to pull); if private, create a Docker Hub
    **access token** (not your account password) for `docker login` on the
@@ -200,38 +214,61 @@ happens on your own machine.
 
 **Locally (your dev machine):**
 
-6. Build, tagging for Docker Hub (replace `<dockerhub-user>` with your
-   actual username/org — see §8 for the matching `docker-compose.yml`
-   change):
+6. Build. `docker-compose.yml` now names the image
+   `${DOCKER_USER:-local}/llmwiki:${IMAGE_TAG:-latest}` (§8), so with
+   `DOCKER_USER` exported (or set in `./.env`) the build is already tagged
+   for Docker Hub:
    ```bash
-   docker build -t <dockerhub-user>/llmwiki:latest --target runtime .
-   # or, once docker-compose.yml's image: points at the same repo (§8):
-   #   docker compose build api
+   docker compose build api
+   # equivalent to:
+   #   docker build -t $DOCKER_USER/llmwiki:latest --target runtime .
    ```
+   All four services share that one image name, so the smoke gate in step 7
+   exercises exactly the image step 8 pushes.
 7. Sanity-check the image **before** it reaches Docker Hub — this replaces
    the old on-box build-time gate, since the box no longer builds anything:
    ```bash
    docker compose --profile test run --rm smoke
    ```
-8. Push (tag by date or git SHA too, e.g. `:2026.09.10`, so a bad push is
-   reversible by pulling the previous tag on the box):
+8. Push (tag by date or git SHA too, e.g. `IMAGE_TAG=2026.09.10`, so a bad
+   push is reversible by pulling the previous tag on the box):
    ```bash
    docker login                              # once; credentials are cached
-   docker push <dockerhub-user>/llmwiki:latest
+   docker compose push api                   # -> $DOCKER_USER/llmwiki:$IMAGE_TAG
    ```
+   Only `api` is pushed: `api-offline` and `smoke` are profile-gated and
+   build the same tag, and `lint` has no `build:` section at all.
 
 **On the VPS:**
 
-9. No `git clone` needed — the box only needs two files:
-   `docker-compose.yml` and `.env` (scp them over, or keep a minimal
-   deploy-only checkout of the repo for convenience — either way, the
-   `Dockerfile` and application source never need to exist on the box).
+9. No `git clone` needed — the box needs exactly two files:
+   `docker-compose.yml` and `.env`. Scp them over, or keep a minimal
+   deploy-only checkout for convenience — either way the `Dockerfile` and the
+   application source never need to exist on the box.
+
+   This was briefly three files. On 2026-09-10 the box had only `.env`,
+   `.data/` and `docker-compose.yml`, and the container turned out to have no
+   `config/` or `skills/` at all — both live outside the installed package, so
+   `pip install` never carried them, and both degrade *silently* to a
+   documented fallback rather than failing. The first fix bind-mounted
+   `config/` from the deploy directory; the better one, same day, was to track
+   both files in git and copy `config/` and `skills/` into the image, since
+   neither holds a secret. Two files again, and now the image is self-contained.
+
 10. If the Docker Hub repo is private, `docker login` on the box too, using
     the access token from Phase 2 step 5.
 11. ```bash
     docker compose pull        # pulls the image just pushed, never builds
     docker compose up -d       # the api service — real backends
     ```
+
+    `.data/` needs no preparation. If it does not exist, the Docker daemon
+    creates the bind-mount source as `root:root 0755` — which the non-root
+    image (uid 10001) cannot write into, so the container starts, passes
+    `/healthz`, and fails its first ingest with `PermissionError` (2026-09-13,
+    staging). `up` therefore runs the `init-data` one-shot first, which chowns
+    `.data/` to `API_UID:API_GID` (default 10001) and exits; an
+    `Exited (0)` init-data in `docker compose ps -a` is normal.
 12. Confirm `curl -s http://127.0.0.1:8010/healthz` returns healthy before
     opening it to the internet.
 
@@ -241,6 +278,116 @@ happens on your own machine.
     `${API_PORT:-8010}:8000` — only the host-facing side changes; the
     container's own internal port (`Dockerfile` `EXPOSE`/`CMD`/`HEALTHCHECK`)
     stays 8000 and never needs to know about the host conflict.
+
+### Phase 3b — When an `.env` change doesn't take effect on the box
+
+Symptom (hit on the first Hostinger deploy, 2026-09-10): `LOG_LEVEL=DEBUG` is
+set in `.env` on the VPS, but the running container behaves as if it were not.
+All four causes below were reproduced against Compose v5.5.1; the first is by
+far the most common.
+
+**First, see what the container actually has.** Its environment, not the file's:
+
+```bash
+docker compose exec api env | grep -E 'LOG_LEVEL|LLM_PROVIDER|STORAGE_BACKEND'
+curl -s http://127.0.0.1:8010/healthz     # `log_level` field echoes the effective value
+```
+
+If those disagree with `.env`, it is one of these:
+
+1. **`restart` does not re-read `.env`.** A container's environment is fixed
+   when the container is *created*; `docker compose restart` (and `docker
+   restart`) start the same container with the environment it was born with.
+   Verified: with `.env` edited from INFO to DEBUG, `restart` still yielded
+   INFO, and `up -d` yielded DEBUG. The fix is always:
+
+   ```bash
+   docker compose up -d --force-recreate api   # recreate, applying the new .env
+   ```
+
+   `--force-recreate` is belt-and-braces: current Compose does hash `env_file`
+   contents and recreate on a change, but older v2 releases did not and would
+   report "Container is up-to-date". Check with `docker compose version`.
+
+2. **A shell variable does not reach the container.** `LOG_LEVEL=DEBUG docker
+   compose up -d` feeds Compose's own `${...}` *interpolation* only. A
+   container receives a variable solely from `env_file:` or `environment:`, and
+   `LOG_LEVEL` is in neither for the `api` service. Verified: the container
+   still showed the `.env` value, not the exported one. To override a single
+   value without editing `.env`, pass it explicitly:
+
+   ```bash
+   docker compose run --rm -e LOG_LEVEL=DEBUG api llmwiki lint
+   ```
+
+3. **`.env` is not where Compose looked.** `env_file:` paths resolve against
+   the compose file's directory, so running `docker compose -f /opt/llmwiki/
+   docker-compose.yml up -d` from `~` still reads `/opt/llmwiki/.env` — but
+   `DOCKER_USER`/`IMAGE_TAG` interpolation reads the *shell* first and then the
+   project `.env`, so an exported `DOCKER_USER` silently outranks the file
+   (verified). Since 2026-09-10 `api` and `lint` declare `required: true`, so a
+   missing file now fails loudly, naming the path Compose wanted. Before that
+   change a missing `.env` started the container with **no** environment at
+   all — the failure this section exists for.
+
+4. **`environment:` in `docker-compose.yml` outranks `.env`.** `LOCAL_STORAGE_
+   PATH`, `API_HOST` and `API_PORT` are set there for the `api` service and
+   cannot be changed by editing `.env` on the box. (`API_PORT` in `.env` still
+   controls the *host-side* half of the port mapping, by interpolation — the
+   container's internal 8000 is what the `environment:` entry pins.)
+
+5. **The container never had `config/` or `skills/` in the first place.**
+   This was the actual root cause on 2026-09-10, found by looking inside the
+   running container: `/app` held only `scripts/` and `tests/fixtures/`, the
+   package itself ran from `/opt/venv/lib/python3.11/site-packages/llmwiki`,
+   and the deploy directory `/docker/llmwiki` held only `.env`, `.data/` and
+   `docker-compose.yml`. Three settings point at paths *outside* the package
+   and so are not carried by `pip install`:
+
+   | setting | default | resolves to (WORKDIR `/app`) |
+   |---|---|---|
+   | `LLMWIKI_PROVIDERS_CONFIG` | `./config/providers.py` | `/app/config/providers.py` |
+   | `LLMWIKI_OPS_CONFIG` | `./config/ops.py` | `/app/config/ops.py` |
+   | `AGENT_SKILLS_DIR` | `./skills` | `/app/skills` |
+
+   All three were absent, and **absence of each is a documented, legitimate
+   configuration** — the single-provider fallback in
+   `routing_config.load_routing_config` and the fixed `answer_query` prompt in
+   `QueryAgent.answer`. So nothing failed, nothing logged an error, and the
+   service answered questions using none of the configured routing or skills.
+   The `.env` variables *were* reaching the container; they simply named files
+   that were not there.
+
+   Fixed by copying **both** `config/` and `skills/` into the image and
+   tracking `config/providers.py` / `config/ops.py` in git (they name env vars,
+   never hold keys), so a `pull` brings the whole configuration with it. An
+   earlier attempt the same day bind-mounted `config/` from the deploy
+   directory instead; that was replaced because a missing host directory is
+   auto-created empty by Compose and an empty mount shadows the image's copy -
+   reintroducing this exact bug on any box that forgot the scp.
+
+   Note the ordering this creates: routing is consulted *before*
+   `LLM_PROVIDER`/`LLM_BACKEND`, so once the table is in the image,
+   `LLM_BACKEND=fake` alone no longer selects the offline double - the
+   `api-offline` service pins `LLMWIKI_PROVIDERS_CONFIG`/`LLMWIKI_OPS_CONFIG`
+   at a nonexistent path to force the fallback. To confirm on the box:
+
+   ```bash
+   curl -s http://127.0.0.1:8010/healthz | jq .config
+   docker compose exec api ls /app /app/config /app/skills
+   ```
+
+   `config.llm_routing` reads `per-op table` or `single-provider fallback`, and
+   each path is reported resolved with a `present` flag. A relative path in
+   `.env` means different things in different working directories, so the
+   resolved form is most of the diagnosis.
+
+**A code change needs a new image, not a new `.env`.** The box never builds
+(step 9). Editing source on the VPS — if a checkout is even there — changes
+nothing, because the running container has the source baked in at
+`/opt/venv`. Rebuild, smoke, push, then pull on the box (steps 6-11). The
+`log_level` field in `/healthz` is a quick way to confirm the box is running
+the image you think it is: it only exists in images built after 2026-09-10.
 
 ### Phase 4 — Ingress, TLS, auth
 13. Install `cloudflared` on the box, create a named Tunnel, route a
@@ -291,20 +438,36 @@ Sketch only — not part of this proposal's approval ask:
 Deploying does **not** require changing application code, but the
 build-locally/push-to-Docker-Hub workflow does need one real
 `docker-compose.yml` change, plus documentation:
-- **`docker-compose.yml`** — the `api` and `lint` services' `image:` value
-  changes from the generic local tag `llmwiki:latest` to a real Docker Hub
-  repo path, e.g. `<dockerhub-user>/llmwiki:latest`, so `docker compose
+- **`docker-compose.yml`** — **done (2026-09-10).** All four services'
+  `image:` value changed from the generic local tag `llmwiki:latest` to
+  `${DOCKER_USER:-local}/llmwiki:${IMAGE_TAG:-latest}`, so `docker compose
   push`/`pull` resolve against Docker Hub instead of just tagging an image
-  that only exists locally. `build:` stays untouched, so `docker compose up
-  --build` keeps working exactly as today for local dev — this is a
-  one-line value change, not a restructure.
+  that only exists locally. Three details worth recording:
+  - *All four services, not just `api` and `lint`.* If `smoke` kept a
+    different image name it would build and test a second image, defeating
+    the pre-push gate in §9.3.
+  - *Interpolated, not hardcoded.* `DOCKER_USER` is already exported in the
+    dev shell; hardcoding an account into a committed file also makes the
+    repo awkward to fork. Compose interpolation reads the shell environment
+    and the top-level `./.env` — it does **not** read a service's
+    `env_file:`, which is why `.env` on the VPS needs the variable too
+    (§6 step 9).
+  - *Fallback is `local/`, not the bare name.* An unset `DOCKER_USER` still
+    builds and runs offline in a fresh clone, but `local/llmwiki` is an
+    unpushable namespace, so a misconfigured `pull` fails loudly instead of
+    fetching a stranger's `llmwiki` image from Docker Hub.
+
+  `build:` stays untouched, so `docker compose up --build` keeps working
+  exactly as today for local dev.
 - `docs/deployment-plan-container-hosting.md` (this file)
 - A deploy runbook addition to `implement-plan.md` §6 (operational runbook
   already lives there) or a new `docs/runbook-hostinger.md`
 - Possibly a `.github/workflows/deploy.yml` if Phase 6 (CI/CD) is approved
-- No `.env.example` changes needed — every variable this plan uses already
-  exists there; the Docker Hub repo path is a plain (non-secret) value
-  hardcoded in `docker-compose.yml`, not something that belongs in `.env`
+- **`.env.example`** — **done (2026-09-10).** Adds a "Docker Hub" block
+  documenting `DOCKER_USER` and `IMAGE_TAG`. Neither is a secret and neither
+  is read by the application, but `CLAUDE.md` requires `.env.example` to
+  stay in sync with anything the deployment reads from the environment, and
+  the VPS's `.env` is the only place these get set there.
 
 ## 9. Test section (per `CLAUDE.md`'s mandatory rule)
 
