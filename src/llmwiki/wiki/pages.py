@@ -8,18 +8,34 @@ touching the same page must not silently lose one another's work.
 
 from __future__ import annotations
 
+import json
+import logging
 from datetime import date
 from typing import Any
 
 import frontmatter
+import yaml
 
 from llmwiki.models.page import PageFrontMatter, WikiPage
 from llmwiki.storage.base import ObjectNotFound, ObjectStore
 from llmwiki.storage.layout import wiki_page
 
+logger = logging.getLogger(__name__)
+
 
 class VersionConflict(RuntimeError):
     """Raised when a page changed underneath a patch that was based on an older version."""
+
+
+def _yaml_str(value: str) -> str:
+    """A YAML-safe scalar for free text.
+
+    ``title`` and ``gist`` are model-written prose; a bare ``Foo: bar`` or a
+    leading ``[`` in either is invalid YAML and, before 2026-09-16, made the
+    page unreadable to every consumer at once (two such pages in the real
+    corpus). A JSON string literal is a valid double-quoted YAML scalar.
+    """
+    return json.dumps(value, ensure_ascii=False)
 
 
 def parse_page(raw: str) -> WikiPage:
@@ -43,10 +59,10 @@ def render_page(page: WikiPage) -> str:
     fm = page.front_matter
     lines = [
         "---",
-        f"title: {fm.title}",
+        f"title: {_yaml_str(fm.title)}",
         f"slug: {fm.slug}",
         f"type: {fm.type}",
-        f"gist: {fm.gist}",
+        f"gist: {_yaml_str(fm.gist)}",
         f"sources: [{', '.join(fm.sources)}]",
         f"updated: {(fm.updated or date.today()).isoformat()}",
         f"version: {fm.version}",
@@ -64,8 +80,17 @@ def read_page(store: ObjectStore, slug: str, page_type: str = "concept") -> Wiki
     """
     key = wiki_page(slug, page_type)
     try:
-        return parse_page(store.get(key).decode("utf-8"))
+        raw = store.get(key).decode("utf-8")
     except ObjectNotFound:
+        return None
+    try:
+        return parse_page(raw)
+    except (yaml.YAMLError, ValueError) as exc:
+        # An unreadable page must not take every answer down with it (the
+        # query graph's "never a hard failure" posture). Treated as absent
+        # here; ``lint`` reports it as an ``orphan`` finding with the reason,
+        # and the next compile of one of its sources rewrites it.
+        logger.warning("wiki page %s is unreadable and was skipped: %s", key, exc)
         return None
 
 

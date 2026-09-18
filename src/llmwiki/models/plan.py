@@ -90,9 +90,49 @@ class Citation(BaseModel):
     slug: str | None = None
 
 
+class AgentStep(BaseModel):
+    """One tool call the query graph made while gathering evidence (Phase 1-D).
+
+    Recorded for cost visibility and for the eval ``tool_calls`` metric; the
+    model never sees this record, only the tool's observation text.
+    """
+
+    tool: str
+    args: dict = Field(default_factory=dict)
+    chars: int = 0
+
+
+class ExternalRef(BaseModel):
+    """A web-search result surfaced to the user (Phase 1-D, design §4.9).
+
+    Deliberately *not* a :class:`Citation`: it points outside ``raw/``, so it
+    can never satisfy the answer-with-citations contract. Capturing it into
+    the knowledge base is a separate, explicit ``ingest_source(url=...)``.
+    """
+
+    title: str = ""
+    url: str
+    snippet: str = ""
+
+
+class Verdict(BaseModel):
+    """The LLM-as-judge groundedness grade (``op="judge_answer"``, eval only)."""
+
+    grounded: bool
+    score: float = Field(ge=0.0, le=1.0)
+    reasoning: str = ""
+
+
 class Answer(BaseModel):
     """Result of the query agent: text plus citations that must resolve."""
 
     text: str
     citations: list[Citation] = Field(default_factory=list)
     used_rag_fallback: bool = False
+    # Phase 1-D additions. ``context`` is what the answer was generated from -
+    # the eval judge needs it; ``run_id`` is the LangSmith root run when
+    # tracing is on (None otherwise), the handle ``POST /feedback`` attaches to.
+    steps: list[AgentStep] = Field(default_factory=list)
+    context: str = ""
+    external_refs: list[ExternalRef] = Field(default_factory=list)
+    run_id: str | None = None

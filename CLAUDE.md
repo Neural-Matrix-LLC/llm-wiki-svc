@@ -14,17 +14,34 @@ with FastAPI — `src/llmwiki/channels/`) landed 2026-09-11; local-LLM routing
 (RTX 3090 host) has its own `vllm`/`llamacpp` provider entries as of
 2026-09-14 (`config/providers.py`, each with its own `*_API_KEY`/`*_BASE_URL`
 pair, distinct from real cloud OpenAI) but is not yet flipped on (see
-`config/ops.py`'s commented example — no endpoint is reachable yet); a
-LangGraph query flow plus lean LangSmith eval is not yet started. See
-`HISTORY.md`'s 2026-09-11 and 2026-09-14 entries and
-`~/.claude/plans/we-can-start-to-functional-goblet.md` for the full
-four-workstream plan.
+`config/ops.py`'s commented example — no endpoint is reachable yet); the
+LangGraph query graph, external search and LangSmith eval/correction loop
+landed 2026-09-16 (workstream D — design v1.4 §4.9, plan §20, technical
+document §3.3 and §10). See `HISTORY.md`'s 2026-09-11, 2026-09-14 and
+2026-09-16 entries.
 
-`pytest` runs 362 unit tests with no network access (a handful skip when a
+The query agent is a bounded LangGraph loop over the existing `LLMClient`
+(`src/llmwiki/agent/graph.py`): `AGENT_MAX_TOOL_CALLS` (default 4; `0` = the
+pre-graph single call, which is what the unit suite pins via an autouse
+fixture), a shared context budget and a recursion limit are all code-enforced.
+`search_web` is offered only by `AGENT_WEB_SEARCH_POLICY` and its results are
+never citations. Two more ops exist (`agent_step`, `judge_answer`) — a new
+`complete(op=...)` call site needs a `config/ops.py` row and the drift guard
+in `tests/unit/test_routing_config.py` will say so.
+
+`pytest` runs 459 unit tests with no network access (a handful skip when a
 provider extra is absent, environment-dependent); `scripts/smoke_flow.py
---offline` walks the whole flow end to end with fake adapters. Integration
-tests exist but have never run — they need Cloudflare and Anthropic
-credentials that do not exist yet.
+--offline` walks the whole flow end to end with fake adapters,
+`scripts/eval_answer.py --offline` scores the shipped golden set the same way
+and `scripts/probe_query_graph.py --offline --matrix` runs the query graph's
+bound/policy matrix against the doubles. The manual, pass/fail plan for
+workstreams C and D — with `scripts/check_local_llm.py` (local vLLM/llama.cpp
+diagnostic) and `scripts/probe_query_graph.py` (live bounds probe +
+LangSmith trace check) — is `docs/phase1-manual-test-plan-C-D.md`
+(2026-09-17); `tests/unit/test_phase1_scripts.py` pins both scripts' checks.
+Integration tests exist but have never run as a suite — they need Cloudflare
+and Anthropic credentials; `tests/integration/test_langsmith_eval.py` needs
+only a LangSmith key.
 
 The LLM layer is multi-provider: `LLM_PROVIDER` selects `anthropic` (native
 adapter — prompt caching, measured USD cost), `openai`, `vllm`, `llamacpp`,
@@ -52,6 +69,7 @@ source .venv/bin/activate               # python 3.11.14; the system python is 3
 pytest                                  # unit tests only (integration is opt-in)
 pytest -m integration                   # needs a populated .env; costs money
 python scripts/smoke_flow.py --offline  # end-to-end, no keys, under 2 seconds
+python scripts/eval_answer.py --offline # answer-quality golden set, no keys (exit 1 on a gated failure)
 
 # Same loop inside Docker, with this tree bind-mounted so edits need no rebuild
 # (README "Dev mode"): the dev image installs llmwiki editable and reloads.
@@ -70,7 +88,7 @@ dies inside them under a `3.11` pin before reaching any project file.
 `requires-python` stays `>=3.11` — the *library* supports newer, the *dev env*
 is pinned.
 
-Four tests are load-bearing and must not be weakened to make a change pass:
+Five tests are load-bearing and must not be weakened to make a change pass:
 
 - `tests/unit/test_layering.py` — the L0–L5 import boundaries. If a new import
   fails it, move the code, do not widen the rule.
@@ -84,6 +102,16 @@ Four tests are load-bearing and must not be weakened to make a change pass:
   still imported only inside `build()`; if this fails, a provider SDK has
   acquired a module-level import and merely importing `llmwiki` got heavier
   for everyone.
+- `tests/unit/test_agent_graph.py::test_tool_loop_is_bounded_by_agent_max_tool_calls`
+  — guards design §4.9's cost bound. A question's LLM spend must be set by
+  configuration, never by the model's appetite for another tool call.
+
+Three autouse fixtures in `tests/conftest.py` isolate every test from this
+checkout's real routing table, `skills/` catalog and tool loop; a test that
+wants one opts in explicitly. The shared `settings` fixture reads the real
+`.env`, so anything that reaches `factory.llm_client` must build its own
+`Settings(_env_file=None, llm_provider="fake", ...)` (`test_routes.client`,
+`test_eval.offline`).
 
 One more is worth knowing when touching the capture path:
 `tests/unit/test_tools_and_mcp.py::test_every_transport_can_ingest_all_five_source_kinds`

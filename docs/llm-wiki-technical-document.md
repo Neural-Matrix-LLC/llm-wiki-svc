@@ -3,7 +3,10 @@
 **Audience:** an engineer who needs to support, extend, fix, or test this
 repository, without having read the design doc or implementation plan first.
 **Scope:** the codebase as it exists on disk today (Phase 0, plus plan-v1.4
-§19's R1–R5: multi-provider LLM routing and query-agent skill invocation).
+§19's R1–R5: multi-provider LLM routing and query-agent skill invocation, plus
+Phase 1: capture channels, local-LLM provider entries, and — since 2026-09-16 —
+the LangGraph query graph, external search and the LangSmith evaluation loop,
+plan §20).
 This document describes *implemented behaviour*. Where the roadmap differs
 from today's code, that is called out explicitly rather than blended in.
 
@@ -12,7 +15,7 @@ from today's code, that is called out explicitly rather than blended in.
 | Document | What it's for |
 |---|---|
 | `docs/llmwiki-KB-design_v1.4.md` | Why the system is shaped this way — architecture rationale, phase plan. Read before making a *design* decision. |
-| `docs/implement-plan-v1.4.md` | The packaging/extraction plan (mostly not yet executed — see §10). |
+| `docs/implement-plan-v1.4.md` | The packaging/extraction plan (mostly not yet executed — see §11). |
 | `docs/HISTORY.md` | Chronological log of every change, bug, and deviation. The ground truth for "why is this line like this". |
 | **This document** | The map: which class calls which, how to extend each seam, and the full API surface. Optimized for "I need to change X" and "what does Y expose". |
 
@@ -67,17 +70,17 @@ an import that violates the ladder, **move the code**, don't widen the rule
 ```
 L0  models/                (pure pydantic schemas, zero I/O, imports nothing else in llmwiki)
      │
-L1  storage/  extractors/  embedding/  vector/  llm/     (adapters — each Protocol-based, siblings, never import each other)
+L1  storage/  extractors/  embedding/  vector/  llm/  websearch/   (adapters — each Protocol-based, siblings, never import each other)
      │
 L1* chains/                (prompt CONTENT + a cached file loader — no domain logic; §2.4)
      │
-L2  wiki/     agent/                                     (domain logic — compiler, page I/O, query agent + its skills.py; §2.4)
+L2  wiki/     agent/                                     (domain logic — compiler, page I/O, query graph + tools + skills + judge; §2.4, §3.3)
      │
 L3  pipeline/                                             (orchestrates extract → chunk → embed → compile)
      │
-L4  tools.py                                               (the entire public function surface — the "brain")
+L4  tools.py   eval/                                       (the entire public function surface — the "brain"; eval/ is a peer that only calls tools.py; §10)
      │
-L5  api/  mcp/  cli.py                                     (transports — validate input, call tools.py, serialize)
+L5  api/  mcp/  cli.py  channels/                          (transports — validate input, call tools.py, serialize)
 ```
 
 Two things live entirely **outside** `src/llmwiki/` and are not part of the
@@ -110,15 +113,18 @@ them testable with a spy store or a scripted LLM.
 | `extractors/` | L1 | `Extractor` protocol + modality detection (`base.py`), and one module per modality: `pdf.py`, `web.py`, `youtube.py`, `text.py`. |
 | `embedding/` | L1 | `Embedder` protocol (`base.py`), `WorkersAIEmbedder`, `FakeEmbedder`. |
 | `vector/` | L1 | `VectorStore` protocol (`base.py`), `VectorizeStore`, `MemoryVectorStore`. |
-| `llm/` | L1 | `LLMClient` protocol (`base.py`), `AnthropicLLM`, `LangChainLLM`, `FakeLLM`, the provider registry, pricing, and the R1–R3 multi-provider router (`router.py`, `routing_config.py`). |
+| `llm/` | L1 | `LLMClient` protocol (`base.py`), `AnthropicLLM`, `LangChainLLM`, `FakeLLM`, the provider registry, pricing, and the R1–R3 multi-provider router (`router.py`, `routing_config.py`). `KNOWN_OPS` is seven ops since Phase 1-D (§3.5). |
+| `websearch/` | L1 | `WebSearcher` protocol (`base.py`), `TavilyWebSearcher` (`langchain-tavily`, imported only when selected), `FakeWebSearcher`. The query graph's optional `search_web` tool backend (§3.3, §5.11). |
 | `wiki/` | L2 | `compiler.py` (the incremental compiler), `pages.py` (read/write/parse), `gists.py` (the manifest + index), `lint.py` (scheduled global check). |
-| `agent/` | L2 | `query.py` — `QueryAgent`, wiki-first retrieval with RAG fallback, plus (R5) skill selection/chaining. `skills.py` — `discover_skills()`, reads the repo-root `skills/` SKILL.md catalog. See §2.4. |
-| `chains/` | L1/L2-adjacent | `prompts_loader.py` + `prompts/*.md` — the five prompt templates the compiler (always) and query agent (only when no `skills/` catalog is discovered) use. **Not** the same thing as repo-root `skills/` — see §2.4. |
+| `agent/` | L2 | `query.py` — `QueryAgent`: public surface (`search`, `answer`, `source_exists`) plus the helpers the graph reuses. `graph.py` — the LangGraph `StateGraph` behind `answer()` (§3.3). `toolkit.py` — the LangChain tools the loop may call and the policy gate. `judge.py` — the eval-only groundedness grader. `skills.py` — `discover_skills()`, reads the repo-root `skills/` SKILL.md catalog. See §2.4. |
+| `chains/` | L1/L2-adjacent | `prompts_loader.py` + `prompts/*.md` — the seven prompt templates: the compiler's four (always), `answer_query` (query agent when no `skills/` catalog is discovered), `agent_step` (the graph's tool decision) and `judge_answer` (eval). **Not** the same thing as repo-root `skills/` — see §2.4. |
 | `pipeline/` | L3 | `ingest.py` (`IngestPipeline` — capture/extract/embed/compile orchestration), `chunker.py` (heading-aware text chunking). |
 | `tools.py` | L4 | Every function any transport calls. This *is* the public Python API (§6.1). |
+| `eval/` | L4 | `dataset.py` (golden-set JSONL ↔ LangSmith), `evaluators.py`, `run.py` (local runner + `langsmith.evaluate` wrapper), `feedback.py` (corrections → examples). A peer of `cli.py`: reaches the domain only through `tools.py`; `langsmith` imported function-locally. §10. |
 | `api/` | L5 | `app.py` (FastAPI app + MCP mount), `routes.py` (HTTP handlers). |
 | `mcp/` | L5 | `server.py` — the six agent-facing MCP tools, same functions as `api/routes.py`. |
-| `cli.py` | L5 | `llmwiki` console script. |
+| `cli.py` | L5 | `llmwiki` console script (incl. `ask`, `feedback`). |
+| `channels/` | L5 | Telegram and email webhook capture channels (Phase 1 A/B). |
 | `factory.py` | outside ladder | Builds concrete adapters from `Settings`. Only `tools.py` and `cli.py` call it. |
 | `config.py` | outside ladder | `Settings` (pydantic-settings) — the only module reading `.env`/`os.environ`, except `llm/routing_config.py` (§5.6). |
 
@@ -160,8 +166,9 @@ the checkout would silently outrank `LLM_PROVIDER=fake` (see §5.6 and the
 ### 2.4 Agents, `chains/prompts/`, and `skills/` — three things with similar names
 
 This codebase has exactly **two** things that ever call an LLM as part of
-answering a request — the compiler and the query agent — and, as of R5, only
-one of them is "agentic" in the tool-calling sense. The rest of this section
+answering a request — the compiler and the query agent — and only one of
+them is "agentic" in the tool-calling sense (since R5 for choosing a skill;
+since Phase 1-D, 2026-09-16, for choosing evidence-gathering tools too). The rest of this section
 exists because `chains/` and `skills/` look interchangeable at a glance
 (both are directories of markdown files with YAML frontmatter) and are not:
 they are consumed by different code, at different times, for different
@@ -172,10 +179,10 @@ reasons.
 | | `Compiler` (`wiki/compiler.py`) | `QueryAgent` (`agent/query.py`) |
 |---|---|---|
 | Called from | `IngestPipeline.process()` → `compile_source()` (§3.1) | `tools.answer()` (§3.3) |
-| Shape | Five **fixed** stages, always in the same order (§3.2) | One retrieval pass, then (R5) an optional selection step, then generation |
-| LLM calls per run | Up to 4 (`summarize_source`, `plan_compile`, `create_page`\*, `patch_page`\*) | 1 (pre-R5, or no `skills/` catalog) to `1 + MAX_SKILL_CHAIN` (R5, catalog present) |
-| Which prompt runs, decided by | **The Python source code.** Each stage's function body names its own `op=` and calls `load_prompt("<that literal name>")` — there is no branch, no choice, no model input into this decision | Pre-R5 / no catalog: also the source code, identically. **R5, catalog present: the model**, via a forced tool-call (§3.3) |
-| Is this "agentic"? | **No, deliberately.** Design v1.4 §4.4/§4.8.2 requires the compiler to stay non-agentic — a model that could decide to re-plan, retry, or call something unexpected is exactly what would break the "compilation cost never grows with wiki size" guarantee `test_compiler_no_full_scan.py` enforces | **Only this one, only since R5, only for picking/chaining a system prompt.** It cannot decide to skip retrieval, re-query, or call any tool other than "choose a skill" — see §3.3 for the exact boundary |
+| Shape | Five **fixed** stages, always in the same order (§3.2) | A LangGraph `StateGraph` (§3.3): one deterministic retrieval pass, then a **bounded** tool loop (Phase 1-D), then (R5) an optional skill-selection step, then generation, then citation resolution |
+| LLM calls per run | Up to 4 (`summarize_source`, `plan_compile`, `create_page`\*, `patch_page`\*) | With `AGENT_MAX_TOOL_CALLS=0`: 1 (no `skills/` catalog) to `1 + MAX_SKILL_CHAIN` — exactly the pre-graph count. Loop on: `(n + 1)` cheap `agent_step` calls on top, `n ≤ AGENT_MAX_TOOL_CALLS` |
+| Which prompt runs, decided by | **The Python source code.** Each stage's function body names its own `op=` and calls `load_prompt("<that literal name>")` — there is no branch, no choice, no model input into this decision | No catalog: the source code, identically. **Catalog present: the model** picks the skill (R5). **Loop on: the model** also picks which evidence tool to call next, from a set the code offers (§3.3) |
+| Is this "agentic"? | **No, deliberately.** Design v1.4 §4.4/§4.8.2 requires the compiler to stay non-agentic — a model that could decide to re-plan, retry, or call something unexpected is exactly what would break the "compilation cost never grows with wiki size" guarantee `test_compiler_no_full_scan.py` enforces | **Only this one, and only inside code-enforced bounds.** It can choose a skill (R5) and, since Phase 1-D, call `search_wiki` / `search_chunks` / `get_page` (and `search_web` when policy offers it) up to `AGENT_MAX_TOOL_CALLS` times within one shared context budget. It cannot skip the wiki-first retrieval, exceed the cap, pick a tool the policy withholds, or cite anything outside `raw/` — §3.3 for the exact boundary |
 
 \* `create_page`/`patch_page` run zero or more times, once per planned
 operation (§3.2 step 4), not fixed at exactly one call.
@@ -276,7 +283,14 @@ other.
   pipeline/tools/factory`).
 - The compiler is **never** a consumer of `skills/` and is not expected to
   become one — see the "No, deliberately" row above. Do not wire
-  `discover_skills()` into `wiki/compiler.py`.
+  `discover_skills()` into `wiki/compiler.py`. The same goes for the query
+  graph's tools (`agent/toolkit.py`): they are the query agent's, not the
+  compiler's.
+- Every test in `tests/unit/` runs with `AGENT_MAX_TOOL_CALLS=0`
+  (`conftest.py`'s `_isolate_query_tool_loop`, the third instance of the
+  isolation-fixture pattern above), so the tool loop is never entered unless
+  a test opts in with `settings.model_copy(update={"agent_max_tool_calls":
+  n})` — `tests/unit/test_agent_graph.py` is where that happens.
 
 ---
 
@@ -416,59 +430,121 @@ structured output. Global lint/synthesis (`wiki/lint.py:lint_wiki`) is
 
 ### 3.3 Query
 
+Since Phase 1-D (2026-09-16, design §4.9, plan §20) `QueryAgent.answer()` is
+one invocation of a LangGraph `StateGraph` built in `agent/graph.py`. The
+graph is compiled once per agent (`QueryAgent.graph`, a `cached_property`);
+its nodes are closures over the agent and reuse the agent's own methods.
+**LangGraph is orchestration only**: every model call below is
+`LLMClient.complete(...)` on the protocol in §3.6 — no node holds a LangChain
+chat model, which is why routing, cost accounting, the offline doubles and
+the layering guard are all untouched by this change.
+
 ```
 api/routes.py:answer()  /  mcp does NOT expose this (see §6.3)  /  cli.py "ask" command
       │
       ▼
 tools.py:answer(query)  ──►  agent.query.QueryAgent.answer(query)
-      │
+      │                        graph.invoke({"query", "k"}, config={run_name="answer_query",
+      │                                     run_id=uuid4(), recursion_limit=2n+8})
+      ▼
+ [retrieve]                                       ← the pre-graph retrieval, VERBATIM (D3)
       ├─ Embedder.embed([query])
       ├─ VectorStore.query(gists_index)             ← wiki search, tried FIRST
       │     if best hit score ≥ WIKI_CONFIDENCE (0.35): wiki alone is used
-      │     else: VectorStore.query(chunks_index)    ← RAG fallback, only now
-      ├─ _build_context()                            ← UNCHANGED by everything below
-      │     wiki.pages.read_page() for each wiki hit's slug
-      │     citations built from each page's front_matter.sources
-      │     (+ chunk hits' source_id/url if the fallback ran)
+      │     else: VectorStore.query(chunks_index)    ← RAG fallback, only now (used_rag_fallback=True)
+      └─ _build_context()  → context, citations{source_id→Citation}, budget_left = 12_000 − len(context)
       │
-      ├─ agent.skills.discover_skills(settings.agent_skills_dir)   [R5, §2.4]
-      │     │
-      │     ├─ {} (no skills/ directory, or it's empty)
-      │     │     └─ _answer_with_fixed_prompt()
-      │     │           LLMClient.complete(op="answer_query",
-      │     │                              system=load_prompt("answer_query"))
-      │     │           ← the ENTIRE pre-R5 behaviour, byte-identical
-      │     │
-      │     └─ {name: Skill, ...} (≥1 discovered)
-      │           └─ _answer_with_skills()
-      │                 ├─ _select_skills(query, skills)
-      │                 │     LLMClient.complete(op="answer_query",
-      │                 │       system=SKILL_SELECTION_SYSTEM,
-      │                 │       schema={"skills": enum(discovered names), ...})
-      │                 │     invalid/hallucinated choice → retry once →
-      │                 │       None ⇒ fall back to _answer_with_fixed_prompt()
-      │                 │
-      │                 └─ for each chosen skill name, in order (≤ MAX_SKILL_CHAIN):
-      │                       LLMClient.complete(op="answer_query",
-      │                         system=skills[name].body,     ← NOT load_prompt()
-      │                         prompt=question + context [+ previous step's text])
-      │                     → last step's text is the answer
+      ├─ context empty ─────────────────────────► [no_answer] → END  ("Nothing in the knowledge base…")
+      ├─ AGENT_MAX_TOOL_CALLS == 0 ──────────────► [select_skills]      (the pre-graph call sequence exactly)
+      ▼
+ [agent] ◄───────────────────────────────┐        ← ONE complete(op="agent_step", schema=ACTION) per pass
+      │  skipped (no LLM call) when       │           ACTION = {"action": enum[offered tools + "answer"],
+      │    tool_calls_made ≥ cap          │                     "args": {…}, "reason": str}
+      │    or budget_left ≤ 0             │           offered = toolkit.offered_tools(): the three local
+      │  unusable decision → retried once │           tools always; search_web only by policy (below)
+      │  with a nudge, then ends the loop │
+      ├─ action ∈ offered tools ──► [tools] ─────┘  ← dispatch AIMessage.tool_calls[0] → ToolMessage
+      │                              search_wiki(query,k)   → page blocks + page-source citations
+      │                              search_chunks(query,k) → chunk blocks + source_id/url citations
+      │                              get_page(slug)         → one page body + its citations
+      │                              search_web(query)      → external_refs ONLY (never context, never citations)
+      │                            block truncated to budget_left; identical repeat refused (observation);
+      │                            bad args / tool error → observation, never an exception;
+      │                            steps += AgentStep(tool, args, chars)
       │
-      └─ resolved = [c for c in citations if self.source_exists(c.source_id)]
-            source_exists() checks ObjectStore.exists(raw/{id}/meta.json)
-            → Answer{text, citations, used_rag_fallback}
+      └─ action == "answer" | cap | budget | invalid ×2 ──► [select_skills]
+                                                              │
+      ┌───────────────────────────────────────────────────────┘
+      ▼
+ [select_skills]   discover_skills(settings.agent_skills_dir)                     [R5, §2.4]
+      │            {} → chosen None            ≥1 → _select_skills(): ONE forced-schema call,
+      │                                              invalid choice → retry once → None
+      ▼
+ [generate]        chosen → _run_skill_chain(): one op="answer_query" call per skill, system=skill body
+      │            none   → _answer_with_fixed_prompt(): system=load_prompt("answer_query")
+      │            context += "## External web results (NOT in the knowledge base …)" block, if any
+      ▼
+ [resolve_citations]   resolved = [c for c in citations if source_exists(c.source_id)]
+      │                source_exists() checks ObjectStore.exists(raw/{id}/meta.json)
+      ▼
+   Answer{text, citations, used_rag_fallback, steps, context, external_refs, run_id}
 ```
+
+**The three bounds are code, never prompt** (design §4.9, D4):
+
+| Bound | Where enforced | Default |
+|---|---|---|
+| `AGENT_MAX_TOOL_CALLS` | `[agent]` checks `tool_calls_made` *before* the decision call; `0` skips the loop entirely | 4 |
+| Context budget | `MAX_CONTEXT_CHARS` (12 000) shared across `[retrieve]` and every tool result; `[tools]` truncates, `[agent]` skips when 0 | 12 000 chars |
+| `recursion_limit` | `graph.invoke(config)`; `2n + 8` where a full run is `2n + 5` node executions | derived |
+
+Plus the failure modes that end or continue the loop without ever raising: an
+identical repeated call, an unknown tool, bad arguments, a tool exception, an
+unusable decision (prose instead of the forced tool call — seen with a small
+reasoning model on a long prompt; `STEP_ATTEMPTS = 2` nudges once). All of
+these become observations the model sees on the next pass.
+
+**External search** (`search_web`) is offered by `toolkit.offered_tools`
+according to `AGENT_WEB_SEARCH_POLICY` — `off` (default; the tool is not even
+constructed unless `WEB_SEARCH_BACKEND` is set), `weak` (only when
+`used_rag_fallback` is true, i.e. the wiki had no strong hit), `always` — and
+capped by `AGENT_MAX_WEB_SEARCHES`. The gate is applied where the action
+schema is built, so the model cannot pick a tool the policy withholds. Its
+results go to `Answer.external_refs`, are rendered under a separate heading in
+the generation prompt, and are **never** citations: a web result is not in
+`raw/`, so the contract below cannot admit it.
+
+**Call count per question** (`n` = tool calls actually made, `s` = skills discovered):
+
+| Configuration | LLM calls |
+|---|---|
+| `AGENT_MAX_TOOL_CALLS=0`, no skills | 1 — the pre-graph count |
+| `AGENT_MAX_TOOL_CALLS=0`, skills | 1 select + chain ≤ 3 — the pre-graph count |
+| loop on, no skills | `(n + 1)` × `agent_step` + 1 |
+| loop on, skills | `(n + 1)` × `agent_step` + 1 select + chain ≤ 3 |
+
+`agent_step` is its own op (§3.5) so `config/ops.py` routes it to the cheapest
+model. Mind reasoning models: their thinking tokens count against
+`max_tokens` — the shipped table gives `agent_step` 2048 and `answer_query`
+8192 for that reason (plan §20.5).
 
 The citation-resolution step is what
 `tests/unit/test_agent.py::test_every_citation_resolves_to_a_real_raw_object`
 guards (load-bearing per `CLAUDE.md`): an `Answer` can never cite a source
-that isn't really in `raw/`. Note where it sits in the diagram above — **after**
-`_build_context()` and **after** every skill-invocation branch rejoins — which
-is why R5 needed no change to that guard: citations are a property of what
-was *retrieved*, never of which skill (or how many LLM calls) produced the
-final text. See §2.4 for the full agent-vs-`chains/`-vs-`skills/` picture,
-§3.6 for the four `LLMClient` implementations and how each `system=` string
-above is sourced, and §5.8 for the extension guide.
+that isn't really in `raw/`. Note where it sits — **after** every tool call
+and every skill branch rejoin — which is why neither R5 nor Phase 1-D changed
+that guard: citations are a property of what was *retrieved*, by whichever
+node, never of which prompt produced the text. The loop's own load-bearing
+test is `tests/unit/test_agent_graph.py::test_tool_loop_is_bounded_by_agent_max_tool_calls`.
+
+**`Answer.run_id`** is minted with `uuid4()` and handed to LangGraph as the
+root run id, so when `LANGSMITH_TRACING=true` it is exactly the LangSmith run
+`POST /feedback` attaches a correction to (§10.4). It is `None` when tracing
+is off — there is no run to point at.
+
+See §2.4 for the full agent-vs-`chains/`-vs-`skills/` picture, §3.6 for the
+four `LLMClient` implementations and how each `system=` string above is
+sourced, §5.8 for the skills extension guide and §5.9 for adding a tool.
 
 ### 3.4 One function surface, three transports
 
@@ -479,12 +555,37 @@ import nothing from `storage/extractors/embedding/vector/llm/pipeline/factory`
 directly, and `tests/unit/test_tools_and_mcp.py` separately asserts the REST
 and MCP surfaces cannot drift apart. See §6 for the full surface.
 
+#### 3.4.1 Which entry points make which LLM calls (op names)
+
+The seven op names in `config/ops.py` (§3.5) are never chosen by a
+transport — each `tools.*` function runs a fixed code path whose call sites
+name their own `op=`. This is the command → op mapping, the same for CLI,
+REST and MCP, and it is also what a LangSmith project shows after each
+command (§10.2):
+
+| Entry point (CLI / REST / MCP / channel) | `tools.*` function | Ops called, in order |
+|---|---|---|
+| `llmwiki ingest`, `POST /ingest`, `POST /upload`, MCP `ingest_source`, Telegram/email capture, `llmwiki compile` / `POST /compile/{source_id}` / MCP `compile_update` | `ingest_now` / `ingest_source` + `process_source` / `compile_update` → `Compiler.compile_source` (§3.2) | `summarize_source` × 1, `plan_compile` × 1, then `create_page` / `patch_page` × **one per op in the plan** — which can be **zero** (`compile done: created=0 patched=0`), in which case only the first two appear in the trace. An already-compiled source (no `--force`) makes no calls at all. |
+| `llmwiki ask`, `GET /answer` (no MCP tool yet) | `answer` → `QueryAgent` / query graph (§3.3) | `agent_step` × `(n + 1)` when `AGENT_MAX_TOOL_CALLS > 0` (`n` = tool calls actually made, `≤` the cap; none at all when the cap is `0`), then `answer_query` × 1 — or, when a `skills/` catalog exists, `answer_query` × 1 (skill selection) + `answer_query` × ≤ `MAX_SKILL_CHAIN` (one per chained skill). All under one root trace named `answer_query`. |
+| `scripts/eval_answer.py --judge` | `judge_answer` → `Judge.grade` (§10.3) | everything `ask` does per example, plus `judge_answer` × 1 per example. `--offline` or no `--judge`: no `judge_answer`. |
+| `search`, `page`, `concepts`, `lint`, `status`, `source`, `cost`, `feedback`, `GET /healthz` | `search_wiki`, `get_page`, `list_concepts`, `lint_wiki`, `health`, `get_source_status`, `cost_summary`, `record_feedback` | **none.** `search` embeds the query (embedder, not the LLM client); `lint` is heuristic (`wiki/lint.py`); `feedback` only writes LangSmith feedback on an existing run. |
+
+Extraction (`extractors/`) and embedding (`embedding/`) run inside
+`process_source` before the compiler but never touch `LLMClient`, so they
+produce neither an op row in `wiki/_meta/cost.jsonl` nor a LangSmith run.
+
 ### 3.5 LLM call resolution (single-provider vs. multi-provider routing)
 
-Every call site in the domain layer (`wiki/compiler.py`, `agent/query.py`)
-calls `LLMClient.complete(op=..., system=..., prompt=..., schema=...)` — it
-never knows or cares which concrete client answers it. `factory.llm_client()`
-decides that once, at construction time:
+Every call site in the domain layer (`wiki/compiler.py`, `agent/query.py`,
+`agent/graph.py`, `agent/judge.py`) calls `LLMClient.complete(op=...,
+system=..., prompt=..., schema=...)` — it never knows or cares which concrete
+client answers it. There are seven op names (`llm/routing_config.py:KNOWN_OPS`
+— `summarize_source`, `plan_compile`, `create_page`, `patch_page`,
+`answer_query`, and since Phase 1-D `agent_step` (the query graph's tool
+decision, §3.3) and `judge_answer` (the eval judge, §10)); the drift guard in
+`tests/unit/test_routing_config.py` scans those four files and fails when a
+call site and the set disagree. `factory.llm_client()` decides which client
+answers, once, at construction time:
 
 ```
 factory.llm_client(cfg)
@@ -522,7 +623,7 @@ file (or which mechanism, §2.4) it came from.
 | Class | File | Backend | Built when |
 |---|---|---|---|
 | `AnthropicLLM` | `llm/anthropic_client.py:61` | Native Anthropic SDK — prompt caching, measured USD cost (plan §7.5) | Fallback mode with `LLM_PROVIDER=anthropic`, or a routed op whose `config/ops.py` row names provider `anthropic` |
-| `LangChainLLM` | `llm/langchain_client.py:69` | Wraps a LangChain chat model — `openai`/`google`/`nvidia`/`deepseek`/`openrouter`, each behind its own extra | Fallback mode with `LLM_PROVIDER` set to one of those five, or a routed op naming one of them |
+| `LangChainLLM` | `llm/langchain_client.py:69` | Wraps a LangChain chat model — `openai`/`vllm`/`llamacpp`/`google`/`nvidia`/`deepseek`/`openrouter` (all core dependencies since 2026-09-09). Every `invoke` carries `config={"run_name": op, "metadata": {"op", "model"}}` so a LangSmith trace names LLM runs by op (§10.2) | Fallback mode with `LLM_PROVIDER` set to one of those, or a routed op naming one of them |
 | `FakeLLM` | `llm/fake.py:24` | Offline double — synthesizes deterministic text/JSON, no network, no cost | `LLM_PROVIDER=fake` (tests, `--offline`), or a routed op naming provider `fake` |
 | `RoutingLLMClient` | `llm/router.py:15` | Not a real backend — holds a `dict[provider, LLMClient]` (one real client per *distinct* provider in use) and dispatches `.complete(op=...)` to the right one per `config/ops.py`'s row for that `op` | Only when **both** `config/providers.py` and `config/ops.py` exist (R1–R3, §5.6) |
 
@@ -533,7 +634,7 @@ every call):
 ```
                          CONSTRUCTION                                        EVERY CALL
                     (factory.llm_client(cfg), cached)                  (wiki/compiler.py or
-                                                                          agent/query.py)
+                                                                          agent/{query,graph,judge}.py)
 routing_config.load_routing_config()
       │
       ├─ config/providers.py + config/ops.py BOTH exist
@@ -587,9 +688,115 @@ Two things worth internalizing from this diagram:
   unread. This is why adding a new routed provider (§5.6) or a new skill file
   (§5.8) never requires touching `llm/router.py`.
 
+**Every `system=` call site, for quick reference.** The diagram above shows
+the two mechanisms; this is the complete list of places a prompt body is
+handed to `self.llm.complete(...)` (2026-09-18 — nine call sites over seven
+ops; the drift guard in `tests/unit/test_routing_config.py` will flag a new
+one that lacks a `config/ops.py` row):
+
+| Op | Call site (`self.llm.complete(op=, system=...)`) | Where `system=` text comes from | Decided by |
+|---|---|---|---|
+| `summarize_source` | `wiki/compiler.py:172` | `load_prompt("summarize_source")` → `chains/prompts/summarize_source.md` | Source code, fixed |
+| `plan_compile` | `wiki/compiler.py:243` | `load_prompt("plan_compile")` → `chains/prompts/plan_compile.md` | Source code, fixed |
+| `create_page` | `wiki/compiler.py:314` | `load_prompt("create_page")` → `chains/prompts/create_page.md` | Source code, fixed |
+| `patch_page` | `wiki/compiler.py:359` | `load_prompt("patch_page")` → `chains/prompts/patch_page.md` | Source code, fixed |
+| `agent_step` | `agent/graph.py:170` (the graph's `agent` node, §3.3) | `load_prompt("agent_step")` → `chains/prompts/agent_step.md` | Source code, fixed — the *model's* choice here is which evidence tool to call, never which prompt runs |
+| `judge_answer` | `agent/judge.py:39` (eval only, never on the query path) | `load_prompt("judge_answer")` → `chains/prompts/judge_answer.md` | Source code, fixed |
+| `answer_query` — skill selection | `agent/query.py:_select_skills` (graph node `select_skills`, `agent/graph.py:253`) | `SKILL_SELECTION_SYSTEM` — a Python string literal in `agent/query.py`, not a file | Source code, fixed; runs only when `discover_skills()` found ≥ 1 skill |
+| `answer_query` — skill generation | `agent/query.py:_run_skill_chain` (graph node `generate`, `agent/graph.py:269`) | `skills[name].body` — the chosen repo-root `skills/<file>.md`, via `agent/skills.py:discover_skills()` | **The model**, per question, from the discovered catalog (R5, §2.4); one call per chained skill, ≤ `MAX_SKILL_CHAIN` |
+| `answer_query` — fixed fallback | `agent/query.py:_answer_with_fixed_prompt` | `load_prompt("answer_query")` → `chains/prompts/answer_query.md` | Source code; taken when `skills/` is absent/empty, or selection names nothing valid twice (plan §19.9 item 2) |
+
+Why only the last-but-one row is model-chosen: design §4.4's cost bound
+requires the compiler's four stages to be deterministic (one fixed prompt
+per stage, a bounded number of calls per ingest), `judge_answer` is a grader
+and must be stable, and `agent_step` is already the agentic decision node —
+nesting a prompt picker inside it would be one loop inside another. The
+query agent's *final generation* is the one step where "how should this be
+written?" genuinely has more than one right answer, so it is the one place
+design §4.8.2 grants skill invocation ("tools gather, skills write"). The
+`chains/prompts/*.md` files carry SKILL.md frontmatter too (R4), but that is
+for *external* discovery by a harness — `load_prompt()` strips it, and no
+code path in this repository ever lets a model choose among them. All three
+`answer_query` rows share one `config/ops.py` row and one cost-ledger label
+(plan §19.6 deviation 1).
+
 See §5.1–§5.2 for adding a new `LLMClient` implementation, §5.3 for a new
 `op=` value (compiler side), and §5.8 for a new `skills/` file (query-agent
 side, no code change).
+
+### 3.7 The other three factories: object store, vector store, embedder
+
+`tools._components()` (`tools.py:46-54`) assembles every entry point's
+dependencies from four `factory.*` calls. §3.5–§3.6 cover `llm_client`,
+which has its own two-file routing table; the other three follow one
+uniform and much simpler pattern: **one `*_BACKEND` switch picks the
+adapter, and a handful of credential/shape variables feed it.** Everything
+is read from `.env` into `config.Settings` (`config.py:141-150`,
+`config.py:192-195`); there is no `config/*.py` layer for these.
+
+**`factory.object_store()` → `storage/base.py:ObjectStore`**
+(`factory.py:40-63`)
+
+| Env var | Values | Notes |
+|---|---|---|
+| `STORAGE_BACKEND` | `r2` (default) \| `local` | the switch |
+| `LOCAL_STORAGE_PATH` | path, default `./.data` | `local` only — `raw/` and `wiki/` land as plain files under it (§7 layout) |
+| `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY` | S3-style creds | `r2` only; these are **not** `CF_API_TOKEN` (plan §6.2) |
+| `R2_ENDPOINT_URL` | `https://<account>.r2.cloudflarestorage.com` | `r2` only |
+| `R2_BUCKET` | default `llmwiki` | `r2` only |
+
+**`factory.vector_store()` → `vector/base.py:VectorStore`**
+(`factory.py:66-87`)
+
+| Env var | Values | Notes |
+|---|---|---|
+| `VECTOR_BACKEND` | `vectorize` (default) \| `memory` | `memory` is process-local and lost on exit |
+| `CF_ACCOUNT_ID`, `CF_API_TOKEN` | Cloudflare account + token with Vectorize Write | `vectorize` only |
+| `EMBEDDING_DIM` | int, default 768 | passed to **both** backends — `MemoryVectorStore(dim=…)` and `VectorizeStore(probe_dim=…)` |
+| `VECTORIZE_CHUNKS_INDEX`, `VECTORIZE_GISTS_INDEX` | defaults `llmwiki-chunks` / `llmwiki-gists` | *not* read by the factory; callers pass an index name per call (`pipeline/ingest.py`, `agent/query.py`, `agent/graph.py`, `agent/toolkit.py`, `wiki/compiler.py`) |
+
+**`factory.embedder()` → `embedding/base.py:Embedder`**
+(`factory.py:90-113`)
+
+| Env var | Values | Notes |
+|---|---|---|
+| `EMBEDDING_BACKEND` | `workers_ai` (default) \| `fake` | `fake` is deterministic, no network |
+| `CF_ACCOUNT_ID`, `CF_API_TOKEN` | same pair as Vectorize; token also needs Workers AI Read/Edit (plan §6.3) | `workers_ai` only |
+| `EMBEDDING_MODEL` | default `@cf/baai/bge-base-en-v1.5` | |
+| `EMBEDDING_DIM` | default 768 | must equal the model's real output shape (the `curl` in plan §6.3 prints it) |
+
+Things to know when configuring them:
+
+- **Two realistic configurations.** Online: leave the three `*_BACKEND`
+  defaults and fill in `CF_*` + `R2_*`. Offline:
+  `STORAGE_BACKEND=local VECTOR_BACKEND=memory EMBEDDING_BACKEND=fake
+  LLM_PROVIDER=fake`. `llmwiki --offline` sets exactly those four
+  (`cli.py:OFFLINE_ENV`); `scripts/smoke_flow.py --offline` and the unit
+  suite use the same combination. Mixing is fine (e.g. `local` storage with
+  real Vectorize + Workers AI) as long as each chosen backend's creds are
+  present.
+- **Missing credentials fail by name.** Each cloud branch calls
+  `cfg.require(...)` (§6.5), which treats empty *and* the literal
+  `changeme` as unset, so you get `missing required configuration:
+  R2_ACCESS_KEY_ID, ...` at build time rather than a 403 from boto3 later.
+- **`EMBEDDING_DIM` is the coupling point.** It sits in the cache key of
+  both `vector_store` and `embedder`, and it must match the Vectorize
+  index's dimension *and* the model's output. Changing the model means
+  changing the dim and recreating both indexes.
+- **Caching is per configuration, not per `Settings` object**
+  (`factory.py:27-37`). `Settings` is mutable and therefore unhashable, so
+  the cache key is only the fields in each function's `key = (...)` tuple;
+  two `Settings` differing in, say, `COMPILE_MAX_PAGES` share an adapter.
+  Change backend env vars inside a running process and you must call
+  `factory.reset()` — the CLI and the test suite both do.
+- **Lazy imports.** `boto3`, the Cloudflare HTTP adapters, etc. are imported
+  only inside the `_build_*` branch that needs them, so an offline run never
+  imports them — the same guard `test_importing_the_registry_imports_no_provider_sdk`
+  enforces on the LLM side.
+- **Adding a backend** (S3, a local vector DB, another embedding API) is
+  §5.5: a new `Literal` value on the `*_BACKEND` field, an adapter
+  implementing the protocol, a branch in the matching `_build_*`, its creds
+  added to the cache key, an `.env.example` row and a `HISTORY.md` entry.
 
 ---
 
@@ -898,6 +1105,87 @@ the "how to add one" complement to those.
    skips, and logs, a duplicate — first one wins, sorted by filename) and
    present (a file missing `name` is skipped and logged, not fatal).
 
+### 5.9 Adding a tool to the query graph (Phase 1-D)
+
+The worked example is `search_web` itself — it was added exactly this way.
+A tool is a LangChain `StructuredTool` built in `agent/toolkit.py:build_tools`
+from a plain function whose **signature is the schema** and whose
+**docstring is what the model reads**:
+
+```python
+# agent/toolkit.py, inside build_tools(agent)
+def get_page(slug: str) -> ToolResult:
+    """Read one wiki page in full by its slug - use it to follow a [[wikilink]] seen in
+    an already-retrieved page."""
+    ...
+    return ToolResult(observation=block, context_block=block, citations=citations)
+
+tools.append(StructuredTool.from_function(get_page, name="get_page"))
+```
+
+1. **Return a `ToolResult`**, never a bare string. `observation` is what the
+   model sees next pass; `context_block` is what the answer will be written
+   from (merged into state by the `tools` node and counted against the
+   budget); `citations` must be `Citation`s that point at `raw/` — the last
+   node filters them, so a tool that surfaces something *not* in `raw/` puts
+   it in `external_refs` instead (that is the whole design of `search_web`).
+   Reuse `agent._build_context(hits, [])` / `(…, [], hits)` for anything that
+   comes out of the two vector indexes so blocks and citations look the same
+   as the first retrieval's.
+2. **Never raise.** `toolkit.dispatch` already turns validation errors and
+   exceptions into observations, but a tool that returns an empty result
+   should say so in `observation` ("No wiki page matched…") rather than
+   return an empty block — the model needs the negative.
+3. **Gate it in code if it should not always be offered.** `offered_tools`
+   is the one place; `search_web`'s policy/cap check is the pattern. The
+   action schema is built from the *offered* list, so a withheld tool cannot
+   be chosen.
+4. **Do not touch the graph.** `agent/graph.py` dispatches by name; the
+   schema, the prompt listing (`describe_tools`) and the transcript all
+   derive from the tool objects.
+5. **Tests**: `tests/unit/test_agent_toolkit.py` for the tool in isolation
+   (observation, block, citations) and `tests/unit/test_agent_graph.py` for
+   its behaviour in the loop, scripting `agent_step` decisions with
+   `StepLLM` and opting in with `settings.model_copy(update=
+   {"agent_max_tool_calls": n})`.
+6. **Cost**: a new tool is a new thing the model may spend a call on; the cap
+   and budget still bound it, but mention it in `chains/prompts/agent_step.md`
+   so the model knows when it is worth calling.
+
+### 5.10 Adding golden examples or an evaluator
+
+- **A golden example** is one JSONL line: `{"question", "expected_sources":
+  [source_id…], "must_mention": [term…], "notes"}`. Source ids are the
+  `{hash}-{slug}` ids under `raw/` (§7). Append to your corpus's file (the
+  shipped one, `tests/fixtures/eval/answer_quality.jsonl`, is written over the
+  offline fixture docs and must stay green under `--offline`), then
+  `scripts/eval_answer.py --push` to mirror it. The fastest way to write one
+  is from a failure: `--export-failures f.jsonl` gives you the row with the
+  actual output beside the expectation; `--promote-feedback` writes one from
+  a human correction (§10.4).
+- **An evaluator** is a pure function `(inputs, outputs, reference_outputs)
+  -> {"key", "score", "comment"}` in `eval/evaluators.py` — the LangSmith
+  signature, so the same function serves `langsmith.evaluate` and the offline
+  `run_local`. `outputs` is what `eval/run.py:answer_target` produced
+  (`text`, `citations` as ids, `used_rag_fallback`, `context`, `steps`,
+  `external_refs`, `run_id`). Add it to `DETERMINISTIC` if it costs nothing,
+  and to `GATED` with a threshold if the offline gate should fail on it. An
+  LLM-backed evaluator goes through `tools.judge_answer` (or a sibling in
+  `agent/judge.py` with its own op — which then needs a `config/ops.py` row,
+  §5.3) and stays opt-in. Unit-test it on crafted `outputs` dicts in
+  `tests/unit/test_eval.py`; it must not import `langsmith`.
+
+### 5.11 Adding a web-search backend
+
+Same adapter pattern as §5.5. One module under `websearch/` implementing
+`WebSearcher.search(query, k) -> list[ExternalRef]` (never raising on a
+failed lookup — return `[]` and log; `TavilyWebSearcher` is the model), a
+`Literal` value on `Settings.web_search_backend`, a branch in
+`factory._build_web_searcher` that imports the module *there* (the lazy-import
+test in `tests/unit/test_websearch.py` will catch a module-level import),
+the key in `.env.example`. Nothing in `agent/` changes: `build_tools` sees a
+`WebSearcher` or `None`.
+
 ---
 
 ## 6. API Reference
@@ -941,11 +1229,13 @@ suite and the CLI's `--offline` flag work).
 | `ingest_now` | `(url=None, file=None, filename=None, mime="", title="", text=None, cfg=None)` | `SourceStatus` | Capture **and** process, synchronously. Used by CLI and the smoke script. |
 | `process_source` | `(source_id: str, cfg=None)` | `SourceStatus` | The expensive half of ingest; called by the API's background task. |
 | `get_source_status` | `(source_id: str, cfg=None)` | `SourceStatus` | Poll pipeline state. |
-| `answer` | `(query: str, k: int = 5, cfg=None)` | `Answer` | Full RAG answer with verified citations. |
+| `answer` | `(query: str, k: int = 5, cfg=None)` | `Answer` | The query graph (§3.3): wiki-first retrieval, bounded tool loop, skills, verified citations. `Answer` carries `text`, `citations`, `used_rag_fallback`, and since Phase 1-D `steps` (tool calls made), `context` (what the text was written from), `external_refs` (web results — never citations) and `run_id` (the LangSmith run when tracing is on). |
 | `source_exists` | `(source_id: str, cfg=None)` | `bool` | True iff a real object exists under `raw/{id}/`. |
+| `judge_answer` | `(question, answer_text, context, cfg=None)` | `Verdict` | LLM-as-judge groundedness (`op="judge_answer"`). Eval only (§10); never called on the query path. |
+| `record_feedback` | `(run_id, score, correction="", cfg=None)` | `str` (feedback id) | Files a human correction on the LangSmith run under key `correctness`. Raises `RuntimeError` by name when tracing is off. §10.4. |
 | `cost_summary` | `(since: datetime \| None = None, cfg=None)` | `CostSummary` | Aggregates `wiki/_meta/cost.jsonl`. |
 | `delete_source` | `(source_id: str, cfg=None)` | `int` | Removes `raw/` objects, status, and vectors for a source. Leaves compiled pages alone. |
-| `health` | `(cfg=None)` | `dict` | No network calls — just reports configured backends/version. |
+| `health` | `(cfg=None)` | `dict` | No network calls — reports backends/version, which optional config files were found, the per-op `routes` in force, and the query graph's bounds (`config.query_graph`). |
 
 ### 6.2 REST API (`llmwiki.api`, `api/routes.py`)
 
@@ -962,7 +1252,8 @@ marked 🔒 below.
 | `POST /upload` | 🔒 | multipart `file`, `title?` | `SourceRef` | same, for the file kinds (PDF, `.txt`/`.md`, HTML, image) |
 | `GET /sources/{source_id}` | — | — | `SourceStatus` | `tools.get_source_status()` |
 | `GET /search` | — | `q`, `k=5` | `list[SearchHit]` | `tools.search_wiki()` |
-| `GET /answer` | — | `q`, `k=5` | `Answer` | `tools.answer()` |
+| `GET /answer` | — | `q`, `k=5` | `Answer` (+ `steps`, `context`, `external_refs`, `run_id`) | `tools.answer()` |
+| `POST /feedback` | 🔒 | JSON `{run_id, score (0–1), correction?}` | `{"ok", "feedback_id", "run_id"}` | `tools.record_feedback()`; **409** when tracing is off (no run to attach to), 422 on a score outside 0–1. §10.4 |
 | `GET /concepts` | — | `prefix?` | `list[PageGist]` | `tools.list_concepts()` |
 | `GET /page/{slug}` | — | — | raw markdown (`text/plain`) | `tools.get_page()` → `wiki.pages.render_page()`; 404 if absent |
 | `POST /compile/{source_id}` | 🔒 | `force=false` | `CompileResult` | `tools.compile_update()` |
@@ -999,7 +1290,8 @@ llmwiki [--offline] <command> [args]
 |---|---|---|
 | `ingest` | `--url URL \| --file PATH \| --text STR` (`--text -` reads stdin), `--title` | `tools.ingest_now` |
 | `search` | `query`, `-k N` | `tools.search_wiki` |
-| `ask` | `query` | `tools.answer` |
+| `ask` | `query` | `tools.answer` — prints the text, citations, `(external)` refs, the tools called and `run_id` when tracing is on |
+| `feedback` | `run_id`, `--score 0..1`, `--correction STR` | `tools.record_feedback` — the CLI half of the correction loop (§10.4) |
 | `page` | `slug` | `tools.get_page` (prints rendered markdown) |
 | `concepts` | `--prefix` | `tools.list_concepts` |
 | `compile` | `source_id`, `--force` | `tools.compile_update` |
@@ -1028,8 +1320,13 @@ kept in sync with the code. In summary, grouped:
   `AGENT_SKILLS_DIR` (query-agent skill directory, default `./skills`, §5.8).
 - **Deprecated LLM aliases** (still read, removed at a future milestone):
   `ANTHROPIC_API_KEY`, `LLM_DEFAULT_MODEL`, `LLM_BACKEND`.
-- **Observability:** `LOG_LEVEL`; `LANGSMITH_TRACING`, `LANGSMITH_API_KEY`,
-  `LANGSMITH_PROJECT`, `LANGSMITH_ENDPOINT`.
+- **Query graph (§3.3):** `AGENT_MAX_TOOL_CALLS` (default 4; 0 = the
+  pre-graph single call), `AGENT_WEB_SEARCH_POLICY` (`off|weak|always`),
+  `AGENT_MAX_WEB_SEARCHES`; **web search backend (§5.11):**
+  `WEB_SEARCH_BACKEND` (`none|tavily|fake`), `TAVILY_API_KEY`.
+- **Observability & eval (§10):** `LOG_LEVEL`; `LANGSMITH_TRACING`,
+  `LANGSMITH_API_KEY`, `LANGSMITH_PROJECT`, `LANGSMITH_ENDPOINT`,
+  `LANGSMITH_EVAL_DATASET`.
 - **Cloudflare:** `CF_ACCOUNT_ID`, `CF_API_TOKEN`, `R2_ACCESS_KEY_ID`,
   `R2_SECRET_ACCESS_KEY`, `R2_BUCKET`, `R2_ENDPOINT_URL`,
   `VECTORIZE_CHUNKS_INDEX`, `VECTORIZE_GISTS_INDEX`, `EMBEDDING_MODEL`,
@@ -1039,7 +1336,7 @@ kept in sync with the code. In summary, grouped:
   `INGEST_TOKEN_BUDGET`, `CHUNK_SIZE_CHARS`, `CHUNK_OVERLAP_CHARS`.
 - **Backend selection:** `STORAGE_BACKEND` (`r2|local`), `VECTOR_BACKEND`
   (`vectorize|memory`), `EMBEDDING_BACKEND` (`workers_ai|fake`),
-  `LOCAL_STORAGE_PATH`.
+  `LOCAL_STORAGE_PATH` — per-backend variable tables in §3.7.
 
 `Settings.require("field_a", "field_b")` is what adapters call in their
 constructors to fail loudly, by name, on missing credentials — use it as the
@@ -1085,13 +1382,14 @@ reaches a key unsanitized.
 ## 8. Testing
 
 ```bash
-pytest                                  # unit tests, ~315 tests, no network, ~5s
+pytest                                  # unit tests, ~444 tests, no network, ~6s
 pytest -m integration                   # needs a populated .env; costs money
 python scripts/smoke_flow.py --offline  # end-to-end, no keys, under 2s
+python scripts/eval_answer.py --offline # the answer-quality golden set, no keys (§10)
 ruff check . && mypy                    # the rest of the pre-commit gate
 ```
 
-Four tests are **load-bearing** (`CLAUDE.md`) — never weaken them to make a
+Five tests are **load-bearing** (`CLAUDE.md`) — never weaken them to make a
 change pass; if a change genuinely requires touching one, that is a signal
 to stop and reconsider the change, not the test:
 
@@ -1101,6 +1399,17 @@ to stop and reconsider the change, not the test:
 | `tests/unit/test_compiler_no_full_scan.py` | Design §4.4's central cost constraint — no full-wiki scan on the ingest path. |
 | `tests/unit/test_agent.py::test_every_citation_resolves_to_a_real_raw_object` | The answer-with-citations contract (§3.3). |
 | `tests/unit/test_providers.py::test_importing_the_registry_imports_no_provider_sdk` | `pip install llmwiki` stays free of every LLM provider SDK. |
+| `tests/unit/test_agent_graph.py::test_tool_loop_is_bounded_by_agent_max_tool_calls` | Design §4.9's cost bound — a question's LLM spend is configuration, never the model's appetite (§3.3). |
+
+Phase 1-D's own files: `test_agent_graph.py` (the loop: bounds, budget,
+repeat/invalid/failed calls, tool citations, web policy, `run_id`),
+`test_agent_toolkit.py` (each tool, the policy gate, the action schema),
+`test_websearch.py` (backend seam, lazy import), `test_judge.py`,
+`test_eval.py` (golden set, evaluators, local runner over the offline
+fixture corpus, feedback promotion, `langsmith` never imported),
+`test_fake_llm.py`, and `tests/integration/test_langsmith_eval.py` (needs only
+`LANGSMITH_API_KEY`: pushes the fixture set to a throwaway dataset and runs
+one experiment with the fake adapters).
 
 Other tests worth knowing about when extending a specific seam: the
 **contract tests** — `test_store_contract.py`, `test_vector_contract.py` —
@@ -1114,14 +1423,26 @@ autouse-isolation-fixture behaviour described there.
 `tests/doubles.py` and `tests/factories.py` hold shared spies/fakes and
 object-builders used across the unit suite — check there before writing a
 new one, most scenarios (a spy store that counts reads, a scripted LLM with
-canned per-op responses) already exist.
+canned per-op responses) already exist. `test_agent_graph.StepLLM` scripts
+`agent_step` decisions in order for loop tests.
 
-**Known current state:** `pytest` — 315 passed, 5 skipped (provider extras
-not installed), 6 integration tests deselected, no failures. The
-long-standing failure in
-`tests/unit/test_extractors.py::test_fetch_video_title_reads_oembed` was
-fixed on 2026-09-08 (the fake `httpx.Response` had no `request` set, so
-`raise_for_status()` raised `RuntimeError` and the lookup was swallowed).
+Three autouse fixtures in `tests/conftest.py` isolate every test from this
+checkout's real configuration: the routing table (`LLMWIKI_*_CONFIG`), the
+`skills/` catalog (`AGENT_SKILLS_DIR`) and, since Phase 1-D, the tool loop
+(`AGENT_MAX_TOOL_CALLS=0`). A test that wants the real thing opts in
+explicitly. One more hazard: the shared `settings` fixture reads the real
+`.env`, whose explicitly-set `LLM_PROVIDER` outranks the fixture's
+`llm_backend="fake"` alias — fine for tests that construct `FakeLLM`
+themselves, fatal (a real network call) for anything reaching
+`factory.llm_client`. Tests that go through `tools.*` build their own
+`Settings(_env_file=None, llm_provider="fake", …)` — `test_routes.client` and
+`test_eval.offline` are the pattern.
+
+**Known current state (2026-09-16):** `pytest` — 444 passed, 1 skipped
+(provider extra, environment-dependent), 7 integration tests deselected, no
+failures; `ruff` clean except one pre-existing E501 in
+`scripts/browse_vectors.py:135`; `mypy` clean; `smoke_flow.py --offline` and
+`eval_answer.py --offline` both pass.
 
 ---
 
@@ -1171,7 +1492,7 @@ of the build context — `.env` never enters an image.
 
 ### 9.2 `docker-compose.yml` — the service map
 
-Seven services, one image name for everything that ships. The `profiles:`
+Eight services, one image name for everything that ships. The `profiles:`
 key is what decides which services a given command touches: a service with
 no profile is always selected; a service with a profile is selected only
 when that profile is named on the command line.
@@ -1185,12 +1506,13 @@ when that profile is named on the command line.
 | `pytest` | `test` | `local/llmwiki-dev:latest` | `target: dev` | Unit suite against the mounted tree. Deliberately no `env_file` and no `./.data`. |
 | `smoke` | `test` | `${DOCKER_USER}/llmwiki:${IMAGE_TAG}` | `target: runtime` | `scripts/smoke_flow.py --offline` inside the exact image that gets pushed. |
 | `lint` | `ops` | `${DOCKER_USER}/llmwiki:${IMAGE_TAG}` | — (pull only) | `llmwiki lint` — the scheduled global lint (plan §6.8), run from host cron, never on ingest. |
+| `eval` | `ops` | `${DOCKER_USER}/llmwiki:${IMAGE_TAG}` | — (pull only) | `scripts/eval_answer.py` with arguments passed through (§10.3); same `.env` and corpus as `lint`. The fixture golden set ships in the image (`COPY tests/fixtures/`). |
 
 Verify the selection rather than reasoning about it:
 
 ```bash
 docker compose config --services                 # → init-data, api
-docker compose --profile ops config --services   # → init-data, api, lint
+docker compose --profile ops config --services   # → init-data, api, eval, lint
 docker compose --profile dev config --services   # → init-data, api, dev
 ```
 
@@ -1426,7 +1748,215 @@ wedged, not that Cloudflare is.
 
 ---
 
-## 10. Known Gap Between This Document, the Design Doc, and the Plan
+## 10. Observability, Evaluation & Correction (LangSmith)
+
+Phase 1-D (design §4.9, plan §20). Three things, one vendor: **tracing** (see
+what one answer did), **evaluation** (score a whole golden set, compare two
+runs) and **correction** (a place for every kind of failure to land). Nothing
+here is on the query path's critical path: tracing is off by default, the
+golden set runs offline with no keys, and the judge is opt-in.
+
+### 10.1 Setup
+
+```mermaid
+sequenceDiagram
+    participant Dev as you
+    participant LS as smith.langchain.com
+    participant Env as .env
+    participant Svc as llmwiki (api / cli)
+    Dev->>LS: create account → Settings → API keys → create key (lsv2_…)
+    Dev->>Env: LANGSMITH_TRACING=true · LANGSMITH_API_KEY=lsv2_… · LANGSMITH_PROJECT=llmwiki
+    Dev->>Svc: docker compose up -d --force-recreate   (or llmwiki ask …)
+    Svc->>LS: one trace per answer, project "llmwiki" (created on first write)
+    Dev->>LS: Projects → llmwiki → the answer_query run
+```
+
+1. **Key.** LangSmith → Settings → API keys → *Create API key*. A personal
+   key is fine for one operator; the free tier's trace quota is ample for a
+   single researcher.
+2. **`.env`.** Set the four `LANGSMITH_*` lines (`.env.example` has them).
+   `LANGSMITH_PROJECT` is created on first write; use one project per
+   deployment (`llmwiki`, `llmwiki-staging`) — the correction loop reads
+   feedback back *from this project*, so it should be the one real answers go
+   to. `LANGSMITH_EVAL_DATASET` names the dataset the eval pushes to; it need
+   not exist yet.
+3. **Apply it.** On a box, `docker compose up -d --force-recreate` (§9.4 —
+   `restart` does not re-read `.env`). `curl -s localhost:8010/healthz | jq
+   .config.query_graph.langsmith_tracing` says whether it took.
+4. **Nothing to install.** `langsmith` is a dependency of `langchain-core`
+   and is always present; the `[langsmith]` extra only names the contract.
+   With tracing off nothing imports or configures it (`factory.
+   _configure_langsmith`).
+
+### 10.2 What a trace looks like (D9)
+
+One `answer()` is one trace. Verified 2026-09-16 against a real corpus with
+`AGENT_MAX_TOOL_CALLS=3` (the tree below is the actual run, trimmed):
+
+```
+answer_query [chain]                        ← root; its id is Answer.run_id
+  retrieve [chain]
+    route_after_retrieve [chain]
+  agent [chain]
+    agent_step [llm]   prompt=1002 completion=771     ← named by op, not "ChatOpenAI"
+    route_after_agent [chain]
+  tools [chain]
+    search_chunks [tool]                    ← the LangChain tool run
+  agent [chain]
+    agent_step [llm]   prompt=2599 completion=34
+    route_after_agent [chain]
+  select_skills [chain]
+    answer_query [llm] prompt=330  completion=118     ← the R5 skill-selection call
+  generate [chain]
+    answer_query [llm] prompt=2053 completion=2997    ← the answer
+  resolve_citations [chain]
+```
+
+- **Node runs** come for free from LangGraph via langchain-core's tracer.
+- **LLM runs** are named by op because `LangChainLLM` passes
+  `config={"run_name": op, "metadata": {"op", "model"}}` on every `invoke`
+  (§3.6); the native Anthropic adapter is wrapped by
+  `langsmith.wrappers.wrap_anthropic` instead and nests under the node run
+  through langsmith's own context.
+- **`RoutingLLMClient` adds no span** — a routed call is one LLM run, not two
+  (closes plan §19.9 item 3).
+- The metadata on the root carries `agent_max_tool_calls` and
+  `agent_web_search_policy`, so a trace says which bounds were in force.
+- `FakeLLM` makes no LLM runs (it is not a LangChain model); node runs still
+  appear, which is what the integration test relies on.
+
+Reading a trace is how the diagnosis in §10.4 starts: the `agent_step` runs
+show *why* the model called a tool (`reason`), the tool run shows what came
+back, and `completion` tokens on the `answer_query` run show whether a
+reasoning model spent its budget thinking (`finish_reason=length` with empty
+content is the symptom — plan §20.5).
+
+### 10.3 Evaluation
+
+The golden set is a JSONL file in the repo (design D10); LangSmith holds a
+pushed copy so experiments can be compared in its UI.
+
+```mermaid
+flowchart LR
+    J[(answer_quality.jsonl)] -->|--push| DS[LangSmith dataset<br/>LANGSMITH_EVAL_DATASET]
+    DS -->|--langsmith| X[experiment<br/>metadata: version · git sha · routes · bounds]
+    J -->|default / --offline| LR[run_local]
+    X & LR --> EV{{evaluators}}
+    EV --> e1[citations_resolve · gated]
+    EV --> e2[expected_source_cited · gated]
+    EV --> e3[must_mention · gated]
+    EV --> e4[tool_calls · metric]
+    EV -->|--judge| e5[judge_grounded<br/>op=judge_answer]
+```
+
+```bash
+python scripts/eval_answer.py --offline                 # no keys: fake adapters + fixture docs + fixture set → exit 0/1
+python scripts/eval_answer.py                           # local run against the real backends in .env, prints a table
+python scripts/eval_answer.py --judge                   # + LLM-as-judge groundedness (one judge_answer call per example)
+python scripts/eval_answer.py --dataset my/golden.jsonl # your corpus's own set
+python scripts/eval_answer.py --push                    # mirror the JSONL to LangSmith
+python scripts/eval_answer.py --langsmith --judge       # run as an experiment; prints its name → compare in the UI
+docker compose --profile ops run --rm eval --langsmith  # the same, on the box (§9.2)
+```
+
+| Piece | Where | What |
+|---|---|---|
+| Example | one JSONL line | `question`, `expected_sources` (`raw/` ids), `must_mention` (terms), `notes`; `#` lines are comments |
+| Target | `eval/run.py:answer_target` | `tools.answer` flattened: `text`, `citations` (ids), `used_rag_fallback`, `context`, `steps`, `external_refs`, `run_id` |
+| `citations_resolve` | `eval/evaluators.py` | every cited id exists under `raw/` — the load-bearing contract, measured (gate 1.0) |
+| `expected_source_cited` | | fraction of the expected ids cited (gate 1.0) |
+| `must_mention` | | fraction of terms present, case-insensitive (gate 1.0) |
+| `tool_calls` | | how many tool calls the graph made — a cost trend, never gated |
+| `judge_grounded` | `--judge` → `tools.judge_answer` → `agent/judge.py` | 0–1 groundedness of the text in its own `context`, with reasoning; an unusable verdict scores 0, never passes |
+| Local run | `eval/run.py:run_local` | rows + failures + means, in-process; exit 1 on any gated failure |
+| Experiment | `eval/run.py:run_experiment` | `langsmith.evaluate` with `metadata` = `llmwiki_version`, `git_sha`, `agent_max_tool_calls`, `agent_web_search_policy`, `route_answer_query`/`route_agent_step`/`route_judge_answer` (from `/healthz`) |
+
+The shipped set (`tests/fixtures/eval/answer_quality.jsonl`) is written over
+the two documents `--offline` ingests, so it stays green under the fake
+adapters and can sit next to `smoke_flow.py --offline` in a pre-commit gate.
+A real corpus needs its own file — the fixture ids do not exist in it.
+
+### 10.4 The correction loop
+
+An evaluation is only useful if a failure has somewhere to land. Four causes,
+four corrections, one re-run to prove it helped:
+
+```mermaid
+flowchart LR
+    E[experiment · human feedback] --> D{which evaluator failed?}
+    D -->|expected_source_cited = 0<br/>used_rag_fallback = true| R1[retrieval / wiki gap]
+    D -->|judge_grounded low<br/>citations fine| R2[skill / prompt]
+    D -->|tool_calls at the cap<br/>no score gain| R3[model / bounds]
+    D -->|the expectation was wrong| R4[golden set]
+    R1 -->|scripts/backfill.py · llmwiki lint · capture the missing source| RR[re-run the same experiment]
+    R2 -->|edit skills/*.md or chains/prompts/*.md| RR
+    R3 -->|config/ops.py row · AGENT_MAX_TOOL_CALLS · web policy| RR
+    R4 -->|edit the JSONL · --export-failures · --promote-feedback| RR
+    RR --> CMP[LangSmith: compare experiments<br/>metadata says what changed]
+```
+
+| Symptom | Likely cause | Correction |
+|---|---|---|
+| `expected_source_cited` = 0 and `used_rag_fallback` = true | no page absorbs that source, or its gist is weak | re-compile the source (`scripts/backfill.py`), `llmwiki lint`, or capture what is missing |
+| `citations_resolve` fails | a page's `sources` names a deleted/renamed source | `lint` (dangling sources), re-compile |
+| `judge_grounded` low, citations fine | the answer skill writes beyond the evidence | edit `skills/answer_query.md` (or the chosen skill); no code |
+| `must_mention` low, sources cited | the skill drops detail, or `agent_step`'s model never picks `get_page`/`search_chunks` | edit the skill, or route `agent_step`/`answer_query` to a stronger model in `config/ops.py` |
+| `tool_calls` at the cap, score flat | the loop is spinning | lower `AGENT_MAX_TOOL_CALLS`, tighten `agent_step.md`, `AGENT_WEB_SEARCH_POLICY=off` |
+| empty answer, `finish_reason=length` in the trace | a reasoning model spent `max_tokens` thinking | raise that op's `max_tokens` in `config/ops.py` (plan §20.5) |
+| `wiki page … is unreadable` warning in the logs | a page's front matter is not valid YAML (fixed at the writer 2026-09-16; older pages persist) | `llmwiki lint` lists it as `orphan`; re-compile one of its sources |
+| an example was wrong | golden-set drift | fix the row; `--push` again |
+
+**The pieces built for it:**
+
+1. **`Answer.run_id`** — the LangSmith root run, returned by `GET /answer`
+   and printed by `llmwiki ask`, when tracing is on.
+2. **`POST /feedback`** `{run_id, score, correction}` (bearer) and
+   **`llmwiki feedback <run_id> --score 0 --correction "…"`** →
+   `tools.record_feedback` → LangSmith feedback under key `correctness` on
+   that run. 409 when tracing is off. Put source ids in the correction
+   (`should cite 7b2f…-sample`) and a `must mention: a, b` line — that is
+   what promotion parses.
+3. **`--export-failures f.jsonl`** — every example that failed a gated
+   evaluator, with the actual `text`/`citations` beside the expectation.
+   Edit and append to the golden set.
+4. **`--promote-feedback`** — reads the commented `correctness` feedback on
+   root `answer_query` runs in `LANGSMITH_PROJECT`, keeps only source ids that
+   exist under `raw/`, and appends one example per corrected run to the
+   dataset file (then `--push`). Verified live 2026-09-16: ask → feedback →
+   promote produced a valid example.
+5. **Experiment metadata** makes "did the correction help" a side-by-side in
+   the LangSmith UI rather than a guess.
+
+What is deliberately **not** automated: no self-rewriting of skills, no
+automatic re-compile on a failed eval, no promotion without a human comment.
+Self-critique loops, preference data and prompt optimisation
+(`docs/Evaluation and Self Improvement.md` approaches 3–5) are Phase 2.
+
+### 10.5 Troubleshooting
+
+- **No trace appears.** `LANGSMITH_TRACING` is read at process start; on a
+  box, `compose up -d --force-recreate` (§9.4). `/healthz` echoes it.
+- **`POST /feedback` → 409.** Tracing is off in *that* process; there is no
+  run to attach to. Turn it on and ask again — old answers have no run.
+- **`--promote-feedback` finds nothing.** Feedback must be on the *root*
+  `answer_query` run in `LANGSMITH_PROJECT` and carry a comment; a bare
+  score is deliberately not promoted. Check the project name in `.env`
+  matches where the answers went.
+- **`--langsmith` fails with a dataset error.** `--push` first; the dataset
+  name is `LANGSMITH_EVAL_DATASET`.
+- **`--offline` fails on `PermissionError` under `./.data-eval`.** The
+  directory is created by the script; on a box where a container owns
+  `./.data`, point `LOCAL_STORAGE_PATH` somewhere writable.
+- **Every offline example fails `expected_source_cited`.** You pointed a real
+  corpus at the fixture set, or the reverse — the source ids differ.
+- **Suite hang after touching LangSmith tests.** A `LANGSMITH_TRACING=true`
+  leaked into `os.environ` makes every LangChain call try to post traces to
+  a placeholder endpoint. `test_config.py` cleans up with `os.environ.pop`
+  for exactly this reason (plan §20.9).
+
+---
+
+## 11. Known Gap Between This Document, the Design Doc, and the Plan
 
 `docs/implement-plan-v1.4.md` describes an aspirational repository layout
 with `packages/agentkit-storage/` and `packages/agentkit-llm/` as

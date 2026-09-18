@@ -11,7 +11,7 @@ import secrets
 from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, UploadFile
 from fastapi.responses import PlainTextResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
-from pydantic import BaseModel, model_validator
+from pydantic import BaseModel, Field, model_validator
 
 from llmwiki import tools
 from llmwiki.config import settings
@@ -130,8 +130,36 @@ def search(q: str, k: int = 5) -> list[SearchHit]:
 
 @router.get("/answer", response_model=Answer)
 def answer(q: str, k: int = 5) -> Answer:
-    """Answer a question with verified citations."""
+    """Answer a question with verified citations.
+
+    Since Phase 1-D the response also carries ``steps`` (the tool calls the
+    query graph made), ``context``, ``external_refs`` (web results, never
+    citations) and ``run_id`` (the LangSmith run, when tracing is on) - the
+    handle ``POST /feedback`` takes.
+    """
     return tools.answer(q, k=k)
+
+
+class FeedbackRequest(BaseModel):
+    """Body of ``POST /feedback``: score an answer and, ideally, say what was right."""
+
+    run_id: str
+    score: float = Field(ge=0.0, le=1.0)
+    correction: str = ""
+
+
+@router.post("/feedback", dependencies=[Depends(require_token)])
+def feedback(request: FeedbackRequest) -> dict:
+    """Attach a human correction to the run that produced an answer (design §4.9).
+
+    409 when tracing is off: there is no run to attach to, and silently
+    accepting the correction would be worse than refusing it.
+    """
+    try:
+        feedback_id = tools.record_feedback(request.run_id, request.score, request.correction)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return {"ok": True, "feedback_id": feedback_id, "run_id": request.run_id}
 
 
 @router.get("/concepts", response_model=list[PageGist])

@@ -1,9 +1,9 @@
 # Phase 0.5 Implementation Plan — Layer Separation & Shareable Packages
 
-**Version:** 1.1
-**Date:** 2026-09-05
+**Version:** 1.2
+**Date:** 2026-09-16
 **Derived from:** `llmwiki-KB-design_v1.4.md` (§2 layered architecture, §4.6 Core Wiki Package, §4.7 Shareable LLM Integration Layer, §4.8 Application-Specific LLM Routing)
-**Supersedes:** nothing. `implement-plan.md` v1.1 remains authoritative for Phase 0 *behaviour*. §1–§18 (v1.0) change only *packaging*, still with no behaviour change. §19 (new in 1.1) is the one exception: it is a deliberate, scoped *behaviour* change, independent of and not gated by the N0–N8 packaging milestones.
+**Supersedes:** nothing. `implement-plan.md` v1.1 remains authoritative for Phase 0 *behaviour*. §1–§18 (v1.0) change only *packaging*, still with no behaviour change. §19 (new in 1.1) and §20 (new in 1.2, Phase 1-D) are the exceptions: deliberate, scoped *behaviour* changes, independent of and not gated by the N0–N8 packaging milestones.
 **Status:** Ready to execute after the §17 open items on naming are answered (none block N0–N2). §19 is ready to execute now, pending final review of this revision.
 
 > **Reference convention:** "design v1.4 §X" points at `llmwiki-KB-design_v1.4.md`.
@@ -22,7 +22,7 @@
 | 7 | Unit 2 — `agentkit-llm` (design v1.4 §4.7) | 17 | Open Items |
 | 8 | Unit 3 — `llmwiki` core (design v1.4 §4.6) | 18 | Documentation Obligations |
 | 9 | Unit 4 — The Service (api / mcp / cli) | **19** | **Multi-Provider Op Routing & Query-Agent Skill Invocation (new, v1.1)** |
-| 10 | Enforcement: The Boundary Guards | | |
+| 10 | Enforcement: The Boundary Guards | **20** | **Phase 1-D: LangGraph Query Graph + LangSmith Eval (new, v1.2)** |
 
 ---
 
@@ -857,6 +857,7 @@ Env vars are added only at N6/N7, and only if a component needs one:
 | `LLM_PROVIDER`, `LLM_API_KEY`, `LLM_MODEL`, `LLM_BASE_URL` | **landed pre-N0** | `anthropic` / empty / `claude-haiku-4-5` / empty | `llmwiki.config.Settings`, then `agentkit.llm.config.LLMConfig.from_env()` at N4 |
 | `SKILLS_DIR` | N6 | unset (skills disabled) | `agentkit.llm.config.LLMConfig.from_env()` |
 | `LANGCHAIN_TRACING_V2`, `LANGCHAIN_API_KEY`, `LANGCHAIN_PROJECT` | N7 | unset (tracing off) | LangSmith SDK directly, not by us |
+| `AGENT_MAX_TOOL_CALLS`, `AGENT_WEB_SEARCH_POLICY`, `AGENT_MAX_WEB_SEARCHES`, `WEB_SEARCH_BACKEND`, `TAVILY_API_KEY`, `LANGSMITH_EVAL_DATASET` | **landed 2026-09-16 (§20)** | `4` / `off` / `1` / `none` / empty / `llmwiki-answer-quality` | `llmwiki.config.Settings` (§20.5) |
 
 Per `CLAUDE.md`, `.env.example` is updated in the *same change* that adds any of these, or not at all.
 
@@ -1254,6 +1255,202 @@ set of env vars to read is not knowable until `config/providers.py` is read.
 3. **Should `RoutingLLMClient` participate in LangSmith tracing (§7.6) per sub-adapter, or only at the
    router level?** Affects whether a routed call shows as one span or two in a trace. Not exit-criteria
    blocking for R1–R5; worth deciding before this sees real traffic.
+
+---
+
+## 20. Phase 1-D: LangGraph Query Graph + LangSmith Eval (new, v1.2)
+
+> Design decision: design v1.4 §4.9 (v1.6). This section is the implementation record: module layout,
+> the graph specification, the ops and env vars, the eval and correction loops, the milestones and the
+> tests. Landed 2026-09-16 in one change set; `HISTORY.md` has the entry.
+
+### 20.1 Scope and relationship to §1–§19
+
+The fourth and last Phase 1 workstream (KB design §5; A/B capture channels landed 2026-09-11, C
+local-LLM routing is wired but not flipped). Like §19 it is a scoped *behaviour* change, not
+packaging: nothing moves under `packages/`, and the N0–N8 milestones are untouched. It consumes
+`LLMClient` (P5 rule 3 holds — `complete()` gains no LangChain type) and §19's routing table (two new
+op rows). What it does **not** do: migrate the compiler (still non-agentic, §4.4), add the N7
+`get_llm()` surface, or write query-side cost into `wiki/_meta/cost.jsonl` (pre-existing gap, now
+visible per run in LangSmith instead).
+
+### 20.2 Locked decisions
+
+| # | Decision | Consequence |
+|---|---|---|
+| D1 | LangGraph is orchestration only; every model call is `LLMClient.complete()` | routing, cost, caching, `FakeLLM`/`ScriptedLLM`, `test_layering.py` unchanged; N7 stays deferred |
+| D2 | The tool decision is one forced-schema call (`op="agent_step"`) whose schema is derived from real `langchain_core` tools; the transcript is real `AIMessage(tool_calls)`/`ToolMessage` | canonical ReAct trace; the same tools bind natively once `get_llm()` exists |
+| D3 | Wiki-first is the first node, verbatim from Phase 0 | `test_wiki_is_searched_before_the_chunk_index` and `test_chunk_index_is_untouched_when_the_wiki_answers` pass unchanged |
+| D4 | Three code-enforced bounds: `AGENT_MAX_TOOL_CALLS` (0 = Phase 0 exactly), one shared context budget, `recursion_limit = 2n + 8` | a question's cost is configuration, not model appetite — load-bearing test in §20.9 |
+| D5 | Citations are a property of what was retrieved; the last node filters against `raw/` | `test_every_citation_resolves_to_a_real_raw_object` unchanged |
+| D6 | Skills keep their §19.5 role: tools gather, skills write | `select_skills`/`generate` reuse `_select_skills`/`_run_skill_chain` |
+| D7 | Two new routable ops: `agent_step`, `judge_answer` | `KNOWN_OPS` = 7; `config/ops.py` rows; the AST drift guard scans `agent/graph.py`, `agent/judge.py` |
+| D8 | `langgraph` and `langchain-tavily` are core dependencies (2026-09-09 posture); `langsmith` stays function-locally imported | `import llmwiki.eval` never imports `langsmith` (test) |
+| D9 | One LangSmith root run per answer, one child per node, one LLM run per call named by op; the router adds no span | closes §19.9 item 3; `LangChainLLM` passes `run_name=op` |
+| D10 | The golden set is a repo JSONL; LangSmith holds a pushed copy; the shipped sample runs offline | `scripts/eval_answer.py --offline` can gate a commit |
+| D11 | External search is a fourth tool in the same loop, offered by code policy, results never citations | `Answer.external_refs`; contract test unchanged |
+| D12 | The correction loop has a defined place for each failure cause; nothing self-rewrites | `Answer.run_id`, `POST /feedback`, `--export-failures`, `--promote-feedback` |
+
+### 20.3 Module layout
+
+```
+L0 models/plan.py     AgentStep, ExternalRef, Verdict; Answer += steps, context, external_refs, run_id
+L1 llm/               KNOWN_OPS += agent_step, judge_answer; FakeLLM synthesises both; LangChainLLM names runs
+L1 websearch/  (new)  base.py WebSearcher · tavily.py (langchain-tavily, imported only here) · fake.py
+L2 agent/query.py     QueryAgent — public surface unchanged; owns the graph (cached) and the helpers nodes reuse
+L2 agent/graph.py     QueryState, build_query_graph(agent), recursion_limit, STEP_ATTEMPTS
+L2 agent/toolkit.py   ToolResult, build_tools, offered_tools (the policy gate), action_schema, dispatch
+L2 agent/judge.py     Judge — the eval-only groundedness grader
+L2 chains/prompts/    agent_step.md, judge_answer.md (SKILL.md format, like the five before)
+L4 tools.py           + judge_answer(), record_feedback(); health() reports routes + query_graph bounds
+L4 eval/       (new)  dataset.py · evaluators.py · run.py · feedback.py — imports tools/models/config only
+L5 api/routes.py      /answer returns the richer Answer; + POST /feedback (bearer)
+L5 cli.py             `ask` prints tools/external/run_id; + `feedback <run_id> --score --correction`
+scripts/              eval_answer.py; docker-compose `eval` service (ops profile)
+config/ops.py         + agent_step (cheapest, temp 0.2), judge_answer (temp 0.0)
+tests/fixtures/eval/  answer_quality.jsonl — over the offline fixture docs
+```
+
+`test_layering.py` gained `websearch` (L1, same banned set as `vector`) and `eval` (L4 peer of `cli`,
+may import only `tools`/`models`/`config`), and both names in every other layer's banned set.
+
+### 20.4 Graph specification
+
+```
+START → retrieve ──(context empty)──► no_answer → END
+           │
+           ├──(AGENT_MAX_TOOL_CALLS == 0)──► select_skills
+           ▼
+         agent ◄──────── tools           agent: 1 × complete(op="agent_step", schema=ACTION)
+           │                 ▲           tools: dispatch AIMessage.tool_calls[0] → ToolMessage;
+           ├──(tool call)────┘                  merge context_block + citations + external_refs
+           └──(answer | cap | budget | invalid ×2)──► select_skills → generate → resolve_citations → END
+```
+
+**State** (`QueryState`, `TypedDict`, deltas): `query, k, wiki_hits, chunk_hits, used_rag_fallback,
+context, citations{source_id→Citation}, budget_left, messages (reducer `add_messages`),
+tool_calls_made, web_calls, seen_calls, notes, steps, external_refs, stop_reason, skills,
+chosen_skills, text, answer`.
+
+**`ACTION` schema** — built per pass from the *offered* tools:
+`{"action": enum[offered names + "answer"], "args": {union of the offered tools' arg schemas},
+"reason": str}`. The prompt (`chains/prompts/agent_step.md` + `_render_step_prompt`) shows the
+question, the evidence so far with the budget left, the compact call log (`tool(args) → n chars`),
+"tool notes" for results that added no evidence, and the offered tools with their argument names.
+
+**Tools** (`toolkit.build_tools`):
+
+| Tool | Args | Registers |
+|---|---|---|
+| `search_wiki` | `query`, `k=5` | page blocks + page-source citations (`_build_context(hits, [])`) |
+| `search_chunks` | `query`, `k=5` | chunk blocks + `source_id`/`url` citations (`_build_context([], hits)`) |
+| `get_page` | `slug` | one page body + its citations; unknown slug → observation |
+| `search_web` | `query` | `external_refs` only — no context block, no citations; built only when a `WebSearcher` exists |
+
+**Bounds and failure modes, all in code:** cap and budget checked *before* the decision call (no LLM
+call is made once either is hit); a tool result is truncated to `budget_left`; an identical repeated
+call is refused (observation) but counted; bad arguments or a tool exception become an observation
+(`dispatch` never raises); an unusable decision (prose instead of the tool call — seen with a small
+reasoning model on a long prompt) is retried once with a nudge (`STEP_ATTEMPTS = 2`), then the loop
+ends; `recursion_limit(n) = 2n + 8` (a full run is `2n + 5` node executions).
+
+**`Answer.run_id`**: minted with `uuid4()` and passed as `RunnableConfig.run_id`, so with tracing on
+it *is* the LangSmith root run — not read back from a collector (whose `traced_runs` are in completion
+order and gave the first leaf, as the 2026-09-16 verification found). `None` when tracing is off.
+
+### 20.5 Ops, prompts and environment
+
+| Op | Route (shipped `config/ops.py`) | Notes |
+|---|---|---|
+| `agent_step` | `openrouter` / `z-ai/glm-5.3-flash`, temp 0.2, 2048 tok | cheapest model; reasoning tokens count against the cap — 512 truncated the tool call |
+| `judge_answer` | same, temp 0.0, 1024 tok | eval only |
+| `answer_query` | unchanged route, **8192 tok** | at 2048 a reasoning model spent the budget thinking and returned an empty answer once tool results grew the context |
+
+| Variable | Default | Read by |
+|---|---|---|
+| `AGENT_MAX_TOOL_CALLS` | `4` | `Settings.agent_max_tool_calls` — `0` disables the loop |
+| `AGENT_WEB_SEARCH_POLICY` | `off` | `off` / `weak` / `always` — applied in `toolkit.offered_tools` |
+| `AGENT_MAX_WEB_SEARCHES` | `1` | per-question cap |
+| `WEB_SEARCH_BACKEND` | `none` | `none` / `tavily` / `fake` — `factory.web_searcher` |
+| `TAVILY_API_KEY` | empty | `websearch/tavily.py`, via the factory |
+| `LANGSMITH_EVAL_DATASET` | `llmwiki-answer-quality` | `scripts/eval_answer.py --push/--langsmith` |
+
+`tests/conftest.py` pins `AGENT_MAX_TOOL_CALLS=0` for the whole suite (third instance of the
+isolation-fixture pattern); loop tests opt in per test.
+
+### 20.6 Evaluation
+
+- **Example**: `{"question", "expected_sources": [id], "must_mention": [term], "notes"}`; LangSmith
+  `inputs={"question"}`, `outputs={"expected_sources","must_mention"}`.
+- **Target**: `eval.run.answer_target` → `tools.answer` flattened (`text`, `citations` as ids,
+  `used_rag_fallback`, `context`, `steps`, `external_refs`, `run_id`).
+- **Evaluators** (`eval/evaluators.py`, `(inputs, outputs, reference_outputs)`): `citations_resolve`
+  (gated 1.0), `expected_source_cited` (gated 1.0), `must_mention` (gated 1.0), `tool_calls` (metric),
+  `judge_grounded` (opt-in; `tools.judge_answer` → `Judge.grade`).
+- **Runners**: `run_local` (no LangSmith; rows + failures + means) and `run_experiment`
+  (`langsmith.evaluate`, metadata = version, git sha, bounds, `route_*` from `/healthz`).
+- **Script**: `scripts/eval_answer.py` — `--offline`, `--judge`, `--push`, `--langsmith`,
+  `--experiment-prefix`, `--dataset`, `--export-failures`, `--promote-feedback`; exit 1 on a gated
+  failure in a local run. Compose: `docker compose --profile ops run --rm eval …`.
+
+### 20.7 Correction loop
+
+`tools.record_feedback(run_id, score, correction)` → `langsmith.Client.create_feedback(key=
+"correctness")`; raises by name when tracing is off (REST maps it to 409). `eval/feedback.py:
+corrected_examples` lists root `answer_query` runs in `LANGSMITH_PROJECT`, reads their `correctness`
+feedback, and turns each commented one into an `Example` (source ids in the comment that exist under
+`raw/` → `expected_sources`; a `must mention: a, b` line → `must_mention`). Verified live 2026-09-16:
+ask → `run_id` → feedback → `--promote-feedback` produced a valid example.
+
+### 20.8 Milestones (all landed 2026-09-16)
+
+| # | Milestone | Exit |
+|---|---|---|
+| G1 | deps, models, config, ops rows, prompts, `FakeLLM`, `KNOWN_OPS` | suite green, no behaviour change |
+| G2 | `toolkit.py`, `graph.py`, `query.py` over the graph | `test_agent_graph.py` incl. the bound test; `max=0` parity test |
+| G2b | `websearch/`, `search_web`, policy gate, `external_refs` | `test_websearch.py`, toolkit policy tests |
+| G3 | `judge.py`, `eval/`, script, fixture set, compose service | `eval_answer.py --offline` exit 0 |
+| G4 | run naming, `Answer.run_id`, live trace check | D9 verified in LangSmith (trace tree in `HISTORY.md`) |
+| G5 | `record_feedback`, `POST /feedback`, `llmwiki feedback`, `--export-failures`, `--promote-feedback` | routes/eval tests; live loop verified |
+| G6 | docs (§18 obligations below), `.env.example`, `CLAUDE.md`, `HISTORY.md` | this section |
+
+### 20.9 Testing plan
+
+**No regressions.** The four load-bearing tests are untouched; `test_layering.py` gained rows only;
+`test_routing_config.py`'s drift guard scans two more files. 444 passed after the change (362 before).
+
+**Obsolete tests removed:** none. Two existing tests changed shape without weakening:
+`test_langchain_client.ScriptedChatModel.invoke` accepts `config` (the real `Runnable` signature);
+`test_config.py::test_configure_langsmith_exports_the_env_vars` cleans up with `os.environ.pop` —
+its `monkeypatch.delenv` in `finally` had been *restoring* `LANGSMITH_TRACING=true` at teardown and
+leaking it into every later test, harmless until the graph honoured it.
+
+**New tests:** `test_agent_graph.py` (19; **`test_tool_loop_is_bounded_by_agent_max_tool_calls` is
+load-bearing**, added to `CLAUDE.md`), `test_agent_toolkit.py` (14), `test_websearch.py` (6),
+`test_judge.py` (4), `test_eval.py` (15), `test_fake_llm.py` (3), `test_routes.py` (+6: richer
+`/answer`, `/healthz` bounds, `/feedback` auth/409/422/forwarding), `test_config.py` (+2),
+`test_langchain_client.py` (+1 run naming), `test_pages_and_gists.py` (+2, §20.10),
+`tests/integration/test_langsmith_eval.py` (needs only `LANGSMITH_API_KEY`).
+
+### 20.10 Found along the way
+
+Two pages in the real corpus had unparseable front matter: `render_page` wrote `title:`/`gist:` as
+bare YAML scalars, and a model-written `Pi Agent vs OpenCode: Same Model` or `Stub page: no source…`
+is not YAML. Every consumer then failed on read, which took every answer down. Fixed at both ends:
+`render_page` JSON-quotes the two free-text fields; `read_page` treats an unreadable page as absent
+with a warning (`lint` already reports it as an `orphan` finding; the next compile rewrites it).
+
+### 20.11 Documentation obligations discharged
+
+Design v1.4 → 1.6 (§4.9, §4.2, §5, §7 q10); this plan → 1.2 (§20, §14 rows); technical document
+(§2.1, §2.2, §2.4, §3.3, §3.5, §5.9–§5.11, §6, §8, §9.2, new §10, Known Gap → §11);
+`phase1-testing-guide.md` (§1 D, new §5); `CLAUDE.md`; `HISTORY.md`; `README.md`;
+`scripts/README.md`; `.env.example`.
+
+### 20.12 Resolved open items
+
+- §19.9 item 3 (router tracing granularity) → D9: node spans + one LLM span per call, router adds none.
+- §17 item 4 (LangSmith hard or soft) → D8: soft, function-local imports; always present transitively.
 
 ---
 

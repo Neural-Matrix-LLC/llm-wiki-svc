@@ -17,12 +17,13 @@ from __future__ import annotations
 from datetime import datetime
 
 from llmwiki import factory
+from llmwiki.agent.judge import Judge
 from llmwiki.agent.query import QueryAgent
 from llmwiki.config import Settings
 from llmwiki.config import settings as default_settings
 from llmwiki.models.chunk import SearchHit
 from llmwiki.models.page import LintReport, PageGist, WikiPage
-from llmwiki.models.plan import Answer, CompileResult, CostSummary
+from llmwiki.models.plan import Answer, CompileResult, CostSummary, Verdict
 from llmwiki.models.source import SourceRef, SourceStatus
 from llmwiki.pipeline.ingest import IngestPipeline
 from llmwiki.storage.base import ObjectNotFound
@@ -35,6 +36,11 @@ from llmwiki.wiki.pages import read_page
 
 class PageNotFound(KeyError):
     """Raised by :func:`get_page` when a slug has no stored page."""
+
+
+# The LangSmith feedback key a human correction is filed under - the same
+# string scripts/eval_answer.py --promote-feedback looks for.
+FEEDBACK_KEY = "correctness"
 
 
 def _components(cfg: Settings | None = None) -> tuple:
@@ -55,7 +61,7 @@ def _pipeline(cfg: Settings | None = None) -> IngestPipeline:
 
 def _agent(cfg: Settings | None = None) -> QueryAgent:
     store, vectors, embedder, llm, cfg = _components(cfg)
-    return QueryAgent(store, vectors, embedder, llm, cfg)
+    return QueryAgent(store, vectors, embedder, llm, cfg, web_searcher=factory.web_searcher(cfg))
 
 
 # --- the six canonical tools ----------------------------------------------
@@ -177,6 +183,47 @@ def source_exists(source_id: str, cfg: Settings | None = None) -> bool:
     return _agent(cfg).source_exists(source_id)
 
 
+def judge_answer(question: str, answer_text: str, context: str,
+                 cfg: Settings | None = None) -> Verdict:
+    """Grade an answer's groundedness in its own retrieved context (eval only).
+
+    Phase 1-D (design §4.9). Not an MCP tool and never called on the query
+    path - ``scripts/eval_answer.py --judge`` is the consumer.
+    """
+    _, _, _, llm, _ = _components(cfg)
+    return Judge(llm).grade(question, answer_text, context)
+
+
+def record_feedback(run_id: str, score: float, correction: str = "",
+                    cfg: Settings | None = None) -> str:
+    """Attach a human correction to the LangSmith run that produced an answer.
+
+    The human-in-the-loop half of the correction loop (design §4.9): "this
+    answer is wrong, here is the right one". Needs ``LANGSMITH_TRACING=true``
+    (there is no run to attach to otherwise) - raises ``RuntimeError`` naming
+    the setting rather than silently dropping the correction. ``langsmith`` is
+    imported here, function-locally, so nothing else pays for it. Returns the
+    feedback id.
+    """
+    cfg = cfg or default_settings
+    if not cfg.langsmith_tracing:
+        raise RuntimeError(
+            "record_feedback needs LANGSMITH_TRACING=true: without tracing no run "
+            "exists to attach the correction to"
+        )
+    cfg.require("langsmith_api_key")
+    from langsmith import Client
+
+    client = Client(
+        api_key=cfg.langsmith_api_key.get_secret_value(),
+        api_url=cfg.langsmith_endpoint or None,
+    )
+    feedback = client.create_feedback(
+        run_id, key=FEEDBACK_KEY, score=score, comment=correction or None,
+    )
+    return str(feedback.id)
+
+
 def cost_summary(since: datetime | None = None, cfg: Settings | None = None) -> CostSummary:
     """Aggregate the measured cost ledger."""
     store, _, _, _, cfg = _components(cfg)
@@ -268,6 +315,11 @@ def _config_state(cfg: Settings) -> dict:
     skill_files = len(list(skills_dir.glob("*.md"))) if skills_dir.is_dir() else 0
     return {
         "llm_routing": "per-op table" if routed else "single-provider fallback",
+        # op -> "provider/model" when the table is in force; {} otherwise. Read
+        # by scripts/eval_answer.py so an experiment records which model
+        # answered - and is the quickest way to see on a box which model each
+        # stage actually uses.
+        "routes": _routes_in_force(cfg) if routed else {},
         "providers_config": {"path": str(providers_config), "present": providers_config.exists()},
         "ops_config": {"path": str(ops_config), "present": ops_config.exists()},
         "skills_dir": {
@@ -275,4 +327,30 @@ def _config_state(cfg: Settings) -> dict:
             "present": skills_dir.is_dir(),
             "skill_files": skill_files,
         },
+        # Phase 1-D: the query graph's bounds, echoed for the same reason as
+        # log_level above - what the running process actually has.
+        "query_graph": {
+            "max_tool_calls": cfg.agent_max_tool_calls,
+            "web_search_policy": cfg.agent_web_search_policy,
+            "web_search_backend": cfg.web_search_backend,
+            "langsmith_tracing": cfg.langsmith_tracing,
+        },
     }
+
+
+def _routes_in_force(cfg: Settings) -> dict[str, str]:
+    """``op -> "provider/model"`` from the routing table; ``{}`` if it fails to load.
+
+    Never raises: /healthz must answer even when the table is broken - the
+    process would not have started in that case anyway (the factory validates
+    it first), so an empty dict here is only ever a transient-state report.
+    """
+    from llmwiki.llm.routing_config import load_routing_config
+
+    try:
+        routing = load_routing_config(cfg.llm_providers_config, cfg.llm_ops_config)
+    except RuntimeError:
+        return {}
+    if routing is None:
+        return {}
+    return {op: f"{route.provider}/{route.model}" for op, route in sorted(routing.ops.items())}

@@ -1,0 +1,9 @@
+# The shipped answer-quality golden set (Phase 1-D, design §4.9). One JSON object per
+# line; "#" lines are comments. Written over the two fixture documents
+# scripts/eval_answer.py --offline ingests (tests/fixtures/sample.pdf and sample.html),
+# whose source ids are deterministic ({sha256[:16]}-{slug}, storage/layout.py), so the
+# whole loop runs with no keys. Real corpora keep their own JSONL and point --dataset at it.
+{"question": "What is retrieval-augmented generation?", "expected_sources": ["e2d96892afeb2108-chunking-strategies-for-retrieval"], "must_mention": ["retrieval-augmented generation"], "notes": "the web fixture is about chunking for retrieval; the wiki should absorb it and cite it"}
+{"question": "How should documents be chunked for retrieval?", "expected_sources": ["e2d96892afeb2108-chunking-strategies-for-retrieval"], "must_mention": ["chunked"], "notes": "specific-detail question - a good candidate for the search_chunks tool once a real model drives the loop"}
+{"question": "What does the sample PDF cover?", "expected_sources": ["7b2f6aed523349f5-sample"], "must_mention": ["sample"], "notes": "the PDF fixture; guards that a file source is cited as a file source"}
+{"question": "Which sources discuss chunk boundaries?", "expected_sources": [], "must_mention": ["boundaries"], "notes": "no source expectation on purpose: only the deterministic contract (citations resolve) and the term are checked"}

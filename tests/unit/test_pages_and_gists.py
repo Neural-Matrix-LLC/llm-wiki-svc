@@ -67,6 +67,29 @@ def test_read_of_a_missing_page_is_none_not_an_error(store) -> None:
     assert read_page(store, "does-not-exist") is None
 
 
+def test_free_text_front_matter_with_yaml_punctuation_round_trips() -> None:
+    """A model-written title like "Pi Agent vs OpenCode: Same Model" is not YAML
+    unless quoted - two real pages were unreadable this way (2026-09-16)."""
+    page = make_page()
+    page.front_matter.title = "Pi Agent vs OpenCode: Same Qwen 3.8 Model"
+    page.front_matter.gist = "Stub page: no source material [yet] for #context."
+    parsed = parse_page(render_page(page))
+
+    assert parsed.front_matter.title == page.front_matter.title
+    assert parsed.front_matter.gist == page.front_matter.gist
+
+
+def test_an_unreadable_page_reads_as_absent_and_is_logged(store, caplog) -> None:
+    """One broken page must not take every answer down (query graph posture);
+    lint reports it as an orphan finding, the next compile rewrites it."""
+    store.put("wiki/concepts/broken.md",
+              b"---\ntitle: Bad: colon\nslug: broken\ntype: concept\n---\n\nbody\n",
+              "text/markdown")
+
+    assert read_page(store, "broken") is None
+    assert "wiki/concepts/broken.md is unreadable" in caplog.text
+
+
 def test_sources_section_is_rewritten_not_appended() -> None:
     body = "## Summary\n\ntext\n\n## Sources\n\n- [[sources/old]] - Old\n"
     updated = append_sources_section(body, ["new1", "new2"], {"new1": "First", "new2": "Second"})

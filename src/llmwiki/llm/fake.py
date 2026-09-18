@@ -67,6 +67,15 @@ class FakeLLM:
         if op == "answer_query" and schema and "skills" in schema.get("properties", {}):
             enum = schema["properties"]["skills"].get("items", {}).get("enum", [])
             return {"skills": enum[:1]}
+        # Phase 1-D: the query graph's tool decision. The double always answers
+        # at once, so the default/offline path never enters the tool loop and
+        # every pre-graph test sees exactly the call sequence it always did.
+        # Loop tests script "agent_step" explicitly (tests/doubles.ScriptedLLM).
+        if op == "agent_step":
+            return {"action": "answer", "args": {},
+                    "reason": "offline: answer from what was retrieved"}
+        if op == "judge_answer":
+            return {"grounded": True, "score": 1.0, "reasoning": "offline: not judged"}
         terms = self._salient_terms(prompt)
         if op == "summarize_source":
             return {

@@ -117,7 +117,12 @@ class LangChainLLM:
         if schema is not None:
             runnable = runnable.bind_tools([_tool_for(schema)], tool_choice=TOOL_NAME)
 
-        message = runnable.invoke([SystemMessage(system), HumanMessage(prompt)])
+        # Named by op so a LangSmith trace reads "agent_step", "answer_query",
+        # not "ChatOpenAI" (Phase 1-D, D9). Free when tracing is off.
+        message = runnable.invoke(
+            [SystemMessage(system), HumanMessage(prompt)],
+            config={"run_name": op, "metadata": {"op": op, "model": chosen}},
+        )
 
         data: dict | None = None
         for call in getattr(message, "tool_calls", None) or []:

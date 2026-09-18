@@ -20,30 +20,41 @@ SRC = Path(__file__).resolve().parents[2] / "src" / "llmwiki"
 FORBIDDEN: dict[str, set[str]] = {
     "models": {"storage", "extractors", "embedding", "vector", "llm", "wiki", "agent",
                "pipeline", "tools", "api", "mcp", "cli", "channels", "factory", "config",
-               "chains"},
+               "chains", "websearch", "eval"},
     "storage": {"extractors", "embedding", "vector", "llm", "wiki", "agent", "pipeline",
-                "tools", "api", "mcp", "cli", "channels", "factory"},
+                "tools", "api", "mcp", "cli", "channels", "factory", "websearch", "eval"},
     "extractors": {"storage", "embedding", "vector", "llm", "wiki", "agent", "pipeline",
-                   "tools", "api", "mcp", "cli", "channels", "factory"},
+                   "tools", "api", "mcp", "cli", "channels", "factory", "websearch", "eval"},
     "embedding": {"storage", "extractors", "vector", "llm", "wiki", "agent", "pipeline",
-                  "tools", "api", "mcp", "cli", "channels", "factory"},
+                  "tools", "api", "mcp", "cli", "channels", "factory", "websearch", "eval"},
     "vector": {"storage", "extractors", "embedding", "llm", "wiki", "agent", "pipeline",
-               "tools", "api", "mcp", "cli", "channels", "factory"},
+               "tools", "api", "mcp", "cli", "channels", "factory", "websearch", "eval"},
     "llm": {"storage", "extractors", "embedding", "vector", "wiki", "agent", "pipeline",
-            "tools", "api", "mcp", "cli", "channels", "factory"},
-    "wiki": {"api", "mcp", "cli", "channels", "pipeline", "agent", "tools", "factory"},
-    "agent": {"api", "mcp", "cli", "channels", "pipeline", "tools", "factory"},
-    "pipeline": {"api", "mcp", "cli", "channels", "tools", "factory"},
-    "tools": {"api", "mcp", "cli", "channels"},
-    "api": {"storage", "extractors", "embedding", "vector", "llm", "pipeline", "factory"},
+            "tools", "api", "mcp", "cli", "channels", "factory", "websearch", "eval"},
+    # L1 peer of vector/embedding (Phase 1-D, design §4.9): the query graph's
+    # optional web-search backend. Same banned set as the other primitives.
+    "websearch": {"storage", "extractors", "embedding", "vector", "llm", "wiki", "agent",
+                  "pipeline", "tools", "api", "mcp", "cli", "channels", "factory", "eval"},
+    "wiki": {"api", "mcp", "cli", "channels", "pipeline", "agent", "tools", "factory", "eval"},
+    "agent": {"api", "mcp", "cli", "channels", "pipeline", "tools", "factory", "eval"},
+    "pipeline": {"api", "mcp", "cli", "channels", "tools", "factory", "eval"},
+    "tools": {"api", "mcp", "cli", "channels", "eval"},
+    "api": {"storage", "extractors", "embedding", "vector", "llm", "pipeline", "factory",
+            "websearch", "eval"},
     "mcp": {"storage", "extractors", "embedding", "vector", "llm", "wiki", "agent",
-            "pipeline", "factory"},
-    "cli": {"storage", "extractors", "embedding", "vector", "llm", "pipeline"},
+            "pipeline", "factory", "websearch", "eval"},
+    "cli": {"storage", "extractors", "embedding", "vector", "llm", "pipeline", "websearch",
+            "eval"},
     # New L4 transport layer (webhook capture channels: Telegram, email - Phase
     # 1, KB design §5). Same posture as mcp: reaches tools/models/config, never
     # the L1 primitives or pipeline.
     "channels": {"storage", "extractors", "embedding", "vector", "llm", "wiki", "agent",
-                 "pipeline", "factory"},
+                 "pipeline", "factory", "websearch", "eval"},
+    # L4 peer of cli (Phase 1-D, design §4.9): the LangSmith eval/feedback
+    # helpers. Reaches the domain through tools.py only, exactly like a
+    # transport; langsmith itself is imported function-locally.
+    "eval": {"storage", "extractors", "embedding", "vector", "llm", "wiki", "agent",
+             "pipeline", "chains", "api", "mcp", "cli", "channels", "factory", "websearch"},
 }
 
 # api/ and cli.py legitimately render a page; that is serialization, not logic.

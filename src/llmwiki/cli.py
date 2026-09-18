@@ -43,6 +43,14 @@ def build_parser() -> argparse.ArgumentParser:
     ask = sub.add_parser("ask", help="answer a question with citations")
     ask.add_argument("query")
 
+    feedback = sub.add_parser(
+        "feedback", help="score an answer's LangSmith run and record what was right",
+    )
+    feedback.add_argument("run_id", help="Answer.run_id from `ask` (needs LANGSMITH_TRACING)")
+    feedback.add_argument("--score", type=float, required=True, help="0 (wrong) to 1 (right)")
+    feedback.add_argument("--correction", default="",
+                          help="what the right answer is; cite source ids so it can be promoted")
+
     page = sub.add_parser("page", help="print one wiki page")
     page.add_argument("slug")
 
@@ -113,6 +121,23 @@ def main(argv: list[str] | None = None) -> int:
         print()
         for citation in result.citations:
             print(f"  [{citation.source_id}] {citation.title}")
+        for ref in result.external_refs:
+            print(f"  (external) {ref.title or ref.url} <{ref.url}>")
+        if result.steps:
+            print(f"  tools: {', '.join(f'{s.tool}({s.chars} chars)' for s in result.steps)}")
+        if result.run_id:
+            print(f"  run_id: {result.run_id}")
+        return 0
+
+    if args.command == "feedback":
+        try:
+            feedback_id = tools.record_feedback(
+                args.run_id, args.score, args.correction, cfg=cfg,
+            )
+        except RuntimeError as exc:
+            print(str(exc), file=sys.stderr)
+            return 1
+        print(f"recorded feedback {feedback_id} on run {args.run_id}")
         return 0
 
     if args.command == "page":

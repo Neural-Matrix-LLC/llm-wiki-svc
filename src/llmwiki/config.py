@@ -119,6 +119,24 @@ class Settings(BaseSettings):
     # rather than improvised later.
     agent_skills_dir: Path = Field(default=Path("./skills"))
 
+    # --- Query graph bounds (Phase 1-D, design §4.9) -------------------------
+    # The query agent is a bounded ReAct loop (agent/graph.py). Every bound is
+    # enforced in code, never by the prompt: 0 disables the tool loop entirely
+    # and reproduces the pre-graph single-call sequence exactly.
+    agent_max_tool_calls: int = 4
+    # Whether the model is ever *offered* the search_web tool: "off" (never;
+    # no key needed), "weak" (only when the wiki had no strong hit and the
+    # chunk fallback ran), "always". Gate is applied when the action schema is
+    # built, so the model cannot pick a tool the policy withholds.
+    agent_web_search_policy: Literal["off", "weak", "always"] = "off"
+    agent_max_web_searches: int = 1
+
+    # --- Web search backend (Phase 1-D) -----------------------------------
+    # "none" builds no searcher at all (the tool is not even constructed);
+    # "tavily" needs TAVILY_API_KEY; "fake" is the offline double.
+    web_search_backend: Literal["none", "tavily", "fake"] = "none"
+    tavily_api_key: SecretStr = SecretStr("")
+
     # --- Cloudflare ---
     cf_account_id: str = ""
     cf_api_token: SecretStr = SecretStr("")
@@ -159,6 +177,9 @@ class Settings(BaseSettings):
     langsmith_api_key: SecretStr = SecretStr("")
     langsmith_project: str = "llmwiki"
     langsmith_endpoint: str = ""
+    # The LangSmith dataset scripts/eval_answer.py pushes to and evaluates
+    # against (Phase 1-D). Tracing is not required for local (--offline) eval.
+    langsmith_eval_dataset: str = "llmwiki-answer-quality"
 
     # --- Cost guardrails ---
     compile_max_pages: int = 5

@@ -2,26 +2,31 @@
 
 **This is a living document.** It is not a one-shot write-up — it stays at this
 path (`docs/phase1-testing-guide.md`) and keeps being updated in place as the
-rest of Phase 1's workstreams (local-LLM routing flip, LangGraph query flow +
-LangSmith eval) land and need their own recap/testing steps added alongside
-the two sections below.
+rest of Phase 1's workstreams land and need their own recap/testing steps
+added alongside the sections below. As of 2026-09-16 only the local-LLM
+routing *flip* (C) is still pending.
+
+Sections §4 (C) and §5 (D) are the *setup* narrative. The numbered pass/fail
+cases for those two workstreams — with the two scripts they rely on,
+`scripts/check_local_llm.py` and `scripts/probe_query_graph.py` — are in
+`docs/phase1-manual-test-plan-C-D.md` (2026-09-17).
 
 ---
 
 ## 1. Phase 1 implementation
 
-Phase 1 (KB design §5) is four workstreams. Status as of 2026-09-14:
+Phase 1 (KB design §5) is four workstreams. Status as of 2026-09-16:
 
 | # | Workstream | Status |
 |---|---|---|
 | A | Telegram capture channel (webhook mode) | **Done** — 2026-09-11 |
 | B | Email capture channel (Mailgun inbound-parse webhook) | **Done** — 2026-09-11 |
 | C | Local-LLM routing (vLLM primary, llama.cpp fallback) | Config/docs groundwork only — **not flipped on**; see §4 for vLLM setup |
-| D | LangGraph query flow + lean LangSmith eval | Not started |
+| D | LangGraph query graph + external search + LangSmith eval & correction loop | **Done** — 2026-09-16; see §5 for testing |
 
-Sources: `HISTORY.md`'s 2026-09-11 entry (workstreams A/B) and 2026-09-14
-entries (workstream C's provider split), and `CLAUDE.md`'s "Current State"
-section.
+Sources: `HISTORY.md`'s 2026-09-11 entry (workstreams A/B), 2026-09-14
+entries (workstream C's provider split) and 2026-09-16 entry (workstream D),
+and `CLAUDE.md`'s "Current State" section.
 
 ### A/B — Capture channels
 
@@ -58,17 +63,42 @@ Not yet flipped on: `config/ops.py`'s local-routing example is still
 commented out (no RTX 3090 endpoint is reachable yet). See that file's
 comment for the two rows to uncomment once it is.
 
-### D — LangGraph query flow + LangSmith eval
+### D — LangGraph query graph + LangSmith eval (done 2026-09-16)
 
-Not started.
+`QueryAgent.answer()` is now a LangGraph `StateGraph` (`src/llmwiki/agent/graph.py`):
+the same wiki-first retrieval first, then a **bounded** tool loop in which the
+model may call `search_wiki` / `search_chunks` / `get_page` — and `search_web`
+when `AGENT_WEB_SEARCH_POLICY` offers it — then the R5 skill step, then
+citation resolution. Every model call still goes through `LLMClient.complete`
+(routing, cost and the offline doubles unchanged); the loop's decision is a new
+cheap op `agent_step`. `AGENT_MAX_TOOL_CALLS=0` gives the pre-graph behaviour
+exactly. The eval side is `src/llmwiki/eval/` + `scripts/eval_answer.py`: a
+JSONL golden set, three deterministic evaluators, an opt-in LLM judge
+(`judge_answer`), and a correction loop (`POST /feedback`, `llmwiki feedback`,
+`--export-failures`, `--promote-feedback`). Design v1.4 §4.9, plan §20,
+technical document §3.3 and §10.
+
+| File | Change |
+|---|---|
+| `src/llmwiki/agent/graph.py`, `toolkit.py`, `judge.py` | new |
+| `src/llmwiki/agent/query.py` | `answer()` invokes the graph; helpers kept |
+| `src/llmwiki/websearch/` (`base.py`, `tavily.py`, `fake.py`) | new L1 adapter package |
+| `src/llmwiki/eval/` (`dataset.py`, `evaluators.py`, `run.py`, `feedback.py`) | new L4 package |
+| `src/llmwiki/chains/prompts/agent_step.md`, `judge_answer.md` | new prompts |
+| `src/llmwiki/models/plan.py`, `config.py`, `factory.py`, `tools.py`, `api/routes.py`, `cli.py`, `llm/routing_config.py`, `llm/fake.py`, `llm/langchain_client.py`, `wiki/pages.py` | modified |
+| `config/ops.py` | `agent_step`, `judge_answer` rows; `answer_query` token headroom |
+| `scripts/eval_answer.py`, `tests/fixtures/eval/answer_quality.jsonl`, `docker-compose.yml` (`eval`) | new |
+| `tests/unit/test_agent_graph.py`, `test_agent_toolkit.py`, `test_websearch.py`, `test_judge.py`, `test_eval.py`, `test_fake_llm.py`, `tests/integration/test_langsmith_eval.py` | new |
+| `.env.example`, `pyproject.toml`, `requirements.txt`, `HISTORY.md`, `CLAUDE.md`, docs | modified |
 
 ### Test coverage
 
-`pytest` — 362 passed, 1 skipped, 6 deselected (integration, opt-in) as of
-2026-09-14; `ruff check .` and `mypy` clean; `python scripts/smoke_flow.py
---offline` — SMOKE PASS. `tests/unit/test_channels.py` (new, 2026-09-11)
-covers both channels' auth, message-shape → `ingest_source(...)` mapping, and
-optional-mount behavior.
+`pytest` — 459 passed, 1 skipped, 7 deselected (integration, opt-in) as of
+2026-09-17 (444 + 15 in `tests/unit/test_phase1_scripts.py`); `ruff check .` and `mypy` clean; `python scripts/smoke_flow.py
+--offline` — SMOKE PASS; `python scripts/eval_answer.py --offline` — EVAL
+PASS. `tests/unit/test_channels.py` (2026-09-11) covers both channels' auth,
+message-shape → `ingest_source(...)` mapping, and optional-mount behavior;
+the Phase 1-D files are listed above.
 
 ### Files changed/added (commit `9062238`, workstreams A/B)
 
@@ -551,3 +581,135 @@ be real and nonzero.
 - **401 from vLLM itself** — the `Authorization: Bearer` value doesn't match
   `--api-key` exactly; this is the same string as `VLLM_API_KEY`, so a typo
   in either place breaks the pair.
+
+---
+
+## 5. D) Testing the query graph, external search and the LangSmith eval
+
+Everything in this section except steps 1–2 spends real tokens (cheap ones —
+`agent_step` is routed to the cheapest model) or LangSmith quota.
+
+### Step 1 — Offline: the loop, the golden set and the gate (no keys)
+
+```bash
+pytest tests/unit/test_agent_graph.py tests/unit/test_eval.py -q   # the loop's bounds; the evaluators
+python scripts/smoke_flow.py --offline                             # SMOKE PASS
+python scripts/eval_answer.py --offline                            # ingests the two fixture docs, scores the fixture set, EVAL PASS
+python scripts/eval_answer.py --offline --judge                    # + the judge (the fake grades everything grounded)
+```
+
+The offline double answers `agent_step` with `answer` at once, so `tool_calls`
+is 0 here by design — the loop itself is exercised by the unit tests with
+scripted decisions, not by the fake.
+
+### Step 2 — See the loop run for real (no LangSmith needed)
+
+```bash
+docker compose --profile dev up dev            # or: llmwiki serve
+curl -s 'localhost:8011/answer?q=<a question your wiki covers>' | jq '{steps, used_rag_fallback, citations: [.citations[].source_id]}'
+curl -s localhost:8011/healthz | jq .config.query_graph              # the bounds in force
+```
+
+`steps` lists the tool calls the model made (`tool`, `args`, `chars` added).
+With `AGENT_MAX_TOOL_CALLS=0` in `.env` it is always `[]` and the call
+sequence is Phase 0's. `LOG_LEVEL=DEBUG` prints each decision's `reason`.
+
+### Step 3 — LangSmith tracing
+
+1. smith.langchain.com → Settings → API keys → create one.
+2. `.env`: `LANGSMITH_TRACING=true`, `LANGSMITH_API_KEY=lsv2_…`,
+   `LANGSMITH_PROJECT=llmwiki` (use a separate project per deployment).
+3. Apply: `docker compose up -d --force-recreate` (a `restart` does not
+   re-read `.env`), or just run the CLI:
+
+```bash
+llmwiki ask "<a question your wiki covers>"
+#   ...answer...
+#   [source_id] title
+#   tools: search_chunks(6414 chars)
+#   run_id: 19421cbf-...
+```
+
+4. Open the project in LangSmith → the `answer_query` run. Expect one child
+   per node (`retrieve`, `agent`, `tools`, `select_skills`, `generate`,
+   `resolve_citations`), LLM runs named `agent_step` / `answer_query`, and a
+   `search_chunks` tool run under `tools` — technical document §10.2 shows
+   the verified tree. Empty answer with `finish_reason=length`? That op's
+   model is a reasoning model that spent `max_tokens` thinking — raise it in
+   `config/ops.py` (plan §20.5).
+
+### Step 4 — External search (Tavily)
+
+1. https://app.tavily.com → API key.
+2. `.env`: `WEB_SEARCH_BACKEND=tavily`, `TAVILY_API_KEY=tvly-…`,
+   `AGENT_WEB_SEARCH_POLICY=weak` (offered only when the wiki has no strong
+   hit), `AGENT_MAX_WEB_SEARCHES=1`.
+3. Ask something the wiki does **not** cover:
+
+```bash
+curl -s 'localhost:8011/answer?q=<something not in the wiki>' | jq '{external_refs, citations, steps}'
+```
+
+Expect `external_refs` populated, `citations` still only `raw/` ids (a web
+result is never a citation), and `steps` containing one `search_web`. Ask
+something the wiki *does* cover: `search_web` never appears — with `weak` it
+was not even offered (the trace's `agent_step` schema shows the offered
+actions). `AGENT_WEB_SEARCH_POLICY=off` (the default) removes the tool
+entirely regardless of the key.
+
+### Step 5 — Push the golden set and run an experiment
+
+Write a golden set for *your* corpus first — the shipped one references the
+fixture documents' ids, which do not exist in a real corpus:
+
+```bash
+mkdir -p eval
+cat > eval/my-golden.jsonl <<'JSONL'
+{"question": "…", "expected_sources": ["<hash>-<slug>"], "must_mention": ["term"], "notes": "why"}
+JSONL
+python scripts/eval_answer.py --dataset eval/my-golden.jsonl                     # local table first
+python scripts/eval_answer.py --dataset eval/my-golden.jsonl --push              # mirror to LANGSMITH_EVAL_DATASET
+python scripts/eval_answer.py --dataset eval/my-golden.jsonl --langsmith --judge # experiment; prints its name
+```
+
+Source ids: `GET /sources/{id}` or the `source_id=` a capture channel replies
+with. LangSmith → Datasets → `llmwiki-answer-quality` → Experiments shows the
+scores per example with the trace behind each one.
+
+### Step 6 — The correction loop
+
+```bash
+# a wrong answer, from step 3, with its run_id
+llmwiki feedback <run_id> --score 0 --correction "Should cite <hash>-<slug>. must mention: temperature, top-p"
+#   or: curl -X POST localhost:8011/feedback -H "Authorization: Bearer $INGEST_API_TOKEN" \
+#        -H 'Content-Type: application/json' -d '{"run_id": "...", "score": 0, "correction": "..."}'
+
+python scripts/eval_answer.py --dataset eval/my-golden.jsonl --promote-feedback   # appends one example per corrected run
+python scripts/eval_answer.py --dataset eval/my-golden.jsonl --export-failures failures.jsonl   # failing rows + actual output
+```
+
+Then correct the cause (technical document §10.4's table: re-compile /
+lint for a wiki gap, edit `skills/*.md` for an ungrounded answer, change a
+`config/ops.py` route or `AGENT_MAX_TOOL_CALLS` for a weak or spinning
+model, fix the JSONL row for a bad expectation), re-run `--langsmith`, and
+compare the two experiments side by side — the metadata records the git sha
+and the routes that produced each.
+
+### Step 7 — On the box
+
+```bash
+docker compose --profile ops run --rm eval --offline             # image sanity: fixture set, no keys
+docker compose --profile ops run --rm eval --langsmith --judge   # the real thing, same .env as api
+```
+
+### Step 8 — Troubleshooting
+
+- **`POST /feedback` → 409** — tracing is off in that process; there is no run.
+- **`--promote-feedback` finds nothing** — feedback must be on the root
+  `answer_query` run of `LANGSMITH_PROJECT` *and* carry a comment.
+- **Every example fails `expected_source_cited`** — wrong golden set for this corpus.
+- **`wiki page … is unreadable` warnings** — a page written before 2026-09-16
+  with a `:` in its title/gist; `llmwiki lint` lists it, re-compiling one of
+  its sources rewrites it.
+- **`RuntimeError: op 'agent_step' … not active`** at startup — `config/ops.py`
+  gained two rows; a stale image or a hand-edited table is missing them.

@@ -12,11 +12,12 @@ file became the tracked one: two copies of the same table is one too many.)
 
 Every op the codebase actually calls needs **exactly one** row here - a
 missing or duplicate one fails loudly at startup, and so does an op whose
-``provider`` is not active in ``config/providers.py``. The five below
+``provider`` is not active in ``config/providers.py``. The seven below
 (``summarize_source`` -> ``plan_compile`` -> ``create_page``/``patch_page`` are
-the incremental compiler's four stages, design doc §4.4; ``answer_query`` is
-the query agent) are the complete current set - see
-``llmwiki.llm.routing_config.KNOWN_OPS``, which this file is validated against.
+the incremental compiler's four stages, design doc §4.4; ``answer_query`` and
+``agent_step`` are the query agent; ``judge_answer`` is the eval judge) are
+the complete current set - see ``llmwiki.llm.routing_config.KNOWN_OPS``,
+which this file is validated against.
 
 This is what replaces the old ``COMPILE_EXECUTOR_MODEL``: `create_page` and
 `patch_page` below use a stronger model than the other three, same idea, now
@@ -38,8 +39,27 @@ OPS = [
      "temperature": 1.0, "max_tokens": 4096},
 
     # Query agent - answers a question from retrieved wiki/chunk context.
+    # max_tokens is generous on purpose: glm-5.3-flash is a *reasoning* model
+    # and its thinking tokens count against the cap. At 2048 the 2026-09-16
+    # verification run spent the whole budget thinking and returned an empty
+    # answer (finish_reason=length, content empty) once the query graph's
+    # tool results made the context larger. A non-reasoning model can go
+    # back to 2048.
     {"op": "answer_query", "provider": "openrouter", "model": "z-ai/glm-5.3-flash",
-     "temperature": 1.0, "max_tokens": 2048},
+     "temperature": 1.0, "max_tokens": 8192},
+
+    # Phase 1-D (design §4.9). agent_step is the query graph's per-iteration
+    # "call a tool or answer?" decision - a tiny structured output, made up to
+    # AGENT_MAX_TOOL_CALLS+1 times per question, so it belongs on the cheapest
+    # model available; a low temperature keeps the choice stable. Same
+    # reasoning-token caveat as answer_query: 512 truncated the tool call.
+    {"op": "agent_step", "provider": "openrouter", "model": "z-ai/glm-5.3-flash",
+     "temperature": 0.2, "max_tokens": 2048},
+    # judge_answer is the eval loop's groundedness grader (scripts/eval_answer.py
+    # --judge). Never called on the query path. A stronger model than the one
+    # being graded is the usual choice; the same one is acceptable to start.
+    {"op": "judge_answer", "provider": "openrouter", "model": "z-ai/glm-5.3-flash",
+     "temperature": 0.0, "max_tokens": 1024},
 
     # To route an op through a different provider, change its "provider" and
     # "model" - e.g., to answer queries with OpenAI while everything else

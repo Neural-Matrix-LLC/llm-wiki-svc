@@ -271,5 +271,27 @@ services:
       # - ./config:/app/config:ro
     entrypoint: ["llmwiki", "lint"]
 
+  # The answer-quality eval (Phase 1-D, technical document §10). Same image,
+  # .env and corpus as lint; arguments pass straight through to the script:
+  #   docker compose --profile ops run --rm eval                    # local run, real backends
+  #   docker compose --profile ops run --rm eval --langsmith --judge
+  #   docker compose --profile ops run --rm eval --offline          # no keys: fixture docs + fixture set
+  # The fixture golden set ships in the image (Dockerfile copies tests/fixtures/).
+  eval:
+    profiles: ["ops"]
+    image: ${DOCKER_USER:-local}/llmwiki:${IMAGE_TAG:-latest}
+    user: "${API_UID:-10001}:${API_GID:-10001}"
+    depends_on:
+      init-data:
+        condition: service_completed_successfully
+    env_file:
+      - path: .env
+        required: true
+    environment:
+      LOCAL_STORAGE_PATH: /data
+    volumes:
+      - ./.data:/data
+    entrypoint: ["python", "scripts/eval_answer.py"]
+
 volumes:
   llmwiki-offline-data:

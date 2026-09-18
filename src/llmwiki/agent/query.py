@@ -7,20 +7,31 @@ compilation entirely, so the fallback is conditional and measured -
 ``test_agent_wiki_first`` asserts the chunk index is not touched when the wiki
 already answers.
 
-Skill invocation (design v1.4 §4.8.2, plan §19.5, R5) sits *after* retrieval and
-context-building, and *before* the citation-resolution filter - so it changes
-only which system prompt(s) produce the answer text, never what counts as a
-valid citation.  When ``Settings.agent_skills_dir`` holds no discoverable
+Since Phase 1-D (design §4.9) ``answer()`` runs a LangGraph ``StateGraph``
+(``agent/graph.py``): the same wiki-first retrieval first, then a *bounded*
+tool loop in which the model may gather more evidence (``search_wiki``,
+``search_chunks``, ``get_page``, optionally ``search_web``), then skill
+selection and generation, then citation resolution. With
+``AGENT_MAX_TOOL_CALLS=0`` the loop is skipped and the call sequence is the
+pre-graph one exactly. This class keeps its public surface (``search``,
+``answer``, ``source_exists``) and owns the pieces the graph's nodes reuse.
+
+Skill invocation (design v1.4 §4.8.2, plan §19.5, R5) sits *after* retrieval
+(and after the tool loop), and *before* the citation-resolution filter - so it
+changes only which system prompt(s) produce the answer text, never what counts
+as a valid citation.  When ``Settings.agent_skills_dir`` holds no discoverable
 skills - the default in this repository and in every existing test, via
-``conftest.py``'s isolation fixture - ``answer()`` is byte-for-byte the
-pre-R5 fixed-prompt call.
+``conftest.py``'s isolation fixture - generation is the fixed-prompt call.
 """
 
 from __future__ import annotations
 
 import logging
+import uuid
+from functools import cached_property
+from typing import TYPE_CHECKING, Any
 
-from llmwiki.agent.skills import Skill, discover_skills
+from llmwiki.agent.skills import Skill
 from llmwiki.chains.prompts_loader import load_prompt
 from llmwiki.config import Settings
 from llmwiki.embedding.base import Embedder
@@ -30,11 +41,16 @@ from llmwiki.models.plan import Answer, Citation
 from llmwiki.storage.base import ObjectStore
 from llmwiki.storage.layout import raw_meta
 from llmwiki.vector.base import VectorStore
+from llmwiki.websearch.base import WebSearcher
 from llmwiki.wiki import gists as gists_mod
 from llmwiki.wiki.pages import read_page
 
+if TYPE_CHECKING:
+    from langgraph.graph.state import CompiledStateGraph
+
 # Below this similarity the wiki is not actually answering the question.
 WIKI_CONFIDENCE = 0.35
+# Shared across the first retrieval and every tool result (design §4.9, D4).
 MAX_CONTEXT_CHARS = 12_000
 
 # A skill-selection call that names nothing valid is retried once before
@@ -60,6 +76,9 @@ logger = logging.getLogger(__name__)
 class QueryAgent:
     """Answers questions from the compiled wiki, falling back to raw chunks."""
 
+    wiki_confidence = WIKI_CONFIDENCE
+    max_context_chars = MAX_CONTEXT_CHARS
+
     def __init__(
         self,
         store: ObjectStore,
@@ -67,12 +86,23 @@ class QueryAgent:
         embedder: Embedder,
         llm: LLMClient,
         settings: Settings,
+        web_searcher: WebSearcher | None = None,
     ) -> None:
         self.store = store
         self.vectors = vectors
         self.embedder = embedder
         self.llm = llm
         self.settings = settings
+        # None means the search_web tool is never even constructed (factory
+        # returns None for WEB_SEARCH_BACKEND=none).
+        self.web_searcher = web_searcher
+
+    @cached_property
+    def graph(self) -> CompiledStateGraph:
+        """The compiled query graph - built once per agent, on first use."""
+        from llmwiki.agent.graph import build_query_graph
+
+        return build_query_graph(self)
 
     def search(self, query: str, k: int = 5) -> list[SearchHit]:
         """Gist index first; chunk index only if the wiki result is weak."""
@@ -84,34 +114,41 @@ class QueryAgent:
         return (hits + chunks)[:k] if hits else chunks
 
     def answer(self, query: str, k: int = 5) -> Answer:
-        """Retrieve, ground, answer, and verify that every citation resolves."""
-        vector = self.embedder.embed([query])[0]
-        wiki_hits = self.vectors.query(self.settings.vectorize_gists_index, vector, k=k)
-        strong = [hit for hit in wiki_hits if hit.score >= WIKI_CONFIDENCE]
+        """Retrieve, (optionally) gather more, ground, answer, and verify citations.
 
-        used_fallback = False
-        chunk_hits: list[SearchHit] = []
-        if not strong:
-            used_fallback = True
-            chunk_hits = self.vectors.query(self.settings.vectorize_chunks_index, vector, k=k)
+        One graph invocation. When LangSmith tracing is on the root run's id is
+        returned as ``Answer.run_id`` so the answer can be scored or corrected
+        later (``POST /feedback``); it is ``None`` otherwise.
+        """
+        from langchain_core.runnables import RunnableConfig
 
-        context, citations = self._build_context(strong or wiki_hits, chunk_hits)
-        if not context.strip():
-            return Answer(
-                text="Nothing in the knowledge base addresses that question yet.",
-                citations=[],
-                used_rag_fallback=used_fallback,
-            )
+        from llmwiki.agent.graph import recursion_limit
 
-        logger.debug("answer_query: used_rag_fallback=%s", used_fallback)
-        skills = discover_skills(self.settings.agent_skills_dir)
-        if skills:
-            text = self._answer_with_skills(query, context, skills)
-        else:
-            text = self._answer_with_fixed_prompt(query, context)
+        # The root run id is minted here and handed to LangGraph, so with
+        # tracing on it is exactly the LangSmith run ``POST /feedback`` will
+        # find - no collector, no guessing which traced run was the root.
+        run_id = uuid.uuid4()
+        config = RunnableConfig(
+            run_name="answer_query",
+            run_id=run_id,
+            recursion_limit=recursion_limit(self.settings.agent_max_tool_calls),
+            metadata={
+                "agent_max_tool_calls": self.settings.agent_max_tool_calls,
+                "agent_web_search_policy": self.settings.agent_web_search_policy,
+            },
+        )
+        initial: dict[str, Any] = {"query": query, "k": k}
+        final = self.graph.invoke(initial, config=config)
 
-        resolved = [c for c in citations if self.source_exists(c.source_id)]
-        return Answer(text=text, citations=resolved, used_rag_fallback=used_fallback)
+        result: Answer = final["answer"]
+        result.run_id = str(run_id) if self.settings.langsmith_tracing else None
+        logger.debug(
+            "answer_query: used_rag_fallback=%s tool_calls=%d external_refs=%d",
+            result.used_rag_fallback, len(result.steps), len(result.external_refs),
+        )
+        return result
+
+    # --- generation helpers, reused by the graph's nodes ----------------------
 
     def _answer_with_fixed_prompt(self, query: str, context: str) -> str:
         """The pre-R5 behaviour: always the same system prompt, one call."""
@@ -129,7 +166,9 @@ class QueryAgent:
         shape (the same mechanism the compiler already uses for structured
         output) rather than adding a new op or a new LLM-protocol surface -
         this is deliberately scoped, additive plumbing, not a new capability
-        of ``LLMClient`` itself.
+        of ``LLMClient`` itself. The graph runs the two halves as separate
+        nodes (``select_skills``, ``generate``); this method is the one-shot
+        form.
         """
         chosen = self._select_skills(query, skills)
         if chosen is None:
@@ -139,7 +178,12 @@ class QueryAgent:
                 SKILL_SELECTION_ATTEMPTS,
             )
             return self._answer_with_fixed_prompt(query, context)
+        return self._run_skill_chain(query, context, skills, chosen)
 
+    def _run_skill_chain(
+        self, query: str, context: str, skills: dict[str, Skill], chosen: list[str]
+    ) -> str:
+        """Run the chosen skill(s) in order; each step sees the previous step's text."""
         logger.debug("answer_query: skill chain=%s", chosen)
         step_text = ""
         for i, name in enumerate(chosen):
@@ -198,12 +242,14 @@ class QueryAgent:
             return False
 
     def _build_context(
-        self, wiki_hits: list[SearchHit], chunk_hits: list[SearchHit]
+        self,
+        wiki_hits: list[SearchHit],
+        chunk_hits: list[SearchHit],
+        budget: int = MAX_CONTEXT_CHARS,
     ) -> tuple[str, list[Citation]]:
         manifest = gists_mod.load_gists(self.store)
         blocks: list[str] = []
         citations: dict[str, Citation] = {}
-        budget = MAX_CONTEXT_CHARS
 
         for hit in wiki_hits:
             slug = hit.slug or hit.id

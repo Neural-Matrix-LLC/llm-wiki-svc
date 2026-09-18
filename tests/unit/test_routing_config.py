@@ -223,7 +223,9 @@ def test_the_tracked_providers_config_gives_vllm_and_llamacpp_their_own_env_vars
         '{"op": "plan_compile", "provider": "llamacpp", "model": "m"}, '
         '{"op": "create_page", "provider": "openai", "model": "m"}, '
         '{"op": "patch_page", "provider": "openai", "model": "m"}, '
-        '{"op": "answer_query", "provider": "openai", "model": "m"}]\n',
+        '{"op": "answer_query", "provider": "openai", "model": "m"}, '
+        '{"op": "agent_step", "provider": "openai", "model": "m"}, '
+        '{"op": "judge_answer", "provider": "openai", "model": "m"}]\n',
     )
 
     routing = load_routing_config(CONFIG / "providers.py", tmp_path / "ops.py")
@@ -257,4 +259,7 @@ def test_known_ops_matches_every_real_call_site() -> None:
     """Breaks the moment a call site adds an op with no config/ops.py row."""
     called = _ops_called_in(SRC / "agent" / "query.py")
     called |= _ops_called_in(SRC / "wiki" / "compiler.py")
+    # Phase 1-D: the query graph's tool-decision call and the eval judge.
+    called |= _ops_called_in(SRC / "agent" / "graph.py")
+    called |= _ops_called_in(SRC / "agent" / "judge.py")
     assert called == KNOWN_OPS

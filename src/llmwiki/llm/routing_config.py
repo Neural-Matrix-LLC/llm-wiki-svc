@@ -32,14 +32,19 @@ DOTENV_PATH = Path(".env")
 
 # Every op name the codebase actually calls llm.complete(op=...) with.
 # tests/unit/test_routing_config.py scans the real call sites (agent/query.py,
-# wiki/compiler.py) and asserts they match this set exactly - the guard
-# against a new call site adding an op with no config/ops.py row.
+# agent/graph.py, agent/judge.py, wiki/compiler.py) and asserts they match
+# this set exactly - the guard against a new call site adding an op with no
+# config/ops.py row.
 KNOWN_OPS = frozenset({
     "summarize_source",
     "plan_compile",
     "create_page",
     "patch_page",
     "answer_query",
+    # Phase 1-D (design §4.9): the query graph's per-iteration tool decision -
+    # route it to the cheapest model - and the eval-only groundedness judge.
+    "agent_step",
+    "judge_answer",
 })
 
 DEFAULT_TEMPERATURE = 1.0

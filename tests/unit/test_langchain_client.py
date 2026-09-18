@@ -35,8 +35,11 @@ class ScriptedChatModel:
         self.bound.append((tools, tool_choice))
         return self
 
-    def invoke(self, messages: list) -> AIMessage:
+    def invoke(self, messages: list, config: dict | None = None) -> AIMessage:
+        # ``config`` mirrors Runnable.invoke's real signature: the adapter names
+        # each run by op through it (Phase 1-D, D9), and a test asserts that.
         self.messages = messages
+        self.config = config
         return self.reply
 
 
@@ -60,6 +63,15 @@ def test_a_plain_completion_returns_its_text() -> None:
     assert built[0].model == "gpt-5"
     kinds = [type(message).__name__ for message in built[0].messages]
     assert kinds == ["SystemMessage", "HumanMessage"]
+
+
+def test_each_run_is_named_by_its_op_for_the_trace() -> None:
+    """Phase 1-D D9: a LangSmith trace reads "agent_step", not "ChatOpenAI"."""
+    client, built = make_client(AIMessage(content="x"))
+    client.complete(op="agent_step", system="sys", prompt="user", model="gpt-5-mini")
+
+    assert built[0].config["run_name"] == "agent_step"
+    assert built[0].config["metadata"] == {"op": "agent_step", "model": "gpt-5-mini"}
 
 
 def test_a_schema_forces_a_single_tool_call_and_returns_its_arguments() -> None:

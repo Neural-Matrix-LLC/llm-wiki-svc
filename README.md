@@ -104,8 +104,27 @@ llmwiki serve                                 # REST on :8010 (API_PORT in .env.
 `implement-plan.md` §6 is the full operational runbook — creating the R2 bucket,
 minting both kinds of Cloudflare token, and confirming the embedding dimension
 before any index is created. `scripts/README.md` documents every script under
-`scripts/` (setup, diagnostics, browsing what's in Vectorize, bulk backfill)
-with usage examples.
+`scripts/` (setup, diagnostics, browsing what's in Vectorize, bulk backfill,
+evaluation) with usage examples.
+
+### Query agent, tracing and evaluation
+
+`llmwiki ask` (and `GET /answer`) runs a bounded LangGraph loop: the wiki-first
+retrieval, then up to `AGENT_MAX_TOOL_CALLS` evidence-gathering tool calls
+(`search_wiki`, `search_chunks`, `get_page`, optionally `search_web`), then the
+answer with verified citations. `AGENT_MAX_TOOL_CALLS=0` gives the plain
+single-call behaviour. With `LANGSMITH_TRACING=true` every answer is one
+LangSmith trace and carries a `run_id`.
+
+```bash
+python scripts/eval_answer.py --offline                # the answer-quality golden set, no keys
+python scripts/eval_answer.py --langsmith --judge      # as a LangSmith experiment, with the LLM judge
+llmwiki feedback <run_id> --score 0 --correction "…"   # file a correction; --promote-feedback turns it into an example
+```
+
+`docs/llm-wiki-technical-document.md` §3.3 (the graph) and §10 (tracing,
+evaluation, the correction loop) have the details; `docs/phase1-testing-guide.md`
+§5 is the step-by-step.
 
 ## Docker
 
@@ -139,8 +158,8 @@ with `id -u` and override in `.env` if your ids differ.
 (`tests/unit/test_layering.py`), not by convention:
 
 ```
-models/  →  storage/ extractors/ embedding/ vector/ llm/  →  wiki/ agent/
-         →  pipeline/  →  tools.py  →  api/ mcp/ cli.py
+models/  →  storage/ extractors/ embedding/ vector/ llm/ websearch/  →  wiki/ agent/
+         →  pipeline/  →  tools.py (+ eval/)  →  api/ mcp/ cli.py channels/
 ```
 
 Business logic lives in the core package. `api/`, `mcp/` and `cli.py` validate

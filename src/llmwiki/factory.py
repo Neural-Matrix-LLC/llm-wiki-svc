@@ -20,6 +20,7 @@ from llmwiki.embedding.base import Embedder
 from llmwiki.llm.base import LLMClient
 from llmwiki.storage.base import ObjectStore
 from llmwiki.vector.base import VectorStore
+from llmwiki.websearch.base import WebSearcher
 
 logger = logging.getLogger(__name__)
 
@@ -110,6 +111,33 @@ def _build_embedder(cfg: Settings) -> Embedder:
         model=cfg.embedding_model,
         dim=cfg.embedding_dim,
     )
+
+
+def web_searcher(cfg: Settings | None = None) -> WebSearcher | None:
+    """Return the configured web searcher, or ``None`` when the backend is ``none``.
+
+    ``None`` is a real value here, not a failure: the query graph then never
+    constructs its ``search_web`` tool (Phase 1-D, design §4.9), so a
+    deployment without a search key is byte-for-byte the pre-web-search agent.
+    """
+    cfg = cfg or default_settings
+    if cfg.web_search_backend == "none":
+        return None
+    key = ("websearch", cfg.web_search_backend)
+    return _cached(key, lambda: _build_web_searcher(cfg))
+
+
+def _build_web_searcher(cfg: Settings) -> WebSearcher:
+    logger.info("web searcher: backend=%s", cfg.web_search_backend)
+    if cfg.web_search_backend == "fake":
+        from llmwiki.websearch.fake import FakeWebSearcher
+
+        return FakeWebSearcher()
+
+    cfg.require("tavily_api_key")
+    from llmwiki.websearch.tavily import TavilyWebSearcher
+
+    return TavilyWebSearcher(api_key=cfg.tavily_api_key.get_secret_value())
 
 
 def llm_client(cfg: Settings | None = None) -> LLMClient:

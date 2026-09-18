@@ -50,6 +50,21 @@ def _isolate_agent_skills_dir(monkeypatch, tmp_path) -> None:
     monkeypatch.setenv("AGENT_SKILLS_DIR", str(tmp_path / "unused-skills"))
 
 
+@pytest.fixture(autouse=True)
+def _isolate_query_tool_loop(monkeypatch) -> None:
+    """No test enters the query graph's tool loop unless it opts in.
+
+    Third instance of the same pattern (Phase 1-D, design §4.9).
+    ``AGENT_MAX_TOOL_CALLS=0`` reproduces the pre-graph call sequence exactly:
+    the ``agent`` node is skipped, so a scripted double that hands out
+    responses by call index (``test_agent_skill_invocation.SequencedLLM``)
+    still sees its first response consumed by the call it was written for.
+    ``tests/unit/test_agent_graph.py`` opts back in per test with
+    ``settings.model_copy(update={"agent_max_tool_calls": n})``.
+    """
+    monkeypatch.setenv("AGENT_MAX_TOOL_CALLS", "0")
+
+
 @pytest.fixture
 def settings(tmp_path) -> Settings:
     """Settings pinned to the offline backends and a per-test storage root."""

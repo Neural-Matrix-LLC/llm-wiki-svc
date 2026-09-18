@@ -21,6 +21,11 @@ dependencies = [
     "langchain-nvidia-ai-endpoints",
     "langchain-deepseek",
     "langchain-openrouter",
+    # Phase 1-D (2026-09-16): the query agent is a LangGraph StateGraph
+    # (agent/graph.py) and its optional web-search tool uses the LangChain
+    # Tavily integration (websearch/tavily.py, imported only in factory).
+    "langgraph>=1.0",
+    "langchain-tavily",
     "numpy",
     "pydantic>=2",
     "pydantic-settings",

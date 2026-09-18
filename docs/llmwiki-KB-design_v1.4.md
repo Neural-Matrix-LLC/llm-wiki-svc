@@ -1,7 +1,7 @@
 # LLM Wiki Knowledge Base — Design Document
 
-**Version:** 1.5  
-**Date:** 2026-09-05  
+**Version:** 1.6  
+**Date:** 2026-09-16  
 **Status:** Draft for team evaluation  
 **Purpose:** Cost-effective, cloud-hosted, multimodal research knowledge base inspired by Andrej Karpathy’s LLM Wiki pattern, scaled for large volumes of PDFs, websites, blogs, YouTube videos, papers, images, and webpages.  
 **Updates:**  
@@ -10,6 +10,7 @@
 - 1.3: Added Section 4.7 — Shareable LLM Integration Layer (inspired by AgentBase pattern), packaging strategy for cross-repo reuse, LangChain/LangGraph + LangSmith alignment.  
 - 1.4: Redesigned Architecture Diagram to clearly separate Core Wiki Package, Shareable LLM Layer, Processing, and Interface layers (aligns with 4.6 Hybrid + 4.7).  
 - 1.5: Added Section 4.8 — Application-Specific LLM Routing (multi-provider credentials + per-op model routing, deliberately kept *outside* §4.7's shareable, stable `LLMConfig` contract) and Agent Skill Invocation (the five compiler/query prompts become real SKILL.md-format files; the query agent — not the compiler — gains genuine runtime skill selection). Implementation detail in `implement-plan-v1.4.md` §19.
+- 1.6: Added Section 4.9 — Query-Agent Graph, External Search & Evaluation Loop (Phase 1-D): the query agent becomes a bounded LangGraph ReAct loop over the existing `LLMClient`, an optional policy-gated web-search tool whose results are never citations, a LangSmith answer-quality golden set with deterministic + LLM-judge evaluators, and a defined correction loop (feedback endpoint, failure export, promotion). Implementation detail in `implement-plan-v1.4.md` §20. Open question 10 answered.
 
 ---
 
@@ -215,6 +216,10 @@ sequenceDiagram
 | Qdrant (Cloud or self-host) | Low–medium       | High           | Low–medium | Good hybrid search                 |
 | pgvector            | Low (if already on Postgres) | Medium   | Low        | Simple if relational data exists   |
 | Fully managed (Bedrock KB, etc.) | Medium–higher | High       | Very low   | Fastest to production              |
+
+External (web) search is **not** a retrieval index: it is a query-time *tool* the agent may be offered
+after the local retrieval, whose results are shown as external references and never enter the
+citation set (Section 4.9).
 
 ### 4.3 LLM Strategy
 
@@ -488,6 +493,128 @@ See §5 for the phase placement of this last piece.
 
 ---
 
+### 4.9 Query-Agent Graph, External Search & Evaluation Loop (LangGraph + LangSmith)
+
+*(New in 1.6 — Phase 1 workstream D. Implementation detail in `implement-plan-v1.4.md` §20; the
+code-path map is in the technical document §3.3 and §10.)*
+
+Phase 0's query agent was one fixed procedure: embed → gist index → (chunk index only if weak) →
+context → one generation call → citation check. It could not follow a wikilink it had just read,
+could not look up a page the first retrieval missed, and had no measurable quality signal, so a prompt,
+skill or model change had no regression check. §4.9 replaces the procedure with a **bounded graph**
+and adds the **first evaluation loop**, without touching the two guarantees §4.4 and §2 rest on: the
+compiler stays non-agentic, and every citation still resolves to an object under `raw/`.
+
+#### 4.9.1 The query graph
+
+```mermaid
+flowchart TD
+    S([answer]) --> R[retrieve<br/>embed · gists index · chunks fallback · context]
+    R -->|context empty| N[no_answer] --> E1([END])
+    R -->|AGENT_MAX_TOOL_CALLS = 0| SK
+    R --> A[agent<br/>one agent_step call: tool or answer?]
+    A -->|tool ∧ calls < cap ∧ budget left| T[tools<br/>search_wiki · search_chunks · get_page · search_web*]
+    T --> A
+    A -->|answer · cap · budget · invalid| SK[select_skills<br/>4.8.2, unchanged]
+    SK --> G[generate<br/>skill chain or fixed prompt]
+    G --> C[resolve_citations<br/>raw/ only] --> E2([END])
+```
+
+Decisions:
+
+- **LangGraph is orchestration only.** Every model call in the graph is `LLMClient.complete(...)`
+  on the protocol §4.7/§4.8 already define; no node holds a LangChain chat model. Per-op routing
+  (§4.8.1), measured cost, prompt caching and the offline doubles are untouched, and the N7 `get_llm()`
+  surface stays deferred. The tool decision is one forced-schema call (`op="agent_step"`, routed to the
+  cheapest model) whose schema is derived from real LangChain tools, so the trace has the canonical
+  ReAct shape and the same tools can be bound natively later.
+- **Wiki-first is code, not prompt.** The first node is Phase 0's retrieval verbatim; the model only
+  *refines* after it. Tools gather evidence; skills (§4.8.2) still decide how the answer is written.
+- **Three bounds, all enforced in code:** `AGENT_MAX_TOOL_CALLS` (default 4; `0` reproduces Phase 0's
+  single call exactly), one shared context budget across the first retrieval and every tool result,
+  and LangGraph's `recursion_limit` as the last stop. A repeated identical call, an invalid action or a
+  tool failure becomes an observation the model sees, never an exception; an unusable decision is
+  retried once with a nudge and then the loop ends — the same posture as §4.8.2's skill selection.
+- **Citations are a property of what was retrieved.** Every tool result registers citations the way
+  the first retrieval does; the last node filters them against `raw/`. This is why the contract test
+  from Phase 0 did not change.
+
+Cost per question, with `n ≤ AGENT_MAX_TOOL_CALLS` tool calls actually made:
+
+| Configuration | LLM calls |
+|---|---|
+| `AGENT_MAX_TOOL_CALLS=0` | Phase 0's count exactly (1, or 1 + skill chain) |
+| loop on | `(n + 1)` cheap `agent_step` + Phase 0's count |
+
+#### 4.9.2 External (web) search
+
+A fourth tool, `search_web`, in the same loop — not a new node and not a retrieval index. Three rules:
+
+1. **Offered by policy, not by the prompt.** `AGENT_WEB_SEARCH_POLICY` is `off` (default; no key
+   needed), `weak` (offered only when the wiki had no strong hit and the chunk fallback ran) or
+   `always`; `AGENT_MAX_WEB_SEARCHES` caps calls per question. The gate is applied where the action
+   schema is built, so the model cannot pick a tool the policy withholds.
+2. **Never a citation.** A web result is not in `raw/`; it is returned as `Answer.external_refs` and
+   rendered to the reader as external. The citation contract is untouched.
+3. **Capture stays explicit.** Turning an external finding into knowledge is the normal
+   `ingest_source(url=...)` through any capture channel — the query path never writes to `raw/`.
+
+The backend is an adapter (`websearch/`, `WEB_SEARCH_BACKEND=none|tavily|fake`) like the vector and
+embedding seams; another provider is one file.
+
+#### 4.9.3 The evaluation loop
+
+```mermaid
+flowchart LR
+    J[(golden set JSONL<br/>in the repo)] -->|push| DS[LangSmith dataset]
+    DS -->|experiment| X[scores + traces]
+    J -->|offline / local| LR[local run, no keys]
+    X & LR --> EV{{evaluators}}
+    EV --> e1[citations_resolve]
+    EV --> e2[expected_source_cited]
+    EV --> e3[must_mention]
+    EV --> e4[tool_calls · metric]
+    EV -->|opt-in| e5[judge_grounded<br/>op=judge_answer]
+```
+
+- The golden set is a repo file (`question`, `expected_sources`, `must_mention`); LangSmith holds a
+  pushed copy. The shipped sample is written over the offline fixture documents, so the whole loop runs
+  with no keys and can sit in the pre-commit gate.
+- Three deterministic pass/fail evaluators, one cost metric, and one opt-in LLM-as-judge groundedness
+  grade (a seventh routed op, `judge_answer`, never on the query path). Experiments carry the git sha,
+  the routes in force and the graph bounds, so two runs are comparable.
+- Tracing (optional, unchanged switches): one LangSmith root run per answer, one child per node, one
+  LLM run per call named by op. `RoutingLLMClient` adds no span of its own.
+
+#### 4.9.4 The correction loop
+
+An evaluation is only useful if a failure has a place to land. Four causes, four corrections:
+
+```mermaid
+flowchart LR
+    E[experiment / human feedback] --> D{which evaluator failed?}
+    D -->|expected source not cited,<br/>fallback ran| R1[retrieval / wiki gap → backfill, lint, capture]
+    D -->|judge low, citations fine| R2[skill or prompt → edit skills/*.md]
+    D -->|tool calls at cap, no gain| R3[model or bounds → config/ops.py, AGENT_MAX_TOOL_CALLS]
+    D -->|expectation was wrong| R4[golden set → fix the row]
+    R1 & R2 & R3 & R4 --> RR[re-run the same experiment → compare]
+```
+
+Built for it: `Answer.run_id` (the LangSmith root run, when tracing is on), `POST /feedback` and
+`llmwiki feedback` (a human score and correction attached to that run), `--export-failures` (failing
+examples with their actual output, ready to edit into the set) and `--promote-feedback` (corrected
+runs become new golden examples). Nothing self-rewrites: no automatic re-compile on a failed eval,
+no auto-promotion without a human comment. Self-critique loops, preference data and prompt
+optimisation are Phase 2.
+
+#### 4.9.5 Relationship to §4.7 and §4.8
+
+The graph consumes `LLMClient`, so §4.7's stability contract is unaffected and `get_llm()` remains
+N7's. The two new ops live in §4.8.1's routing table like any other. Open question 10 (§7) is
+answered: **soft** — `langsmith` is imported function-locally and only where a LangSmith call is
+made; it happens to be always installed because `langchain-core` depends on it, and the docs say so
+rather than pretend otherwise.
+
 ## 5. Multi-Phase Growth Plan
 
 Phases are driven by corpus size, user count, query volume, and feature demand.
@@ -519,11 +646,11 @@ Phases are driven by corpus size, user count, query volume, and feature demand.
 - WhatsApp / Signal / email channels.
 - Improved extraction quality and deduplication.
 - Local LLM option for embeddings + routine compilation (via the shared LLM layer).
-- Better agent tools and citation quality (LangGraph agents using the LLM layer).
+- Better agent tools and citation quality (LangGraph agents using the LLM layer) — **done 2026-09-16, Section 4.9.1–4.9.2.**
 - Basic monitoring and lint jobs.
 - Optional light PWA for share-target.
 - Full FastAPI service + MCP layer with basic auth (per Section 4.6 hybrid recommendation).
-- First LangSmith datasets for answer quality and compile correctness.
+- First LangSmith datasets for answer quality and compile correctness — **answer quality done 2026-09-16, Section 4.9.3–4.9.4; compile correctness deferred.**
 
 **Success criteria:** Multiple users can capture reliably; per-ingest cost stays proportional to relevance; both human API and agent MCP access work cleanly; LLM layer is versioned and reusable.
 
@@ -574,7 +701,7 @@ Exact numbers depend on volume and model mix — to be measured in Phase 0/1.
 7. **Framework priority**: Start MCP-first (agent-native) or FastAPI-first (human + API), or commit early to the hybrid Python-package + FastAPI + MCP approach recommended in Section 4.6?
 8. **LLM layer packaging**: Own repo + published package from day one, or start as an internal module and extract later? Preferred package name?
 9. Which LLM providers must be in the first release of the shareable LLM layer vs optional extras?
-10. How strongly to couple LangSmith (hard dependency vs optional extra) for evaluation?
+10. How strongly to couple LangSmith (hard dependency vs optional extra) for evaluation? — **Answered 1.6 (Section 4.9.5): soft.**
 
 ---
 

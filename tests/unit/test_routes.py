@@ -242,3 +242,58 @@ def test_missing_page_is_404(client) -> None:
 def test_lint_requires_a_token(client) -> None:
     assert client.post("/lint").status_code == 401
     assert client.post("/lint", headers=AUTH).status_code == 200
+
+
+# --- Phase 1-D: the richer Answer, and the feedback endpoint ---------------------
+
+
+def test_answer_carries_the_query_graph_fields(client) -> None:
+    client.post("/ingest", json={"text": "# Retrieval\n\nGrounding answers in retrieved "
+                                          "documents.\n"}, headers=AUTH)
+    body = client.get("/answer", params={"q": "retrieval grounding"}).json()
+
+    assert set(body) >= {"text", "citations", "used_rag_fallback", "steps", "context",
+                         "external_refs", "run_id"}
+    assert body["steps"] == [] and body["external_refs"] == []
+    assert body["run_id"] is None, "tracing is off, so there is no run to point at"
+    assert body["context"], "the eval judge needs what the answer was written from"
+
+
+def test_healthz_reports_the_query_graph_bounds(client) -> None:
+    graph = client.get("/healthz").json()["config"]["query_graph"]
+    assert set(graph) == {"max_tool_calls", "web_search_policy", "web_search_backend",
+                          "langsmith_tracing"}
+    assert graph["web_search_policy"] == "off"
+
+
+def test_feedback_requires_a_token(client) -> None:
+    body = {"run_id": "00000000-0000-0000-0000-000000000000", "score": 0}
+    assert client.post("/feedback", json=body).status_code == 401
+
+
+def test_feedback_is_409_when_tracing_is_off(client) -> None:
+    body = {"run_id": "00000000-0000-0000-0000-000000000000", "score": 0, "correction": "x"}
+    response = client.post("/feedback", json=body, headers=AUTH)
+    assert response.status_code == 409
+    assert "LANGSMITH_TRACING" in response.json()["detail"]
+
+
+def test_feedback_rejects_a_score_outside_zero_to_one(client) -> None:
+    body = {"run_id": "r", "score": 7}
+    assert client.post("/feedback", json=body, headers=AUTH).status_code == 422
+
+
+def test_feedback_forwards_to_tools_record_feedback(client, monkeypatch) -> None:
+    calls: list[tuple] = []
+
+    def fake_record(run_id, score, correction="", cfg=None):
+        calls.append((run_id, score, correction))
+        return "fb-1"
+
+    monkeypatch.setattr("llmwiki.tools.record_feedback", fake_record)
+    body = {"run_id": "run-1", "score": 0.0, "correction": "cite 7b2f6aed523349f5-sample"}
+    response = client.post("/feedback", json=body, headers=AUTH)
+
+    assert response.status_code == 200
+    assert response.json() == {"ok": True, "feedback_id": "fb-1", "run_id": "run-1"}
+    assert calls == [("run-1", 0.0, "cite 7b2f6aed523349f5-sample")]

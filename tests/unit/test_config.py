@@ -21,6 +21,23 @@ def test_defaults_are_the_cloud_backends() -> None:
     assert cfg.log_level == "INFO"
 
 
+def test_query_graph_defaults_are_bounded_and_web_search_is_off(monkeypatch) -> None:
+    """Phase 1-D (design §4.9): the loop is on and capped; nothing external by default."""
+    # conftest pins AGENT_MAX_TOOL_CALLS=0 for the suite; this test is about the default.
+    monkeypatch.delenv("AGENT_MAX_TOOL_CALLS", raising=False)
+    cfg = Settings(_env_file=None)
+    assert cfg.agent_max_tool_calls == 4
+    assert cfg.agent_web_search_policy == "off"
+    assert cfg.agent_max_web_searches == 1
+    assert cfg.web_search_backend == "none"
+    assert cfg.langsmith_eval_dataset == "llmwiki-answer-quality"
+
+
+def test_tavily_key_does_not_appear_in_repr() -> None:
+    cfg = Settings(_env_file=None, tavily_api_key="tvly-secret")
+    assert "tvly-secret" not in repr(cfg)
+
+
 def test_secrets_do_not_appear_in_repr() -> None:
     cfg = Settings(_env_file=None, anthropic_api_key="sk-ant-secret-value")
     assert "sk-ant-secret-value" not in repr(cfg)
@@ -230,5 +247,13 @@ def test_configure_langsmith_exports_the_env_vars(monkeypatch) -> None:
         # provider's own auto-instrumentation must see it) - monkeypatch never
         # tracked these keys, so they must be removed by hand or every later
         # test in the session sees LANGSMITH_TRACING=true.
+        #
+        # Removed with os.environ.pop, NOT monkeypatch.delenv: delenv records
+        # the value it deletes ("true") and puts it *back* at teardown, while
+        # the delenv at the top recorded nothing (the key was absent). Net
+        # effect before 2026-09-16 was LANGSMITH_TRACING=true leaking into
+        # every later test - harmless until the query graph started honouring
+        # it (Answer.run_id set, and LangChain trying to post traces to
+        # smith.example, which is what hung the suite).
         for name in names:
-            monkeypatch.delenv(name, raising=False)
+            os.environ.pop(name, None)
