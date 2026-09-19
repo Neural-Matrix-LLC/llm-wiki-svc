@@ -225,7 +225,10 @@ def test_the_tracked_providers_config_gives_vllm_and_llamacpp_their_own_env_vars
         '{"op": "patch_page", "provider": "openai", "model": "m"}, '
         '{"op": "answer_query", "provider": "openai", "model": "m"}, '
         '{"op": "agent_step", "provider": "openai", "model": "m"}, '
-        '{"op": "judge_answer", "provider": "openai", "model": "m"}]\n',
+        '{"op": "judge_answer", "provider": "openai", "model": "m"}, '
+        '{"op": "route_domain", "provider": "openai", "model": "m"}, '
+        '{"op": "synthesize_domain", "provider": "openai", "model": "m"}, '
+        '{"op": "describe_image", "provider": "openai", "model": "m"}]\n',
     )
 
     routing = load_routing_config(CONFIG / "providers.py", tmp_path / "ops.py")
@@ -247,7 +250,10 @@ def _ops_called_in(path: Path) -> set[str]:
     for node in ast.walk(tree):
         if not isinstance(node, ast.Call):
             continue
-        if not (isinstance(node.func, ast.Attribute) and node.func.attr == "complete"):
+        # Phase 2: describe(op=...) is the vision form of the same contract.
+        if not isinstance(node.func, ast.Attribute):
+            continue
+        if node.func.attr not in ("complete", "describe"):
             continue
         for kw in node.keywords:
             if kw.arg == "op" and isinstance(kw.value, ast.Constant):
@@ -262,4 +268,8 @@ def test_known_ops_matches_every_real_call_site() -> None:
     # Phase 1-D: the query graph's tool-decision call and the eval judge.
     called |= _ops_called_in(SRC / "agent" / "graph.py")
     called |= _ops_called_in(SRC / "agent" / "judge.py")
+    # Phase 2: the domain router.
+    called |= _ops_called_in(SRC / "wiki" / "router.py")
+    called |= _ops_called_in(SRC / "wiki" / "synthesis.py")
+    called |= _ops_called_in(SRC / "pipeline" / "describe.py")
     assert called == KNOWN_OPS

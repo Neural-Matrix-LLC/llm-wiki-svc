@@ -54,12 +54,24 @@ def detect_modality(mime: str, filename: str | None, url: str | None) -> Modalit
     return "web" if url else "text"
 
 
-def get_extractor(modality: Modality) -> Extractor:
-    """Return the extractor for a modality. Imports are local so unused deps stay unloaded."""
+def get_extractor(
+    modality: Modality, *, vision_mode: str = "off", vision_max_pages: int = 8,
+    vision_min_chars: int = 200, vision_image_area: float = 0.25,
+) -> Extractor:
+    """Return the extractor for a modality. Imports are local so unused deps stay unloaded.
+
+    The vision keywords (Phase 2, plan §21.2 D4) only matter to the PDF and
+    image extractors; ``vision_mode="off"`` is the pre-Phase-2 behaviour.
+    """
     if modality == "pdf":
         from llmwiki.extractors.pdf import PdfExtractor
 
-        return PdfExtractor()
+        return PdfExtractor(vision_mode=vision_mode, max_pages=vision_max_pages,
+                            min_chars=vision_min_chars, image_area=vision_image_area)
+    if modality == "image":
+        from llmwiki.extractors.image import ImageExtractor
+
+        return ImageExtractor(vision_mode=vision_mode)
     if modality == "youtube":
         from llmwiki.extractors.youtube import YouTubeExtractor
 

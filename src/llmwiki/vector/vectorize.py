@@ -19,6 +19,13 @@ from llmwiki.models.chunk import SearchHit
 
 UPSERT_BATCH = 500
 TIMEOUT_S = 60.0
+#: Metadata properties every index gets a metadata index for - the ones
+#: ``delete_by_source`` and the compiler's lookups filter on. Must exist before
+#: the first insert that will be filtered on them.
+FILTERABLE = ("source_id", "slug", "type")
+#: How long ``ensure_index`` waits for a freshly created index to be describable.
+READY_ATTEMPTS = 15
+READY_DELAY_S = 2.0
 
 
 class VectorizeStore:
@@ -40,6 +47,52 @@ class VectorizeStore:
             raise RuntimeError(f"Vectorize error: {payload.get('errors')}")
         result: dict = payload.get("result") or {}
         return result
+
+    # -- lifecycle ------------------------------------------------------------------
+
+    def describe_index(self, index: str) -> dict | None:
+        """The index's description, or None when it does not exist (404/410)."""
+        response = self._client.get(f"/indexes/{index}")
+        if response.status_code in (404, 410):  # 410: deleted and still being torn down
+            return None
+        return self._result(response)
+
+    def ensure_index(self, index: str, *, wait: bool = True) -> bool:
+        """Create ``index`` (cosine, ``probe_dim`` wide) plus its metadata indexes.
+
+        Idempotent: an existing index is left alone (its metadata indexes are
+        still asserted, since "already exists" is not an error). With ``wait``
+        the call polls until the new index is describable, because a query
+        against a just-created index can 404 for a few seconds.
+        """
+        if self.describe_index(index) is not None:
+            self._ensure_metadata_indexes(index)
+            return False
+        self._result(self._client.post(
+            "/indexes",
+            json={"name": index, "config": {"dimensions": self.probe_dim, "metric": "cosine"}},
+        ))
+        if wait:
+            import time
+
+            for _ in range(READY_ATTEMPTS):
+                if self.describe_index(index) is not None:
+                    break
+                time.sleep(READY_DELAY_S)
+        self._ensure_metadata_indexes(index)
+        return True
+
+    def _ensure_metadata_indexes(self, index: str) -> None:
+        for prop in FILTERABLE:
+            response = self._client.post(
+                f"/indexes/{index}/metadata_index/create",
+                json={"propertyName": prop, "indexType": "string"},
+            )
+            if response.status_code >= 400 and "already exists" in response.text:
+                continue
+            self._result(response)
+
+    # -- data -------------------------------------------------------------------------
 
     def upsert(
         self,

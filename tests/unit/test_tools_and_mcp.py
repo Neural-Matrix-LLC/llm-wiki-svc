@@ -1,4 +1,8 @@
-"""The canonical tool surface, and that MCP exposes exactly the six named tools."""
+"""The canonical tool surface, and that MCP exposes exactly the named tools.
+
+Six from design §4.6 plus, since Phase 2 (design §4.10, plan §21.2 X3), the
+read-only ``list_domains`` - and nothing else.
+"""
 
 from __future__ import annotations
 
@@ -10,11 +14,11 @@ from llmwiki import tools
 from llmwiki.mcp import server as mcp_server
 
 CANONICAL = {"search_wiki", "get_page", "ingest_source", "compile_update", "list_concepts",
-             "lint_wiki"}
+             "lint_wiki", "list_domains"}
 HELPERS = {"get_source_status", "answer", "source_exists", "cost_summary"}
 
 
-def test_the_six_canonical_tools_exist_in_tools_py() -> None:
+def test_the_canonical_tools_exist_in_tools_py() -> None:
     for name in CANONICAL:
         assert callable(getattr(tools, name)), f"{name} is missing from the tool surface"
 
@@ -26,7 +30,8 @@ def test_the_helpers_exist_but_are_not_canonical() -> None:
 
 
 @pytest.mark.asyncio
-async def test_mcp_exposes_exactly_the_six_canonical_tools() -> None:
+async def test_mcp_exposes_exactly_the_canonical_tools() -> None:
+    """Six from Phase 0 plus list_domains (Phase 2) - the registry mutations stay off MCP."""
     server = mcp_server.build_server()
     registered = {tool.name for tool in await server.list_tools()}
 
@@ -62,20 +67,26 @@ async def test_every_transport_can_ingest_all_five_source_kinds() -> None:
     from llmwiki.cli import build_parser
 
     core = inspect.signature(tools.ingest_source).parameters
-    assert {"url", "file", "filename", "mime", "text"} <= set(core)
+    assert {"url", "file", "filename", "mime", "text", "domain"} <= set(core)
 
-    assert {"url", "text"} <= set(IngestRequest.model_fields)  # POST /ingest
+    assert {"url", "text", "domain"} <= set(IngestRequest.model_fields)  # POST /ingest
     upload = inspect.signature(__import__("llmwiki.api.routes", fromlist=["upload"]).upload)
-    assert "file" in upload.parameters  # POST /upload carries the file kinds
+    assert {"file", "domain"} <= set(upload.parameters)  # POST /upload carries the file kinds
 
     server = mcp_server.build_server()
-    ingest_tool = {tool.name: tool for tool in await server.list_tools()}["ingest_source"]
-    assert {"url", "text"} <= set(ingest_tool.parameters["properties"])
+    mcp_tools = {tool.name: tool for tool in await server.list_tools()}
+    assert {"url", "text", "domain"} <= set(mcp_tools["ingest_source"].parameters["properties"])
+    # Phase 2: every read tool that has a domain to scope by takes one.
+    for name in ("get_page", "list_concepts", "search_wiki"):
+        assert "domain" in mcp_tools[name].parameters["properties"], name
 
-    args = build_parser().parse_args(["ingest", "--text", "pasted"])
-    assert args.text == "pasted"
+    args = build_parser().parse_args(["ingest", "--text", "pasted", "--domain", "ml"])
+    assert args.text == "pasted" and args.domain == "ml"
     for flag in ("--url", "--file"):
         assert build_parser().parse_args(["ingest", flag, "x"])
+    for command in (["page", "x"], ["concepts"], ["lint"], ["search", "q"], ["ask", "q"]):
+        assert build_parser().parse_args([*command, "--domain", "ml"]).domain == "ml"
+    assert build_parser().parse_args(["domains", "add", "ml", "--description", "d"]).name == "ml"
 
 
 def test_transport_layers_share_one_implementation() -> None:
@@ -121,3 +132,28 @@ def test_mcp_is_reachable_at_slash_mcp(tmp_path, monkeypatch) -> None:
     assert response.status_code == 200, response.text
     assert "serverInfo" in response.text
     factory.reset()
+
+
+@pytest.mark.asyncio
+async def test_list_domains_is_read_only_and_general_first(tmp_path, monkeypatch) -> None:
+    """The seventh tool (Phase 2): discovery only - registration stays off MCP."""
+    from llmwiki import config, factory
+    from llmwiki.config import Settings
+
+    cfg = Settings(_env_file=None, storage_backend="local", vector_backend="memory",
+                   embedding_backend="fake", llm_backend="fake",
+                   local_storage_path=tmp_path, embedding_dim=64)
+    monkeypatch.setattr(config, "settings", cfg)
+    monkeypatch.setattr("llmwiki.tools.default_settings", cfg)
+    monkeypatch.setattr("llmwiki.factory.default_settings", cfg)
+    factory.reset()
+    try:
+        tools.upsert_domain("ml", "Machine learning", cfg=cfg)
+        server = mcp_server.build_server()
+        result = await server.call_tool("list_domains", {})
+        names = [row["name"] for row in result.structured_content["result"]]
+        assert names == ["general", "ml"]
+        registered = {tool.name for tool in await server.list_tools()}
+        assert not {"upsert_domain", "remove_domain"} & registered
+    finally:
+        factory.reset()

@@ -18,6 +18,8 @@ see `implement-plan.md` §6), unless the script has an offline mode noted below.
 | [`backfill.py`](backfill.py) | Bulk re-compile every captured source (after a compiler/prompt change) | Real backends |
 | [`eval_answer.py`](eval_answer.py) | Score answer quality against the golden set; push it to LangSmith; run experiments; export failures; promote corrections | `--offline` needs nothing; real backends otherwise; `--push/--langsmith/--promote-feedback` need `LANGSMITH_API_KEY` |
 | [`check_local_llm.py`](check_local_llm.py) | Diagnose a self-hosted vLLM / llama.cpp endpoint before (and after) flipping `config/ops.py`'s local routing on | `VLLM_*`/`LLAMACPP_*` in `.env`; a reachable server |
+| [`probe_domain_routing.py`](probe_domain_routing.py) | Phase 2: print the domain router's raw decision (domain, confidence, suggestion) per captured source without writing anything - the calibration tool for `DOMAIN_ROUTE_MIN_CONFIDENCE` | `--offline` needs nothing (fakes + fixture docs + a two-domain registry); real backends otherwise |
+| [`migrate_phase2.py`](migrate_phase2.py) | Phase 2: the one-time upgrade steps - build the keyword index from `raw/`, move the legacy cost ledger into partitioned keys, create registered domains' vector indexes | `--check` (exit 1 while something is to do) / `--apply`; `--offline` for a local tree |
 | [`probe_query_graph.py`](probe_query_graph.py) | Run one question through the query graph under one or a matrix of bound settings; check the code-enforced invariants; verify the LangSmith trace | `--offline` needs nothing; real backends otherwise; `--verify-trace` needs `LANGSMITH_TRACING=true` |
 
 ---

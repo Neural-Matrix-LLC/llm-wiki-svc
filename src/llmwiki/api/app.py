@@ -36,8 +36,9 @@ def create_app() -> FastAPI:
         version=__version__,
         summary="A compiled research knowledge base: immutable raw sources, an LLM-compiled wiki.",
         # The MCP app owns a session manager that has to be started and stopped
-        # with the process; handing FastAPI its lifespan is what does that.
-        lifespan=None if mcp_app is None else mcp_app.lifespan,
+        # with the process; the ingest worker (Phase 2) recovers owed work at
+        # start and drains at stop. One lifespan wraps both.
+        lifespan=_lifespan(None if mcp_app is None else mcp_app.lifespan),
     )
     app.include_router(router)
     # Replaces FastAPI's default 422 handler; see _validation_error.
@@ -50,6 +51,32 @@ def create_app() -> FastAPI:
 
     _mount_channels(app)
     return app
+
+
+def _lifespan(inner):  # type: ignore[no-untyped-def]
+    """Start/stop the ingest worker around the (optional) MCP lifespan."""
+    from contextlib import asynccontextmanager
+
+    @asynccontextmanager
+    async def lifespan(app: FastAPI):  # type: ignore[no-untyped-def]
+        from llmwiki import tools
+
+        try:
+            recovered = tools.recover_pending()
+            if recovered:
+                logger.info("ingest worker: recovered %d pending source(s)", len(recovered))
+        except Exception as exc:  # pragma: no cover - storage trouble must not stop the app
+            logger.warning("ingest worker: recovery skipped (%s: %s)", type(exc).__name__, exc)
+        try:
+            if inner is None:
+                yield
+            else:
+                async with inner(app):
+                    yield
+        finally:
+            tools.shutdown_worker()
+
+    return lifespan
 
 
 def _mount_channels(app: FastAPI) -> None:

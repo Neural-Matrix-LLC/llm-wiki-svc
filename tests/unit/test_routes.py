@@ -297,3 +297,121 @@ def test_feedback_forwards_to_tools_record_feedback(client, monkeypatch) -> None
     assert response.status_code == 200
     assert response.json() == {"ok": True, "feedback_id": "fb-1", "run_id": "run-1"}
     assert calls == [("run-1", 0.0, "cite 7b2f6aed523349f5-sample")]
+
+
+# --- Phase 2: domains over REST (plan §21.2 A1/A3, §21.7) ---------------------------------
+
+
+def test_domains_registry_is_general_only_until_one_is_registered(client) -> None:
+    response = client.get("/domains")
+    assert response.status_code == 200
+    assert [d["name"] for d in response.json()] == ["general"]
+
+
+def test_put_domain_needs_a_token_validates_the_name_and_registers(client) -> None:
+    assert client.put("/domains/ml", json={"description": "x"}).status_code == 401
+    assert client.put("/domains/Not%20Valid", json={}, headers=AUTH).status_code == 422
+    assert client.put("/domains/general", json={}, headers=AUTH).status_code == 422
+
+    created = client.put("/domains/ml-systems", json={"description": "GPU infra"}, headers=AUTH)
+    assert created.status_code == 200, created.text
+    assert created.json()["name"] == "ml-systems"
+    names = [d["name"] for d in client.get("/domains").json()]
+    assert names == ["general", "ml-systems"]
+
+
+def test_ingest_into_an_explicit_domain_compiles_there(client) -> None:
+    """End to end over REST: register, ingest with domain=, then read the domain's
+    manifest and page - and confirm general stayed empty."""
+    client.put("/domains/ml", json={"description": "Machine learning"}, headers=AUTH)
+
+    response = client.post(
+        "/ingest",
+        json={"text": "# Retrieval\n\nGrounding answers in retrieved documents.\n",
+              "domain": "ml"},
+        headers=AUTH,
+    )
+    assert response.status_code == 200, response.text
+    source_id = response.json()["source_id"]
+    status = client.get(f"/sources/{source_id}").json()
+    assert status["state"] == "done" and status["domain"] == "ml", status
+
+    ml_gists = client.get("/concepts", params={"domain": "ml"}).json()
+    assert ml_gists, "the domain's manifest holds the compiled pages"
+    assert client.get("/concepts").json() == [], "general's manifest was never written"
+
+    slug = next(g["slug"] for g in ml_gists if g["type"] == "concept")
+    page = client.get(f"/page/{slug}", params={"domain": "ml"})
+    assert page.status_code == 200 and "domain: ml" in page.text
+    assert client.get(f"/page/{slug}").status_code == 404, "not a general page"
+
+    # compile_update stays in the routed domain and is idempotent.
+    again = client.post(f"/compile/{source_id}", headers=AUTH).json()
+    assert again["domain"] == "ml" and again["reason"].startswith("source already compiled")
+
+
+def test_ingest_into_an_unknown_domain_is_a_404_and_captures_nothing(client) -> None:
+    response = client.post("/ingest", json={"text": "hello world", "domain": "nope"},
+                           headers=AUTH)
+    assert response.status_code == 404
+    assert client.get("/concepts").json() == []
+
+
+def test_upload_accepts_a_domain_form_field(client) -> None:
+    client.put("/domains/ml", json={}, headers=AUTH)
+    response = client.post(
+        "/upload",
+        files={"file": ("note.md", b"# Chunking\n\nSplit text into windows.\n", "text/markdown")},
+        data={"domain": "ml"},
+        headers=AUTH,
+    )
+    assert response.status_code == 200, response.text
+    status = client.get(f"/sources/{response.json()['source_id']}").json()
+    assert status["domain"] == "ml"
+
+
+def test_concepts_and_lint_reject_an_unknown_domain(client) -> None:
+    assert client.get("/concepts", params={"domain": "nope"}).status_code == 404
+    assert client.post("/lint", params={"domain": "nope"}, headers=AUTH).status_code == 404
+    report = client.post("/lint", headers=AUTH).json()
+    assert report["domains"] == ["general"]
+
+
+def test_delete_domain_409s_while_it_has_pages_then_removes_with_force(client) -> None:
+    client.put("/domains/ml", json={}, headers=AUTH)
+    client.post("/ingest", json={"text": "# Retrieval\n\nGrounding.\n", "domain": "ml"},
+                headers=AUTH)
+    assert client.delete("/domains/ml").status_code == 401
+    assert client.delete("/domains/ml", headers=AUTH).status_code == 409
+    assert client.delete("/domains/ml", params={"force": "true"}, headers=AUTH).status_code == 200
+    assert client.delete("/domains/ml", headers=AUTH).status_code == 404
+    assert [d["name"] for d in client.get("/domains").json()] == ["general"]
+
+
+def test_search_and_answer_take_a_domain_and_404_an_unknown_one(client) -> None:
+    client.put("/domains/ml", json={"description": "ML"}, headers=AUTH)
+    client.post("/ingest", json={"text": "# Paged attention\n\nKV cache blocks on the GPU.\n",
+                                 "domain": "ml"}, headers=AUTH)
+
+    bad = {"q": "paged attention", "domain": "nope"}
+    assert client.get("/search", params=bad).status_code == 404
+    assert client.get("/answer", params=bad).status_code == 404
+
+    hits = client.get("/search", params={"q": "paged attention", "domain": "ml"}).json()
+    assert hits and all(h["domain"] == "ml" for h in hits)
+    assert client.get("/search", params={"q": "paged attention", "domain": "general"}).json() == []
+
+    body = client.get("/answer", params={"q": "paged attention"}).json()
+    assert body["domains"] == ["general", "ml"], "policy all fans out"
+    assert "cost_usd" in body
+    scoped = client.get("/answer", params={"q": "paged attention", "domain": "ml"}).json()
+    assert scoped["domains"] == ["ml"]
+
+
+def test_synthesize_route_needs_a_token_and_404s_unknown_domains(client) -> None:
+    client.post("/ingest", json={"text": "# Chunking\n\nWindows over text.\n"}, headers=AUTH)
+    assert client.post("/synthesize/general").status_code == 401
+    assert client.post("/synthesize/nope", headers=AUTH).status_code == 404
+    body = client.post("/synthesize/general", headers=AUTH).json()
+    assert body["written"] is True and body["domain"] == "general"
+    assert client.get("/page/overview").status_code == 200

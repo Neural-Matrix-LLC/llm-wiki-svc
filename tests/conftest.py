@@ -65,6 +65,32 @@ def _isolate_query_tool_loop(monkeypatch) -> None:
     monkeypatch.setenv("AGENT_MAX_TOOL_CALLS", "0")
 
 
+@pytest.fixture(autouse=True)
+def _isolate_ingest_worker(monkeypatch) -> None:
+    """No test runs the threaded ingest worker unless it opts in.
+
+    Fourth instance of the pattern (Phase 2, plan §21.2 C3). ``WORKER_MODE=
+    inline`` makes ``tools.enqueue_source`` process in the caller, which is
+    what keeps ``TestClient``'s run-background-tasks-before-returning
+    semantics - and every route test written against them - deterministic.
+    ``tests/unit/test_worker.py`` opts back in with ``worker_mode="threads"``.
+    """
+    monkeypatch.setenv("WORKER_MODE", "inline")
+
+
+@pytest.fixture(autouse=True)
+def _isolate_hybrid_retrieval(monkeypatch) -> None:
+    """No test gets hybrid retrieval unless it opts in (Phase 2, plan §21.2 B1/X2).
+
+    ``LEXICAL_BACKEND=none`` keeps the retrieval seam dense-only - byte for
+    byte the Phase 0/1 path the wiki-first and citation tests were written
+    against. ``tests/unit/test_lexical.py`` and ``test_retrieval.py`` opt in
+    with ``lexical_backend="memory"`` (or a temp-dir ``sqlite``).
+    """
+    monkeypatch.setenv("LEXICAL_BACKEND", "none")
+    monkeypatch.setenv("RERANKER_BACKEND", "none")
+
+
 @pytest.fixture
 def settings(tmp_path) -> Settings:
     """Settings pinned to the offline backends and a per-test storage root."""
@@ -78,6 +104,9 @@ def settings(tmp_path) -> Settings:
         compile_max_pages=5,
         compile_candidate_pages=8,
         ingest_token_budget=60_000,
+        worker_mode="inline",
+        lexical_backend="none",
+        reranker_backend="none",
     )
 
 

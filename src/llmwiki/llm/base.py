@@ -12,6 +12,7 @@ from typing import Protocol, runtime_checkable
 from pydantic import BaseModel
 
 from llmwiki.models.plan import CostRecord
+from llmwiki.models.source import ImageInput
 
 
 class LLMResponse(BaseModel):
@@ -54,4 +55,31 @@ class LLMClient(Protocol):
         multi-provider router is active (design v1.4 §4.8.1, plan §19). Pass an
         explicit value only to override that configuration for one call.
         """
+        ...
+
+
+@runtime_checkable
+class VisionLLMClient(Protocol):
+    """Optional companion to :class:`LLMClient`: the same call shape, plus images.
+
+    Phase 2 (design v1.4 §4.10.4, plan §21.2 D1). A *separate* protocol so the
+    ``complete()`` contract above - the one other repositories and every test
+    double implement - is byte-identical: a text-only adapter simply does not
+    have ``describe``, and the per-op router refuses at startup to route
+    ``describe_image`` to one. Only the ingest pipeline's description step
+    calls this; the compiler never passes images.
+    """
+
+    def describe(
+        self,
+        *,
+        op: str,
+        system: str,
+        prompt: str,
+        images: list[ImageInput],
+        model: str | None = None,
+        max_tokens: int | None = None,
+        temperature: float | None = None,
+    ) -> LLMResponse:
+        """Run one completion over ``images`` plus ``prompt``; text out, cost accounted."""
         ...

@@ -18,7 +18,7 @@ import yaml
 
 from llmwiki.models.page import PageFrontMatter, WikiPage
 from llmwiki.storage.base import ObjectNotFound, ObjectStore
-from llmwiki.storage.layout import wiki_page
+from llmwiki.storage.layout import GENERAL, wiki_page
 
 logger = logging.getLogger(__name__)
 
@@ -66,19 +66,24 @@ def render_page(page: WikiPage) -> str:
         f"sources: [{', '.join(fm.sources)}]",
         f"updated: {(fm.updated or date.today()).isoformat()}",
         f"version: {fm.version}",
-        "---",
-        "",
     ]
+    # Phase 2 (plan §21.2 A7): written only for a non-general page, so every
+    # page of a pre-Phase-2 wiki renders byte-identically.
+    if fm.domain != GENERAL:
+        lines.append(f"domain: {fm.domain}")
+    lines += ["---", ""]
     return "\n".join(lines) + page.body.strip() + "\n"
 
 
-def read_page(store: ObjectStore, slug: str, page_type: str = "concept") -> WikiPage | None:
+def read_page(
+    store: ObjectStore, slug: str, page_type: str = "concept", domain: str = GENERAL,
+) -> WikiPage | None:
     """Load one page body. Returns ``None`` if it does not exist.
 
     Every call to this is a page-body read, which is exactly what
     ``test_compiler_no_full_scan`` counts - keep them deliberate.
     """
-    key = wiki_page(slug, page_type)
+    key = wiki_page(slug, page_type, domain)
     try:
         raw = store.get(key).decode("utf-8")
     except ObjectNotFound:
@@ -100,9 +105,10 @@ def write_page(store: ObjectStore, page: WikiPage, expected_version: int | None 
     ``expected_version`` is the version the caller read.  If the stored page has
     moved on, the write is refused rather than clobbering the other writer.
     """
-    key = wiki_page(page.front_matter.slug, page.front_matter.type)
+    fm = page.front_matter
+    key = wiki_page(fm.slug, fm.type, fm.domain)
     if expected_version is not None:
-        current = read_page(store, page.front_matter.slug, page.front_matter.type)
+        current = read_page(store, fm.slug, fm.type, fm.domain)
         stored_version = current.front_matter.version if current else 0
         if stored_version != expected_version:
             raise VersionConflict(

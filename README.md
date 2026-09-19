@@ -126,6 +126,113 @@ llmwiki feedback <run_id> --score 0 --correction "…"   # file a correction; --
 evaluation, the correction loop) have the details; `docs/phase1-testing-guide.md`
 §5 is the step-by-step.
 
+### Querying the wiki with curl
+
+`/answer` is a **`GET`** with `q` (the question) and `k` (retrieval hits,
+default 5) as query parameters — no body, no bearer token. `curl -G` sends the
+`--data-urlencode` pairs as the query string, so `?`, `&` and spaces in the
+question are safe. A `POST /answer` gets `405`; a `q` passed through `-d`
+without `-G` gets `422`.
+
+```bash
+export WHOST_IP=127.0.0.1
+export WHOST_PORT=8010          # API_PORT in .env; 8011 for `docker compose --profile dev`
+
+# Basic question
+curl -s -G "http://$WHOST_IP:$WHOST_PORT/answer" \
+  --data-urlencode "q=What does the incremental wiki compiler do to avoid full-wiki scans?" \
+  --data-urlencode "k=5"
+
+# Pretty-printed
+curl -s -G "http://$WHOST_IP:$WHOST_PORT/answer" \
+  --data-urlencode "q=Summarize what the wiki knows about prompt caching" | jq .
+
+# Just the answer text and its sources
+curl -s -G "http://$WHOST_IP:$WHOST_PORT/answer" \
+  --data-urlencode "q=Who proposed the LLM Wiki pattern?" \
+  | jq -r '.text, "", "Sources:", (.citations[] | "  - \(.title) (\(.source_id))")'
+
+# Did the query graph do what you expect? (tool calls, fallback, cited sources)
+curl -s -G "http://$WHOST_IP:$WHOST_PORT/answer" \
+  --data-urlencode "q=Who proposed the LLM Wiki pattern?" \
+  | jq '{steps, used_rag_fallback, citations: [.citations[].source_id], external_refs}'
+```
+
+The response is an `Answer` (`src/llmwiki/models/plan.py`):
+
+```json
+{
+  "text": "Prompt caching lets ... [1][2]",
+  "citations": [
+    {"source_id": "src_01j8...", "title": "Anthropic prompt caching docs", "url": "https://...", "slug": "prompt-caching"}
+  ],
+  "used_rag_fallback": false,
+  "steps": [ {"tool": "search_wiki", "args": {"q": "prompt caching"}, "...": "..."} ],
+  "context": "...the wiki pages / chunks the answer was generated from...",
+  "external_refs": [],
+  "run_id": "3f2c...-..."
+}
+```
+
+- `citations` always resolve to real objects under `raw/`.
+- `external_refs` are web-search results (only when `AGENT_WEB_SEARCH_POLICY`
+  allows them) and are never citations.
+- `run_id` is non-null only with `LANGSMITH_TRACING=true`; it is the handle
+  `POST /feedback` takes — and that route *is* a POST and *does* need the token:
+
+```bash
+export INGEST_API_TOKEN=...     # same value as in .env
+
+RUN_ID=$(curl -s -G "http://$WHOST_IP:$WHOST_PORT/answer" \
+  --data-urlencode "q=Who proposed the LLM Wiki pattern?" | jq -r .run_id)
+
+curl -s -X POST "http://$WHOST_IP:$WHOST_PORT/feedback" \
+  -H "Authorization: Bearer $INGEST_API_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d "{\"run_id\": \"$RUN_ID\", \"score\": 1.0, \"correction\": \"Correct - Andrej Karpathy.\"}"
+```
+
+`/feedback` answers `409` when tracing is off (there is no run to attach to).
+Connection refused → check `API_HOST`/`API_PORT` in `.env`, or
+`curl -s http://$WHOST_IP:$WHOST_PORT/healthz | jq`.
+
+### Phase 2: domains, hybrid search, usage, images
+
+Landed 2026-09-19 (design v1.4 §4.10, `docs/implement-plan-v1.4.md` §21,
+technical document §12). Everything is behaviour-compatible under its
+default switch; an existing deployment needs no data migration.
+
+```bash
+# Domains: a curated registry; `general` is the wiki you already have.
+llmwiki domains add ml-systems --description "Training/serving infra, GPU scheduling"
+llmwiki domains list
+llmwiki ingest --url https://example.org/paper --domain ml-systems     # explicit
+llmwiki ingest --url https://example.org/post                          # routed (one cheap call)
+llmwiki ask "how does paged attention work?" --domain ml-systems       # scoped
+llmwiki ask "how does paged attention work?"                           # QUERY_DOMAIN_POLICY=all
+llmwiki synthesize --all                                               # per-domain overview pages
+
+# Hybrid retrieval (on by default): build the keyword index once, then it keeps itself.
+llmwiki lexical rebuild
+python scripts/migrate_phase2.py --check    # the one-time upgrade steps, or --apply
+
+# Cost: usage, alerts, the hard cap.
+llmwiki usage --month 2026-09
+curl -s -H "Authorization: Bearer $INGEST_API_TOKEN" http://localhost:8000/usage | jq .by_domain
+open "http://localhost:8000/dashboard?token=$INGEST_API_TOKEN"
+# COST_ALERT_DAILY_USD / COST_ALERT_MONTHLY_USD notify (log or Telegram);
+# COST_HARD_CAP_MONTHLY_USD pauses processing of new sources - capture and answers keep working.
+llmwiki worker                               # what is queued, in flight, parked
+
+# Images and scans: text-first vision, off by default.
+VISION_MODE=auto llmwiki ingest --file whiteboard.png                  # describe_image must route to a vision model
+```
+
+Over MCP the same shows up as an optional `domain` argument on `search_wiki`,
+`get_page`, `list_concepts` and `ingest_source`, plus one new read-only tool,
+`list_domains`. A Telegram caption/text starting with `#ml-systems`, or an
+email subject starting with `[ml-systems]`, files the source there.
+
 ## Docker
 
 ```bash

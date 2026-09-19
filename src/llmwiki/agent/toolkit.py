@@ -50,37 +50,53 @@ class ToolResult:
 def build_tools(agent: QueryAgent) -> list[BaseTool]:
     """Construct the tool set for one agent. ``search_web`` only if a searcher exists."""
 
-    def search_wiki(query: str, k: int = 5) -> ToolResult:
+    def _scopes(domain: str) -> list:
+        # A domain the model names is used as given (unknown → the tool says
+        # so, plan §21.2 A6); an empty string means the run's own scopes. A
+        # plain ``str`` (not Optional) keeps the action schema a simple enum-
+        # free string field that small models fill correctly.
+        if domain:
+            from llmwiki.wiki.domains import DomainScope, require_domain
+
+            return [DomainScope(require_domain(agent.registry, domain))]
+        return list(agent._run_scopes)
+
+    def search_wiki(query: str, k: int = 5, domain: str = "") -> ToolResult:
         """Search the compiled wiki (page gists) for a different phrasing of the question.
-        Returns the matching pages' bodies."""
+        Returns the matching pages' bodies. `domain` restricts the search to one domain."""
         vector = agent.embedder.embed([query])[0]
-        hits = agent.vectors.query(agent.settings.vectorize_gists_index, vector, k=k)
+        hits = agent.retrieve_layer("gists", query, vector, _scopes(domain), k)
         block, citations = agent._build_context(hits, [])
         if not block:
             return ToolResult(observation="No wiki page matched that query.")
         return ToolResult(observation=block, context_block=block, citations=citations)
 
-    def search_chunks(query: str, k: int = 5) -> ToolResult:
+    def search_chunks(query: str, k: int = 5, domain: str = "") -> ToolResult:
         """Search the raw source chunks (verbatim text) for a specific figure, quote or
-        detail that a synthesized wiki page would not preserve."""
+        detail that a synthesized wiki page would not preserve. `domain` restricts it."""
         vector = agent.embedder.embed([query])[0]
-        hits = agent.vectors.query(agent.settings.vectorize_chunks_index, vector, k=k)
+        hits = agent.retrieve_layer("chunks", query, vector, _scopes(domain), k)
         block, citations = agent._build_context([], hits)
         if not block:
             return ToolResult(observation="No source chunk matched that query.")
         return ToolResult(observation=block, context_block=block, citations=citations)
 
-    def get_page(slug: str) -> ToolResult:
+    def get_page(slug: str, domain: str = "general") -> ToolResult:
         """Read one wiki page in full by its slug - use it to follow a [[wikilink]] seen in
-        an already-retrieved page."""
-        manifest = gists_mod.load_gists(agent.store)
+        an already-retrieved page. `domain` is the domain the linking page was in."""
+        from llmwiki.wiki.domains import require_domain
+
+        domain = require_domain(agent.registry, domain or None)
+        manifest = gists_mod.load_gists(agent.store, domain)
         gist = manifest.get(slug)
-        page = read_page(agent.store, slug, gist.type if gist else "concept")
+        page = read_page(agent.store, slug, gist.type if gist else "concept", domain)
         if page is None:
             return ToolResult(observation=f"No wiki page with slug {slug!r}.")
-        block = f"## Wiki page [[{slug}]]\n\n{page.body}"
+        where = "" if domain == "general" else f" (domain: {domain})"
+        block = f"## Wiki page [[{slug}]]{where}\n\n{page.body}"
         citations = [
-            Citation(source_id=source_id, title=page.front_matter.title, slug=slug)
+            Citation(source_id=source_id, title=page.front_matter.title, slug=slug,
+                     domain=domain)
             for source_id in page.front_matter.sources
         ]
         return ToolResult(observation=block, context_block=block, citations=citations)

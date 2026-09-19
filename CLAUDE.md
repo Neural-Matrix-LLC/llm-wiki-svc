@@ -20,16 +20,39 @@ landed 2026-09-16 (workstream D — design v1.4 §4.9, plan §20, technical
 document §3.3 and §10). See `HISTORY.md`'s 2026-09-11, 2026-09-14 and
 2026-09-16 entries.
 
+Phase 2 (KB design §5) is **implemented** (designed 2026-09-18, landed
+2026-09-19 in milestones P2-1 … P2-Z; design v1.4 §4.10, plan §21,
+technical document §12, `docs/phase2-testing-guide.md`). In one paragraph:
+**domains** — `general` *is* the Phase 0/1 layout, other domains nest under
+`wiki/domains/{d}/` with their own manifest and `{base}-{d}` indexes; a
+curated registry (`wiki/domains.py`, `llmwiki domains …`, `/domains`,
+seventh MCP tool `list_domains`); one `route_domain` call per source only
+when >1 domain is registered; `QUERY_DOMAIN_POLICY=all|routed|general`;
+scheduled per-domain `synthesize_domain` overview pages. **Hybrid
+retrieval** — `lexical/` (SQLite FTS5 default, `LEXICAL_BACKEND=none` =
+dense-only), RRF fusion and `rerank/` (Workers AI bge-reranker) in
+`agent/retrieval.py`, with the wiki-confidence gate on `dense_score`.
+**Cost** — a day×writer ledger (`wiki/ledger.py`, `COST_WRITER`), query-side
+metering (`llm/metering.py`), `GET /usage`, `/dashboard`, alerts
+(`wiki/alerts.py`, `notify/`) and a hard cap that pauses processing only;
+the ingest worker (`pipeline/worker.py`: a lock per domain, pending markers
+recovered at startup). **Multimodal** — `VisionLLMClient.describe()` as a
+separate optional protocol (`complete()` untouched), `pipeline/describe.py`
+with the `raw/{id}/vision.json` cache, `extractors/image.py`, PDF
+page-as-image selection; `VISION_MODE=off` by default. `KNOWN_OPS` is 10.
+Upgrading a deployment is `scripts/migrate_phase2.py --check|--apply`.
+
 The query agent is a bounded LangGraph loop over the existing `LLMClient`
 (`src/llmwiki/agent/graph.py`): `AGENT_MAX_TOOL_CALLS` (default 4; `0` = the
 pre-graph single call, which is what the unit suite pins via an autouse
 fixture), a shared context budget and a recursion limit are all code-enforced.
 `search_web` is offered only by `AGENT_WEB_SEARCH_POLICY` and its results are
-never citations. Two more ops exist (`agent_step`, `judge_answer`) — a new
+never citations. Five more ops exist (`agent_step`, `judge_answer`, `route_domain`,
+`synthesize_domain`, `describe_image` — the last via `describe()`) — a new
 `complete(op=...)` call site needs a `config/ops.py` row and the drift guard
 in `tests/unit/test_routing_config.py` will say so.
 
-`pytest` runs 459 unit tests with no network access (a handful skip when a
+`pytest` runs 714 unit tests with no network access (a handful skip when a
 provider extra is absent, environment-dependent); `scripts/smoke_flow.py
 --offline` walks the whole flow end to end with fake adapters,
 `scripts/eval_answer.py --offline` scores the shipped golden set the same way
@@ -88,7 +111,7 @@ dies inside them under a `3.11` pin before reaching any project file.
 `requires-python` stays `>=3.11` — the *library* supports newer, the *dev env*
 is pinned.
 
-Five tests are load-bearing and must not be weakened to make a change pass:
+Eight tests are load-bearing and must not be weakened to make a change pass:
 
 - `tests/unit/test_layering.py` — the L0–L5 import boundaries. If a new import
   fails it, move the code, do not widen the rule.
@@ -105,10 +128,25 @@ Five tests are load-bearing and must not be weakened to make a change pass:
 - `tests/unit/test_agent_graph.py::test_tool_loop_is_bounded_by_agent_max_tool_calls`
   — guards design §4.9's cost bound. A question's LLM spend must be set by
   configuration, never by the model's appetite for another tool call.
+- `tests/unit/test_domains.py::test_general_only_wiki_is_byte_identical_to_phase1`
+  — guards design §4.10's organising principle: with nothing registered, the
+  compiler writes exactly what the Phase 0/1 compiler wrote (fixture under
+  `tests/fixtures/phase1_general_wiki/`, generated from the pre-Phase-2
+  code). If it fails, `general`'s layout has drifted; do not regenerate the
+  fixture to make it pass.
+- `tests/unit/test_domains.py::test_compile_never_loads_another_domains_manifest`
+  — the per-domain form of the no-full-scan guard: compiling into one domain
+  reads that domain's manifest and no other, so per-ingest cost tracks the
+  domain, never the corpus.
+- `tests/unit/test_query_scopes.py::test_query_reads_only_the_manifests_of_hit_domains`
+  — the query-side twin: a question loads the manifests of the domains its
+  hits came from and no other, however many are registered.
 
-Three autouse fixtures in `tests/conftest.py` isolate every test from this
-checkout's real routing table, `skills/` catalog and tool loop; a test that
-wants one opts in explicitly. The shared `settings` fixture reads the real
+Five autouse fixtures in `tests/conftest.py` isolate every test from this
+checkout's real routing table, `skills/` catalog, tool loop, threaded ingest
+worker (`WORKER_MODE=inline`) and hybrid retrieval (`LEXICAL_BACKEND=none`,
+`RERANKER_BACKEND=none`);
+a test that wants one opts in explicitly. The shared `settings` fixture reads the real
 `.env`, so anything that reaches `factory.llm_client` must build its own
 `Settings(_env_file=None, llm_provider="fake", ...)` (`test_routes.client`,
 `test_eval.offline`).
@@ -207,3 +245,8 @@ object-storage-native vector options.
 - Keep `.env.example` in sync with every env var the code reads; never commit `.env`.
 - Unit tests must not make real API calls (mock the LLM/vector/storage clients); mark
   integration tests with `@pytest.mark.integration`.
+- **After a coding task is done, write a code review plan** (added 2026-09-19): a `docs/`
+  document for developers / engineers / team leads describing how the code was written in
+  that session — process, what changed and why, where the risk is, what to review first,
+  per-area checklists, deviations recorded in `HISTORY.md`, and what was not verified live.
+  It is part of the same commit. Precedent: `docs/phase2-code-review-plan.md`.

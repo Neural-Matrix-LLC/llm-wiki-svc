@@ -63,6 +63,8 @@ class QueryState(TypedDict, total=False):
 
     query: str
     k: int
+    # Phase 2: the domains this answer searches (plan §21.2 A6), by name.
+    scopes: list[str]
     # retrieve
     wiki_hits: list[SearchHit]
     chunk_hits: list[SearchHit]
@@ -104,17 +106,26 @@ def build_query_graph(agent: QueryAgent) -> CompiledStateGraph:
     # --- nodes ---------------------------------------------------------------
 
     def retrieve(state: QueryState) -> dict[str, Any]:
-        """The pre-graph wiki-first retrieval, verbatim (D3)."""
+        """The pre-graph wiki-first retrieval, verbatim (D3), over the run's scopes.
+
+        The gate reads the dense cosine (``gate_score``), so hybrid retrieval
+        and reranking (P2-B) change *which* pages are read, never *whether*
+        the chunk fallback runs.
+        """
+        from llmwiki.agent.retrieval import gate_score
+        from llmwiki.wiki.domains import DomainScope
+
         query, k = state["query"], state.get("k", 5)
+        scopes = [DomainScope(name) for name in state.get("scopes") or []] or agent._run_scopes
         vector = agent.embedder.embed([query])[0]
-        wiki_hits = agent.vectors.query(settings.vectorize_gists_index, vector, k=k)
-        strong = [hit for hit in wiki_hits if hit.score >= agent.wiki_confidence]
+        wiki_hits = agent.retrieve_layer("gists", query, vector, scopes, k)
+        strong = [hit for hit in wiki_hits if gate_score(hit) >= agent.wiki_confidence]
 
         used_fallback = False
         chunk_hits: list[SearchHit] = []
         if not strong:
             used_fallback = True
-            chunk_hits = agent.vectors.query(settings.vectorize_chunks_index, vector, k=k)
+            chunk_hits = agent.retrieve_layer("chunks", query, vector, scopes, k)
 
         context, citations = agent._build_context(strong or wiki_hits, chunk_hits)
         return {
@@ -160,7 +171,8 @@ def build_query_graph(agent: QueryAgent) -> CompiledStateGraph:
             policy=settings.agent_web_search_policy,
             max_web=settings.agent_max_web_searches,
         )
-        prompt = _render_step_prompt(state, offered, settings.agent_max_tool_calls)
+        prompt = _render_step_prompt(state, offered, settings.agent_max_tool_calls,
+                                     registry=agent.registry)
         schema = toolkit.action_schema(offered)
         valid = {t.name for t in offered} | {toolkit.ANSWER_ACTION}
         action: Any = None
@@ -289,6 +301,7 @@ def build_query_graph(agent: QueryAgent) -> CompiledStateGraph:
                 steps=list(state.get("steps", [])),
                 context=state.get("context", ""),
                 external_refs=list(state.get("external_refs", [])),
+                domains=list(state.get("scopes") or []),
             )
         }
 
@@ -329,7 +342,9 @@ def build_query_graph(agent: QueryAgent) -> CompiledStateGraph:
     return graph.compile()
 
 
-def _render_step_prompt(state: QueryState, offered: list, max_calls: int) -> str:
+def _render_step_prompt(
+    state: QueryState, offered: list, max_calls: int, registry: Any = None,
+) -> str:
     """What the model sees when deciding the next action."""
     steps = state.get("steps", [])
     made = state.get("tool_calls_made", 0)
@@ -340,9 +355,29 @@ def _render_step_prompt(state: QueryState, offered: list, max_calls: int) -> str
     context = state.get("context", "")
     return (
         f"# Question\n\n{state['query']}\n\n"
-        f"# Evidence retrieved so far ({len(context)} chars; "
+        + _render_domains(state, registry)
+        + f"# Evidence retrieved so far ({len(context)} chars; "
         f"{state.get('budget_left', 0)} chars of budget left)\n\n{context}\n\n"
         f"# Tool calls made so far ({made} of {max_calls})\n\n{log}\n\n"
         f"# Tool notes (results that added no evidence)\n\n{notes}\n\n"
         f"# Available actions\n\n{toolkit.describe_tools(offered)}"
+    )
+
+
+def _render_domains(state: QueryState, registry: Any) -> str:
+    """Tell the model which domains exist and which this run is searching (Phase 2).
+
+    Omitted entirely for a general-only registry, so the pre-Phase-2 prompt is
+    unchanged there.
+    """
+    if registry is None or registry.is_general_only:
+        return ""
+    searching = ", ".join(state.get("scopes") or ["general"])
+    listing = "\n".join(
+        f"- {name}: {registry.domains[name].description or '(no description)'}"
+        for name in registry.names() if name != "general"
+    )
+    return (
+        f"# Domains\n\nSearching: {searching}. Registered domains (pass `domain` to a search "
+        f"tool to look in one specifically; `general` holds everything else):\n{listing}\n\n"
     )

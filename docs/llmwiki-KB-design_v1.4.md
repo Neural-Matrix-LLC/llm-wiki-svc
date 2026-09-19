@@ -1,7 +1,7 @@
 # LLM Wiki Knowledge Base — Design Document
 
-**Version:** 1.6  
-**Date:** 2026-09-16  
+**Version:** 1.7  
+**Date:** 2026-09-18  
 **Status:** Draft for team evaluation  
 **Purpose:** Cost-effective, cloud-hosted, multimodal research knowledge base inspired by Andrej Karpathy’s LLM Wiki pattern, scaled for large volumes of PDFs, websites, blogs, YouTube videos, papers, images, and webpages.  
 **Updates:**  
@@ -11,6 +11,7 @@
 - 1.4: Redesigned Architecture Diagram to clearly separate Core Wiki Package, Shareable LLM Layer, Processing, and Interface layers (aligns with 4.6 Hybrid + 4.7).  
 - 1.5: Added Section 4.8 — Application-Specific LLM Routing (multi-provider credentials + per-op model routing, deliberately kept *outside* §4.7's shareable, stable `LLMConfig` contract) and Agent Skill Invocation (the five compiler/query prompts become real SKILL.md-format files; the query agent — not the compiler — gains genuine runtime skill selection). Implementation detail in `implement-plan-v1.4.md` §19.
 - 1.6: Added Section 4.9 — Query-Agent Graph, External Search & Evaluation Loop (Phase 1-D): the query agent becomes a bounded LangGraph ReAct loop over the existing `LLMClient`, an optional policy-gated web-search tool whose results are never citations, a LangSmith answer-quality golden set with deterministic + LLM-judge evaluators, and a defined correction loop (feedback endpoint, failure export, promotion). Implementation detail in `implement-plan-v1.4.md` §20. Open question 10 answered.
+- 1.7: Added Section 4.10 — Phase 2, Scaled Research Platform: domain partitioning where `general` *is* the Phase 0/1 layout and other domains nest beside it (per-domain manifests, indexes and vector indexes; a curated registry; one routing call per source), hybrid retrieval (SQLite FTS5 lexical index + reciprocal-rank fusion + reranker, with the wiki-confidence gate kept on the dense score), a partitioned cost ledger with query-side cost, alerts and a hard cap that pauses processing but never capture or queries, a per-domain serialized ingest worker, and text-first selective multimodal through a separate optional vision protocol. Section 4.2, 4.4 and 4.6 annotated; `list_domains` becomes the seventh canonical tool. Implementation design in `implement-plan-v1.4.md` §21. Custom mobile app deferred.
 
 ---
 
@@ -221,6 +222,13 @@ External (web) search is **not** a retrieval index: it is a query-time *tool* th
 after the local retrieval, whose results are shown as external references and never enter the
 citation set (Section 4.9).
 
+From Phase 2 (Section 4.10) "hybrid" also carries its usual retrieval meaning: a **lexical index**
+(SQLite FTS5, a derived index rebuildable from `raw/`) sits beside the dense one, the two lists are
+fused by reciprocal rank, and a reranker reorders the fused pool. The chosen vector store does not
+need native hybrid support — the lexical half is local and the dense half stays wherever the table
+above put it. The wiki-first / chunk-fallback decision keeps reading the dense cosine score, so the
+choice of lexical backend or reranker never changes *whether* the fallback runs, only *what* is read.
+
 ### 4.3 LLM Strategy
 
 | Approach                  | Use Case                          | Cost Impact      | Quality          |
@@ -238,6 +246,10 @@ Local models (Qwen3 8B/14B class, Llama 3.1/3.3 8B, strong embeddings) can cut t
 - Delta / incremental updates (create or patch affected pages only).
 - Two-phase plan-then-generate (cheap model plans, stronger model executes).
 - Scheduled global lint / synthesis jobs (not on every ingest).
+- **Phase 2 (Section 4.10):** the "whole wiki" the compiler may consider through gists is bounded by
+  *domain* — one gist manifest, one index page and one pair of vector indexes per domain, so the
+  per-ingest read is proportional to the domain, not the corpus. The scheduled synthesis job becomes
+  concrete as a bounded per-domain overview page.
 
 ### 4.5 Storage
 
@@ -270,7 +282,7 @@ Making the knowledge base **sharable** (personal use → small team → multi-us
 | **Mobile capture integration**  | Indirect (bot or webhook still needed)                                                                 | Direct (webhook endpoints, signed upload URLs)                                    | Not applicable                                                                   | Direct via FastAPI                                            |
 | **Long-term maintainability**   | Good if tools stay stable; protocol still evolving                                                     | Excellent                                                                          | Excellent for core logic                                                         | Excellent                                                     |
 | **Best fit phase**              | Phase 0 – early Phase 1 (personal / agent-first)                                                       | Phase 1 – Phase 3 (team → product)                                                | All phases (as the shared core)                                                  | All phases (recommended path)                                 |
-| **Typical tools exposed**       | `search_wiki`, `get_page`, `ingest_source`, `compile_update`, `list_concepts`, `lint_wiki`             | Same capabilities + `/upload`, `/webhooks/ingest`, `/auth`, admin endpoints       | Same functions callable in Python                                                | All of the above                                              |
+| **Typical tools exposed**       | `search_wiki`, `get_page`, `ingest_source`, `compile_update`, `list_concepts`, `lint_wiki` (+ `list_domains` from Phase 2, Section 4.10) | Same capabilities + `/upload`, `/webhooks/ingest`, `/auth`, admin endpoints       | Same functions callable in Python                                                | All of the above                                              |
 
 #### Recommended Approach: Hybrid  
 *(See Architecture Diagram in §2 — boxes labeled **Core Wiki Package** and **Interface Layer**.)*
@@ -286,7 +298,7 @@ Making the knowledge base **sharable** (personal use → small team → multi-us
 
 3. **Add an MCP server layer on top** (also in `Interface Layer`)  
    Convert the same core functions / FastAPI routes into MCP tools.  
-   Agents can then connect with almost zero integration effort and use tools such as `search_wiki`, `get_page`, `ingest_source`, `compile_update`, `list_concepts`, etc.  
+   Agents can then connect with almost zero integration effort and use tools such as `search_wiki`, `get_page`, `ingest_source`, `compile_update`, `list_concepts`, etc. (Phase 2 adds exactly one read-only tool, `list_domains`, because an agent cannot scope a search to a domain it cannot discover — Section 4.10.)  
    FastMCP offers solid `from_fastapi()` support and can also mount an MCP server inside a FastAPI app, so both interfaces can live in one process.
 
 #### Why this combination wins
@@ -615,6 +627,149 @@ answered: **soft** — `langsmith` is imported function-locally and only where a
 made; it happens to be always installed because `langchain-core` depends on it, and the docs say so
 rather than pretend otherwise.
 
+---
+
+### 4.10 Phase 2 — Scaled Research Platform (domains · hybrid retrieval · cost · multimodal)
+
+*(New in 1.7. Implementation design in `implement-plan-v1.4.md` §21. This section states the
+architectural decisions and the reasoning; §21 has the key layout, module map, milestones and tests.)*
+
+Phase 2's success criterion (§5) is *hundreds of thousands of chunks without linear cost explosion*.
+That is a statement about the Phase 1 code, so the design starts from the five places in it whose
+cost grows with corpus size, and hangs the four feature bullets on the structure that removes them:
+
+| Grows with corpus today | Removed by |
+|---|---|
+| One gist manifest (`wiki/_meta/gists.json`) loaded whole on every compile, query and listing | one manifest **per domain**; a query loads only the manifests of the domains its hits came from |
+| `wiki/index.md` re-rendered from the whole manifest on every compile | one index per domain; the root index lists domains from the registry alone |
+| One growing cost ledger, read-modify-written per compile and read whole to summarise | ledger partitioned by day and by writing process; a summary reads one month |
+| Concurrent ingests share those files with no serialization | a per-domain serialized ingest worker, no broker |
+| Dense-only retrieval: the agent reads the top-*k* by cosine alone | lexical index + rank fusion + reranker over a wider pool |
+
+Two guarantees are carried through unchanged: the compiler never scans a wiki (§4.4 — now bounded by
+domain rather than by corpus), and every citation resolves to an object under `raw/` (§4.9).
+
+#### 4.10.1 Domains: partitioning, routing, synthesis
+
+```mermaid
+flowchart LR
+    subgraph wiki["wiki/"]
+        G["general  (= the Phase 0/1 layout, verbatim)<br/>concepts/ entities/ sources/ index.md _meta/gists.json"]
+        D1["domains/ml-systems/<br/>concepts/ entities/ sources/ overview.md index.md _meta/gists.json"]
+        D2["domains/&lt;d&gt;/ …"]
+        R["_meta/domains.json  (curated registry)"]
+        I["index.md  (+ '## Domains' from the registry)"]
+    end
+    subgraph vec["vector + lexical indexes"]
+        V0["llmwiki-gists · llmwiki-chunks"]
+        V1["llmwiki-gists-ml-systems · llmwiki-chunks-ml-systems"]
+    end
+    G --- V0
+    D1 --- V1
+```
+
+- **`general` is not a new domain; it is the existing layout under a name.** Every key, manifest and
+  index name of `general` is exactly what Phase 1 wrote. Other domains nest beside it
+  (`wiki/domains/{d}/…`, indexes `{base}-{d}`). Consequences: no data migration for an existing
+  corpus, the cost-guard tests stay literally untouched, and "a general-only wiki behaves exactly as
+  before" is a property of the layout rather than something to test around.
+- **Vectors partition by index, not by a metadata filter.** The `VectorStore` protocol already takes
+  the index name per call; a `domain` metadata filter would have required re-upserting every existing
+  vector (Vectorize only filters vectors inserted after the metadata index exists) and would put a
+  filter on every query. The price is that moving a source between domains is a re-embed plus a
+  recompile — acceptable for a curated registry.
+- **Domains are a curated registry, never auto-created.** `wiki/_meta/domains.json` holds
+  `name — description`; it is written only by an administrator (CLI/REST) and only read by the
+  compiler, router and query path. A source that fits nothing lands in `general` with a recorded
+  `suggested_domain`; accepting a suggestion is a human act.
+- **Routing is one call per source, or none.** Between extraction and embedding: an explicit
+  `domain=` at capture wins (recorded immutably on the source's metadata); a registry containing only
+  `general` makes no call; otherwise one `route_domain` call over the title and the head of the
+  extracted text, persisted to `raw/{id}/routing.json` (derived and rewritable, like
+  `extracted.md`), so recompiles never route again. The single-domain wiki therefore pays nothing.
+- **Query scope is explicit, or a policy — never a hidden LLM call.** `domain=` on any surface wins;
+  otherwise `QUERY_DOMAIN_POLICY` is `all` (default: fan-out across registered domains, no model call),
+  `routed` (one `route_domain` call picks a few) or `general`. With one domain all three are today's
+  exact call sequence. The query graph's tools accept a `domain` argument and the agent-step prompt
+  lists the domains, so the model *may* narrow.
+- **Slugs are unique within a domain.** Hits, citations and page front matter carry `domain`; a
+  `general` page renders byte-identically because the field is omitted when it is the default.
+- **"Higher-quality synthesis" is a scheduled, bounded job.** `synthesize_domain` reads at most
+  `SYNTHESIS_MAX_PAGES` of a domain's most-sourced pages plus its manifest and (re)writes one
+  `overview.md` — the concrete form of §4.4's "scheduled synthesis". It never runs on ingest.
+- **`list_domains` is the seventh canonical tool** (§4.6). Everything else is an optional `domain`
+  parameter on the tools that exist.
+
+#### 4.10.2 Hybrid retrieval and reranking
+
+```mermaid
+flowchart LR
+    Q([question]) --> E[embed]
+    E --> Dg["dense · gists index<br/>(per scope)"]
+    Q --> Lg["lexical · gists FTS5<br/>(per scope)"]
+    Dg & Lg --> F1["RRF fuse (K=60)"] --> R1["rerank ≤ 40"] --> W["wiki hits<br/>dense_score kept"]
+    W -->|"max dense_score ≥ WIKI_CONFIDENCE"| C1[context]
+    W -->|weak| Dc["dense · chunks"] & Lc["lexical · chunks"] --> F2[RRF] --> R2[rerank] --> C1
+```
+
+- **The lexical index is derived, local and shaped like the vector store.** A `LexicalIndex`
+  protocol with the same three methods keyed by the same index *name*, backed by SQLite FTS5 — one
+  file per index under the service's data directory — rebuildable from `raw/*/extracted.md` and the
+  manifests. No new service, no new credential; a missing file serves nothing and warns.
+- **Fusion is reciprocal-rank; rerank sits after fusion, inside each layer.** Wiki-first stays a
+  code guarantee: the gists layer is fused and reranked first, the chunk layer only on fallback. The
+  reranker (`Reranker` protocol; Workers AI `bge-reranker-base` on the same Cloudflare credentials,
+  plus `fake`/`none`) reads gist and chunk *metadata text*, so it adds no page reads, and its input
+  is capped by configuration. A reranker failure falls back to the fused order.
+- **The wiki-confidence gate keeps reading the dense cosine score.** `SearchHit.score` becomes the
+  last stage's score; the raw cosine survives as `dense_score`, and the fallback decision reads it.
+  Hybrid and rerank change *which* pages are read, not *whether* the fallback runs — the two
+  wiki-first tests from Phase 0 keep their meaning. With lexical and rerank both `none`, hits pass
+  through unchanged.
+
+#### 4.10.3 Cost: ledger, usage, alerts, hard cap, worker
+
+- **Every model call is recorded, tagged by domain and kind.** The ledger moves to
+  `wiki/_meta/cost/{YYYY-MM}/{DD}-{writer}.jsonl`: separate processes (the API, cron jobs, the CLI)
+  never share a key, so read-modify-write is safe without coordination, and a summary lists one month
+  prefix. Query-side cost — the gap noted in §4.9 — is captured by a metering wrapper around the LLM
+  client and reported as `Answer.cost_usd`; the legacy single file is read through until migrated.
+- **Alerts are evaluated on every append; a hard cap pauses processing, never capture or queries.**
+  Daily and monthly USD thresholds log and, if configured, message the existing Telegram bot, once per
+  period. An optional monthly hard cap parks post-capture work (`paused` state): sources still land
+  in `raw/`, search and answer keep working over what is indexed, and the worker drains at month
+  rollover or when the cap is raised. Query spend counts toward the totals but is never blocked.
+- **Usage surfaces are read-only and cheap:** `GET /usage`, `llmwiki usage` and a server-rendered
+  `/dashboard` (no JavaScript, no new dependency), broken down by domain, kind, op, model, day and
+  source.
+- **Concurrency is an in-process worker, serialized per domain.** A bounded pool plus one lock per
+  domain around embed + compile replaces the bare background task; a pending marker per source makes
+  a restart resume rather than lose work. No broker, matching §6's cost philosophy.
+
+#### 4.10.4 Selective multimodal, text-first
+
+- **Vision is a separate optional protocol, not a change to `complete()`.** `VisionLLMClient.describe()`
+  takes images; §4.7's `complete()` stability contract is byte-identical, text-only adapters
+  implement nothing new, and the per-op router can fail at startup, by name, if `describe_image` is
+  routed to a provider that cannot see.
+- **Images become markdown before anything else happens.** Extractors stay free of model calls:
+  they render candidate pages (a scanned page, a figure-heavy page, an uploaded image) and leave
+  placeholders; one pipeline step describes them (caption, transcribed text, tables as tables,
+  figures as figure blocks) and the described text is what gets stored, chunked, indexed and
+  compiled. No image embeddings, no OCR engine. Descriptions are cached per source so a recompile
+  never pays twice.
+- **"Selective" is a code policy with caps.** Off by default (today's behaviour, including the
+  scanned-PDF error); `auto` selects pages by text density and image area, at most
+  `VISION_MAX_PAGES_PER_SOURCE`, and vision spend counts against the same per-source token budget the
+  compiler enforces — the §4.4/§4.9 posture that a source's cost is set by configuration.
+
+#### 4.10.5 What Phase 2 deliberately does not do
+
+Multi-tenancy, workspaces and per-user auth remain Phase 3 (a domain is a partition key, not a
+tenant). The compiler stays non-agentic and dense-plus-exact-slug in its own lookup. Domains are
+never created by a model. Queries are never auto-routed unless the operator chooses the `routed`
+policy. The custom mobile app stays conditional on proven messaging friction.
+
 ## 5. Multi-Phase Growth Plan
 
 Phases are driven by corpus size, user count, query volume, and feature demand.
@@ -656,15 +811,15 @@ Phases are driven by corpus size, user count, query volume, and feature demand.
 
 ### Phase 2 — Scaled Research Platform
 **Goal:** Support large corpora and moderate concurrent use.  
-**Add:**
-- Domain partitioning of the wiki.
-- Stronger hybrid search + reranking.
-- Selective multimodal (image / page-as-image) handling.
-- Automated domain routing and higher-quality synthesis.
-- Usage dashboards and cost alerts.
-- Optional custom mobile app if messaging friction is proven.
+**Add:** *(design locked 2026-09-18 — Section 4.10; implementation design in `implement-plan-v1.4.md` §21)*
+- Domain partitioning of the wiki — **Section 4.10.1.**
+- Stronger hybrid search + reranking — **Section 4.10.2.**
+- Selective multimodal (image / page-as-image) handling — **Section 4.10.4.**
+- Automated domain routing and higher-quality synthesis — **Section 4.10.1.**
+- Usage dashboards and cost alerts — **Section 4.10.3.**
+- Optional custom mobile app if messaging friction is proven — **deferred; not part of the 4.10 design.**
 
-**Success criteria:** Corpus can grow to hundreds of thousands of chunks without linear cost explosion; wiki remains navigable.
+**Success criteria:** Corpus can grow to hundreds of thousands of chunks without linear cost explosion; wiki remains navigable. Section 4.10 names the five places in the Phase 1 code whose cost grows with corpus size and removes each.
 
 ### Phase 3 — Productized / Multi-User
 **Goal:** Multi-tenant or team product with polished experience.  

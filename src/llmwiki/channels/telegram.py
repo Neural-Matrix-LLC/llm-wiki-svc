@@ -25,6 +25,7 @@ import httpx
 from fastapi import APIRouter, BackgroundTasks, Header, HTTPException, Request
 
 from llmwiki import tools
+from llmwiki.channels.domain_prefix import split_hashtag_domain
 from llmwiki.config import Settings
 from llmwiki.models.source import SourceRef
 
@@ -73,21 +74,31 @@ async def _handle_update(update: dict, token: str, background: BackgroundTasks) 
     if not message:
         return
     chat_id = (message.get("chat") or {}).get("id")
-    title = message.get("caption") or ""
+    # Phase 2: a leading "#domain" on the caption (files/photos) or the text
+    # itself is an explicit domain; it is stripped from what gets stored.
+    domain, title = split_hashtag_domain(message.get("caption") or "")
+    if domain is None and message.get("text"):
+        domain, stripped = split_hashtag_domain(message["text"])
+        if domain is not None:
+            message = {**message, "text": stripped}
 
     async with httpx.AsyncClient(base_url=f"{API_BASE}/bot{token}", timeout=30.0) as client:
         try:
-            ref = await _capture(message, title, client, token)
+            ref = await _capture(message, title, client, token, domain)
         except _NothingToCapture:
             await _ack(client, chat_id, "Nothing to capture in that message.")
             return
+        except KeyError as exc:
+            await _ack(client, chat_id, f"Unknown domain {exc.args[0]!r}; nothing captured.")
+            return
         if not ref.duplicate:
-            background.add_task(tools.process_source, ref.source_id)
+            background.add_task(tools.enqueue_source, ref.source_id)
         await _ack(client, chat_id, f"Captured. source_id={ref.source_id}")
 
 
 async def _capture(
-    message: dict, title: str, client: httpx.AsyncClient, token: str
+    message: dict, title: str, client: httpx.AsyncClient, token: str,
+    domain: str | None = None,
 ) -> SourceRef:
     document = message.get("document")
     photo = message.get("photo")  # list of sizes, largest last
@@ -98,20 +109,21 @@ async def _capture(
         filename = document.get("file_name") or f"{file_id}.jpg"
         mime = document.get("mime_type") or "image/jpeg"
         data = await _download(client, token, file_id)
-        return tools.ingest_source(file=data, filename=filename, mime=mime, title=title)
+        return tools.ingest_source(file=data, filename=filename, mime=mime, title=title,
+                                   domain=domain)
 
     if photo:
         file_id = photo[-1]["file_id"]
         data = await _download(client, token, file_id)
         return tools.ingest_source(
-            file=data, filename=f"{file_id}.jpg", mime="image/jpeg", title=title
+            file=data, filename=f"{file_id}.jpg", mime="image/jpeg", title=title, domain=domain,
         )
 
     if text:
         bare_url = _BARE_URL.match(text)
         if bare_url:
-            return tools.ingest_source(url=bare_url.group(1), title=title)
-        return tools.ingest_source(text=text, title=title)
+            return tools.ingest_source(url=bare_url.group(1), title=title, domain=domain)
+        return tools.ingest_source(text=text, title=title, domain=domain)
 
     raise _NothingToCapture()
 

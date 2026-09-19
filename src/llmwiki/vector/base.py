@@ -34,3 +34,13 @@ class VectorStore(Protocol):
     def delete_by_source(self, index: str, source_id: str) -> int:
         """Remove every vector belonging to a source. Returns the count deleted."""
         ...
+
+    def ensure_index(self, index: str) -> bool:
+        """Create ``index`` if it does not exist; return True when it was created.
+
+        Phase 2 (plan §21.2 A2): registering a domain creates its own pair of
+        indexes, named by ``layout.domain_index_name``. Idempotent, and must also
+        create whatever filterable metadata properties the backend needs
+        *before* the first insert - in-memory stores have nothing to do.
+        """
+        ...

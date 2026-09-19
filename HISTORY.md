@@ -5,6 +5,946 @@ reverse-chronological order. See `CLAUDE.md` for the rule this file follows.
 
 ---
 
+## 2026-09-19 — Phase 2 P2-Z: migration script, smoke coverage, documentation
+
+**Goal.** The last milestone of plan §21.9: make the Phase 2 code
+deployable and documented - the one-time upgrade steps as a script, the
+offline smoke flow exercising every workstream, and the technical document,
+README, scripts README, testing guide and `CLAUDE.md` brought level with the
+code.
+
+**Implementation.**
+
+- New `scripts/migrate_phase2.py --check|--apply [--skip-lexical]
+  [--offline]`: nothing moves (design §4.10's organising principle); it
+  builds the keyword index from `raw/` when any of the registry's indexes is
+  empty, moves the legacy `wiki/_meta/cost.jsonl` into partitioned keys, and
+  runs `ensure_index` for every registered domain. `--check` exits 1 while
+  something is to do, so it can gate a deploy; it writes its own ledger keys
+  (`COST_WRITER=migrate`).
+- `scripts/smoke_flow.py --offline` gains steps 8–11: a second domain
+  registered and compiled into (general's manifest untouched), a scoped and
+  a fanned-out hybrid answer through the fake reranker, `usage_summary` /
+  worker status / a written overview, and a PNG described by the fake vision
+  model - then cleans up every extra source. Live runs keep the seven Phase
+  1 steps only, so a real registry never gains a throwaway domain.
+- Documentation: technical document → §2.2 directory table, §6.2–§6.5
+  (REST/MCP/CLI/config), §7 layout, §8 testing (three more load-bearing rows,
+  the six isolation fixtures, the Phase 2 test files) and a new **§12 Phase
+  2** code-path map; `README.md` gains a "Phase 2: domains, hybrid search,
+  usage, images" section; `scripts/README.md` lists the two new scripts;
+  new `docs/phase2-testing-guide.md` (the manual pass/fail plan: A-01…A-11,
+  B-01…B-06, C-01…C-07, D-01…D-06 with an automated baseline);
+  `CLAUDE.md`'s Phase 2 paragraph now states what is implemented.
+
+**Related files.** `scripts/migrate_phase2.py` (new), `scripts/smoke_flow.py`,
+`docs/llm-wiki-technical-document.md`, `docs/phase2-testing-guide.md` (new),
+`docs/phase2-code-review-plan.md` (new - the review plan for this change set,
+written under the new `CLAUDE.md` rule "after a coding task is done, write a
+code review plan"),
+`README.md`, `scripts/README.md`, `CLAUDE.md`, `docs/implement-plan-v1.4.md`
+(§21.9 row), `tests/unit/test_phase1_scripts.py`, `HISTORY.md`.
+
+**Tests.** 714 passed (713 after P2-D2); `ruff check .`, `mypy`, and the
+offline scripts pass - `smoke_flow --offline` now 11 steps. *New:*
+`test_phase1_scripts.py::test_migrate_phase2_check_then_apply_offline`
+(`--check` exits 1 with the keyword index unbuilt and the legacy ledger
+present, `--apply` builds/moves, `--check` exits 0). Not covered
+automatically, by design: the live cases in `docs/phase2-testing-guide.md`
+(Vectorize index creation for a new domain, the Workers AI reranker and a
+real vision model, Telegram alerts, restart recovery under Docker).
+
+**Deferred / follow-ups (also in `TODOS.md`):** per-hit score
+distributions printed by `eval_answer.py` (needs per-hit scores on
+`Answer`); qualified cross-domain wikilinks; moving a source between domains
+(`domains reassign`); a compile-correctness golden set for the synthesis
+job; the reranker-raises-confidence question, to be decided from live
+distributions.
+
+---
+
+## 2026-09-19 — Phase 2 P2-D2: PDF page-as-image selection
+
+**Goal.** Milestone P2-D2 of plan §21.9: the "page-as-image" half of
+design §5's selective multimodal bullet. A scanned PDF - which Phase 0/1
+rejected with "OCR is out of scope" - and the figure pages of an ordinary
+one become markdown through the description step, under caps that make the
+per-source cost a configuration choice (design §4.10.4).
+
+**Implementation.** `extractors/pdf.py`: per page `_PageInfo.read` measures
+the text layer, image coverage (`get_images` + `get_image_rects` over the
+page area) and, on light-text pages, vector-drawing density
+(`get_cdrawings`). A page is a candidate under `auto` when `chars <
+VISION_MIN_CHARS_PER_PAGE`, `image_area ≥ VISION_IMAGE_AREA_RATIO` or
+`drawings ≥ 200`; under `always` every page is. `_select` takes at most
+`max_pages`: in reading order when ≥ 80 % of pages are text-less (a scan),
+otherwise by image area descending (the figure pages). Selected pages are
+rendered at 110 dpi with the long edge capped at 1 568 px and emitted as
+`extra["vision_pages"]` with a `<!-- vision:pN -->` placeholder after the
+page's own text; over-cap candidates get a `> [page N: … not described …]`
+note; `extra["vision_candidates"]` counts them. With `off` the extractor is
+byte for byte the pre-Phase-2 one (text pages extracted, a scan raises, now
+pointing at `VISION_MODE=auto`); a document with no text and nothing
+selectable still raises rather than storing headings alone.
+
+**Related files.** `src/llmwiki/extractors/pdf.py`,
+`tests/unit/test_pdf_vision_policy.py` (new), `CLAUDE.md`,
+`docs/implement-plan-v1.4.md` (§21.9 row), `HISTORY.md`.
+
+**Tests.** 713 passed (703 after P2-D1); `ruff check .`, `mypy`, the offline
+scripts pass. `test_extractors.py`'s scanned-PDF-raises test is untouched and
+is the `off` case. *New:* `test_pdf_vision_policy.py` (10, over three
+synthetic PDFs built with PyMuPDF - text-only, scanned, figure-heavy): `off`
+extracts text pages and raises on a scan; `auto` leaves a text-only PDF
+alone (0 candidates); a scan is rendered in page order up to the cap with
+the over-cap note; the figure page is picked by image area while its text is
+kept; the area threshold is respected (the figure page carries a full text
+layer so only that rule can select it); `always` renders every page up to
+the cap; cap 0 still raises on a scan; rendered pages respect the edge cap;
+`get_extractor` threads the settings through; a scanned PDF reaches `done`
+offline with exactly the capped number of vision calls, and fails under
+`off`.
+
+---
+
+## 2026-09-19 — Phase 2 P2-D1: the vision protocol, `describe_image`, the description step, image sources
+
+**Goal.** Milestone P2-D1 of plan §21.9: design §5's "selective multimodal"
+bullet, the text-first way (design §4.10.4). An uploaded image becomes
+markdown before anything else sees it; the `complete()` contract other
+repositories and every test double implement is byte-identical.
+
+**Implementation.**
+
+- `llm/base.py`: new `VisionLLMClient` protocol - `describe(*, op, system,
+  prompt, images: list[ImageInput], model, max_tokens, temperature)`. A
+  *separate* protocol (plan D1), so a text-only adapter simply lacks it.
+  Implemented on `AnthropicLLM` (base64 image blocks before the text block,
+  through the same request path), `LangChainLLM` (`image_url` `data:` URI
+  parts - the provider-neutral multimodal message), `FakeLLM`
+  (deterministic description, ~800 input tokens billed so budget tests have
+  something to count) and `MeteredLLM` (forwards and meters; raises
+  `AttributeError` when the wrapped client cannot). `RoutingLLMClient.
+  describe()` dispatches like `complete()` and refuses, by name, an adapter
+  without `describe`; `supports_vision(op)` backs a startup check in
+  `factory._build_routed_llm_client` (fail loudly if `describe_image` is
+  routed to a text-only adapter).
+- New `src/llmwiki/pipeline/describe.py`: `describe_pending_pages(doc, llm,
+  settings, store)` fills the `<!-- vision:{key} -->` placeholders an
+  extractor left, at most `VISION_MAX_PAGES_PER_SOURCE` calls per source,
+  caches every description at `raw/{id}/vision.json` (a recompile never pays
+  twice; an unreadable cache is ignored), splices `#### Described content
+  (…)` blocks in, marks over-cap pages with a note, strips the image bytes
+  from `extra`, and raises `ExtractionError` when nothing was described and
+  the text holds only headings/placeholders.
+- New `extractors/image.py`: `render_png` (PyMuPDF decode → PNG, long edge
+  ≤ 1 568 px) and `ImageExtractor` (one vision page; refuses with a clear
+  message under `VISION_MODE=off`). `get_extractor(modality, *, vision_mode,
+  vision_max_pages, vision_min_chars, vision_image_area)` gains the `image`
+  branch that was missing since Phase 0 (an image used to fall through to
+  the text extractor and fail as "no text content"); `PdfExtractor` accepts
+  the same knobs (the page-selection logic itself is P2-D2).
+- `pipeline/ingest.py:extract()` builds the extractor from `Settings`, runs
+  the description step when pages are pending, ledgers its usage as
+  `kind="ingest"` and hands it to `Compiler.compile_source(prior_costs=)`,
+  which counts it against `INGEST_TOKEN_BUDGET` without re-ledgering it;
+  `SourceStatus.vision_calls` is filled.
+- `KNOWN_OPS` += `describe_image` (10 - the full Phase 2 set); the drift
+  guard now matches `.describe(op=…)` as well as `.complete(op=…)` and scans
+  `pipeline/describe.py`. `Settings`: `vision_mode` (`off`|`auto`|`always`,
+  default `off`), `vision_max_pages_per_source` (8),
+  `vision_min_chars_per_page` (200), `vision_image_area_ratio` (0.25); all
+  in `.env.example`.
+
+**Related files.** `src/llmwiki/pipeline/describe.py` (new),
+`src/llmwiki/extractors/image.py` (new), `src/llmwiki/llm/{base,anthropic_client,
+langchain_client,router,fake,metering,routing_config}.py`,
+`src/llmwiki/extractors/{base,pdf}.py`, `src/llmwiki/pipeline/ingest.py`,
+`src/llmwiki/wiki/compiler.py`, `src/llmwiki/{config,factory}.py`,
+`.env.example`, `tests/unit/test_vision.py` (new), `tests/unit/{test_routing_config,
+test_worker}.py`, `CLAUDE.md`, `docs/implement-plan-v1.4.md` (§21.9 row),
+`HISTORY.md`.
+
+**Tests.** 703 passed (686 after P2-A4); `ruff check .`, `mypy`, the offline
+scripts pass. Load-bearing tests untouched. *Changed shape:*
+`test_worker.py`'s timed `compile_source` patch accepts `**kwargs`
+(`prior_costs`). *New:* `test_vision.py` (15): fake + metered implement the
+protocol; **`complete()` untouched - a text-only client is an `LLMClient`
+and not a `VisionLLMClient`**; Anthropic and LangChain message shapes;
+router dispatch + refusal; factory startup refusal; describe fills/caches/
+strips and a second pass costs nothing; **`test_vision_calls_per_source_are_
+bounded_by_setting`** (scale guard, a 40-page scan); no vision client / no
+content → `ExtractionError`; unreadable cache ignored; `render_png`
+downscale + bad bytes; image extractor on/off; `get_extractor` default is
+the pre-Phase-2 behaviour; an uploaded image reaches `done` offline with the
+description ledgered and cached, and fails under `off`; vision spend counts
+against `INGEST_TOKEN_BUDGET`.
+
+---
+
+## 2026-09-19 — Phase 2 P2-A4: scheduled per-domain synthesis (the overview page)
+
+**Goal.** Milestone P2-A4 of plan §21.9: the "higher-quality synthesis"
+half of design §5's routing-and-synthesis bullet, as design §4.10.1 defines
+it - a scheduled, bounded job that reads *across* a domain's pages and
+writes one entry-point page, never on the ingest path.
+
+**Implementation.**
+
+- New `src/llmwiki/wiki/synthesis.py`: `rank_pages(manifest)` (concept and
+  entity pages, most-sourced then newest); `synthesize_domain(store, vectors,
+  embedder, llm, settings, domain, lexical=, max_pages=)` loads the domain's
+  manifest, reads at most `SYNTHESIS_MAX_PAGES` bodies (each capped at 6 000
+  chars), makes exactly one `synthesize_domain` call (prompt: the domain's
+  description, every gist one-liner, the top pages in full; forced schema
+  `{title, gist, body}`), writes `overview.md` (new `PageType` `overview`,
+  slug `overview`, version-checked, `sources` = the union of the ranked
+  pages' sources), upserts its gist row + gist vector + lexical row,
+  re-renders the domain index (`## Overview` first) and ledgers the call as
+  `kind="synthesis"`. An empty domain is skipped without a call; an empty
+  body leaves the existing page alone.
+- The compiler's `_locate` never offers a page of type `overview` as a
+  patch candidate, so the per-source compiler cannot rewrite what the job
+  synthesised - that is what keeps synthesis off the ingest path.
+- `KNOWN_OPS` += `synthesize_domain` (9); the drift guard scans
+  `wiki/synthesis.py`. `Settings.synthesis_max_pages` (10) in `.env.example`.
+- Surface: `tools.synthesize(domain=None)` (every domain or one, under the
+  domain lock, then the cost guard runs); `POST /synthesize/{domain}`
+  (bearer; 404 unknown); `llmwiki synthesize --domain X | --all`; compose
+  `synthesize` service (ops profile, `COST_WRITER=synth`) to cron weekly
+  beside `lint`.
+
+**Related files.** `src/llmwiki/wiki/synthesis.py` (new),
+`src/llmwiki/wiki/compiler.py`, `src/llmwiki/llm/routing_config.py`,
+`src/llmwiki/{config,tools,cli}.py`, `src/llmwiki/api/routes.py`,
+`docker-compose.yml`, `.env.example`, `tests/unit/test_synthesis.py` (new),
+`tests/unit/{test_routes,test_routing_config}.py`, `CLAUDE.md`,
+`docs/implement-plan-v1.4.md` (§21.9 row), `HISTORY.md`.
+
+**Tests.** 686 passed (677 after P2-C2); `ruff check .`, `mypy`, the offline
+scripts pass. Load-bearing tests untouched. *New:* `test_synthesis.py` (7):
+ranking; the page is written, versioned, registered in manifest/index/gist
+vector/lexical and ledgered, and a second run bumps the version;
+**`test_synthesis_page_reads_are_bounded_by_setting`** (scale guard: ≤ cap
+bodies, one call, no listing); empty domain skipped without a call; a
+domain's overview stays under its prefix; **synthesis is never called from
+ingest and the compiler never patches the overview**; `tools.synthesize`
+all/one/unknown. `test_routes.py` (+1 `/synthesize` auth/404/written),
+`test_routing_config.py`'s throwaway table gains the row.
+
+---
+
+## 2026-09-19 — Phase 2 P2-C2: usage summary, cost alerts, the monthly hard cap, the dashboard
+
+**Goal.** Milestone P2-C2 of plan §21.9: design §5's "usage dashboards and
+cost alerts" bullet. Spend is already measured per call (P2-1); this makes it
+visible by domain/kind/op/model/day/source, alerts on thresholds, and turns
+the monthly hard cap into a real pause of post-capture processing - never of
+capture, search or answers.
+
+**Implementation.**
+
+- New L1 package `src/llmwiki/notify/`: `Notifier` protocol (`send(text) ->
+  bool`, never raises), `LogNotifier` (WARNING on `llmwiki.alerts`),
+  `TelegramNotifier` (the capture bot's token + `ALERT_TELEGRAM_CHAT_ID`, one
+  `sendMessage`, best effort), `FakeNotifier`.
+- New `src/llmwiki/wiki/alerts.py`: `CostAlerts(store, ledger, notifier,
+  settings, queued=)` keeps running month/day totals refreshed from one
+  bounded month read at most every 60 s or on day/month rollover;
+  `evaluate(added_usd)` adds the just-ledgered spend to the cache (not after
+  a refresh - the read already includes it), checks the three thresholds and
+  notifies once per period, deduped through `wiki/_meta/cost/alerts.json`
+  (`AlertState`); `capped()` is `month_usd >= COST_HARD_CAP_MONTHLY_USD`;
+  `status()` feeds the dashboard. The cap message names when processing
+  resumes and how many sources wait.
+- Wiring: `factory.notifier`, `factory.cost_alerts` (the `queued` probe comes
+  from the worker); `tools.processing_capped` now asks the guard (the
+  worker's C1 hook was already in place); `tools._record_costs` and
+  `tools.process_source` evaluate the guard after spend is recorded;
+  `tools.budget_status`, `tools.usage_summary(since, until, domain, month)`
+  (month-to-date by default; a `month` reads exactly that month's prefix),
+  `tools.migrate_cost_ledger`. `health()` reports the thresholds in force.
+- Surface: `GET /usage?month=&domain=` (bearer; 422 on a bad month), `GET
+  /dashboard?month=` (bearer header **or** `?token=` - the user's 2026-09-18
+  decision; same static token), `llmwiki usage [--month --domain --json
+  --migrate]`. New `src/llmwiki/api/dashboard.py`: one server-rendered page -
+  month/today tiles, spend-per-day inline SVG bars, budget, worker state,
+  by-domain/kind/op/model tables, top sources, the domain registry; inline
+  CSS with a dark-mode block, no JavaScript, no template engine
+  (`pyproject.toml` gives the file a per-file `E501` ignore, like the
+  routes' `B008`).
+- `Settings`: `cost_alert_daily_usd`, `cost_alert_monthly_usd`,
+  `cost_hard_cap_monthly_usd` (all `0` = off), `notify_backend`
+  (`log`|`telegram`|`fake`), `alert_telegram_chat_id`; all in `.env.example`.
+
+**Related files.** `src/llmwiki/notify/{__init__,base,log,fake,telegram}.py`
+(new), `src/llmwiki/wiki/alerts.py` (new), `src/llmwiki/api/dashboard.py`
+(new), `src/llmwiki/api/routes.py`, `src/llmwiki/{config,factory,tools,cli}.py`,
+`pyproject.toml`, `.env.example`, `tests/unit/test_alerts.py` (new),
+`CLAUDE.md`, `docs/implement-plan-v1.4.md` (§21.9 row), `HISTORY.md`.
+
+**Tests.** 677 passed (657 after P2-B2); `ruff check .`, `mypy`, the offline
+scripts pass. Load-bearing tests untouched. *New:* `test_alerts.py` (14):
+notifier protocol, log notifier, Telegram payload + failure → `False`;
+nothing configured never fires or writes state; daily alert once per day and
+re-armed the next day; monthly alert and hard cap once per month with the
+cap message's resume date and waiting count, cap lifts at rollover; totals
+read from the ledger survive a restart; last month's spend does not count;
+dedup state survives a new instance; unreadable state starts fresh;
+**`test_hard_cap_pauses_processing_but_not_capture_search_or_answer`**
+(load-bearing scale/cost guard: under the cap `raw/` still fills, the source
+is `paused`, search and answer still work, a raised cap drains it);
+`usage_summary` month-to-date / `month=` / bad month; migrate through
+`tools`; `/usage` auth + breakdowns, `/dashboard` 401/token/header paths, no
+`<script>`, content, `/healthz` thresholds.
+
+---
+
+## 2026-09-19 — Phase 2 P2-B2: the reranker
+
+**Goal.** Milestone P2-B2 of plan §21.9: the "reranking" half of design §5's
+hybrid-search bullet. A cross-encoder reorders the fused candidate pool
+inside each retrieval layer, bounded by configuration, and can never fail a
+query or move the wiki-first decision.
+
+**Implementation.**
+
+- New L1 package `src/llmwiki/rerank/`: `base.py` (`Reranker` protocol:
+  `rerank(query, documents, top_n) -> [(index, score)]`), `workers_ai.py`
+  (`WorkersAIReranker`: `POST /ai/run/{model}` with `{"query", "contexts",
+  "top_k"}` on the same `CF_*` credentials as the embedder; default model
+  `@cf/baai/bge-reranker-base`), `fake.py` (`FakeReranker`: term overlap,
+  deterministic, records its calls; has its own tokenizer because L1 peers
+  never import each other - `test_layering.py` caught the first draft).
+- `agent/retrieval.py`: `retrieve_layer(..., reranker=)` reranks the fused
+  pool (`fused[:RERANK_MAX_CANDIDATES]`) after RRF; with a reranker but no
+  lexical index the layer still pools `HYBRID_POOL_K` dense candidates first.
+  `rerank_hits` applies the order, replaces `score` with the reranker's, keeps
+  `dense_score`/`lexical_score` (so `gate_score` is unchanged) and falls back
+  to the fused order on any exception or an empty result. `rerank_text` feeds
+  the cross-encoder metadata text only - never a page body.
+- `factory.reranker(cfg)` (`None` for `none`); `QueryAgent(reranker=)`;
+  `tools._agent` passes it; `health()` reports the backend. `Settings`:
+  `reranker_backend` (`workers_ai`|`fake`|`none`, default `workers_ai`),
+  `reranker_model`, `rerank_max_candidates` (40); all in `.env.example`.
+  `tests/conftest.py` pins `RERANKER_BACKEND=none` alongside the lexical pin.
+- Every offline path forces the fake reranker: `cli.OFFLINE_ENV` and the
+  four scripts' offline env (`smoke_flow`, `eval_answer`,
+  `probe_query_graph`, `probe_domain_routing`). Found because the offline
+  scripts read `.env`'s `CF_*` credentials, built the real Workers AI
+  reranker and - thanks to the fallback - passed anyway.
+- Golden set: two exact-term rows over the HTML fixture ("fixed overlap",
+  "recall ... mid-argument") in `tests/fixtures/eval/answer_quality.jsonl`;
+  `eval_answer.py --offline` still passes at 1.00 on every gated evaluator.
+  (Plan §21.9's "eval prints score distributions" is deferred: the Answer
+  does not carry per-hit scores, and adding them is a P2-Z docs/eval item.)
+
+**Related files.** `src/llmwiki/rerank/{__init__,base,fake,workers_ai}.py`
+(new), `src/llmwiki/agent/{retrieval,query}.py`, `src/llmwiki/{config,factory,tools,cli}.py`,
+`scripts/{smoke_flow,eval_answer,probe_query_graph,probe_domain_routing}.py`,
+`.env.example`, `tests/conftest.py`, `tests/fixtures/eval/answer_quality.jsonl`,
+`tests/unit/test_rerank.py` (new), `tests/unit/test_config.py`, `CLAUDE.md`,
+`docs/implement-plan-v1.4.md` (§21.9 row), `HISTORY.md`.
+
+**Tests.** 657 passed (644 after P2-B1); `ruff check .`, `mypy`, the four
+offline scripts pass. Load-bearing tests untouched. *New:* `test_rerank.py`
+(10: protocol; Workers AI request/response shape; API error raised (the seam
+turns it into a fallback) and empty input skipped; fake determinism;
+reorder keeps the cosine; failure/empty keep the fused order; `rerank_text`
+sources; **`test_layer_reranks_at_most_the_candidate_cap`** (scale guard);
+reranker-only pooling; hybrid + rerank over two scopes), `test_config.py`
+(`OFFLINE_ENV` forces the fake reranker).
+
+---
+
+## 2026-09-19 — Phase 2 P2-B1: the lexical index (SQLite FTS5 / BM25) and rank fusion
+
+**Goal.** Milestone P2-B1 of plan §21.9: the keyword half of hybrid search
+(design §4.10.2). Removes linear point L5's first cause - an exact-term
+question (an identifier, a rare token) that dense retrieval misses - without
+moving the wiki-first / chunk-fallback decision off the dense cosine.
+
+**Implementation.**
+
+- New L1 package `src/llmwiki/lexical/`: `base.py` (`LexicalIndex` protocol
+  with `VectorStore`'s shape plus `reset`/`count`, `tokenize`, `hit_from_row`),
+  `memory.py` (`MemoryLexicalIndex`, Okapi BM25 with a light suffix stemmer -
+  tests/offline), `sqlite.py` (`SqliteLexicalIndex`: one `{index}.sqlite` per
+  index name under `Settings.lexical_root`, FTS5 external-content table with
+  `porter unicode61`, triggers, per-index process lock; `fts_query` quotes
+  every term and joins with OR so user input can never be FTS syntax; a
+  never-built file serves `[]` with a WARNING; `fts5_available()`).
+- Write side: `IngestPipeline(lexical=)` upserts each chunk's *full* text
+  into `domain_index_name(chunks_index, domain)`; `Compiler(lexical=)`'s
+  `_sync_gist` mirrors `"{title}. {gist}"` into the gists index;
+  `tools.delete_source` deletes the lexical rows too. New
+  `pipeline/lexical_rebuild.py:rebuild(store, lexical, settings, domain=None)`
+  resets and refills from `raw/*/extracted.md` (re-chunked with the same
+  settings, routed by `routing.json`) and each domain's manifest, so a
+  rebuilt index equals an incrementally written one (tested).
+- Read side (`agent/retrieval.py`): `rrf_fuse(lists, k=60)` and
+  `retrieve_layer(..., lexical=)` - with a lexical index each scope
+  contributes a dense list and a keyword list of `HYBRID_POOL_K` (20)
+  candidates, fused by reciprocal rank; `score` becomes the fused score,
+  `dense_score` keeps the cosine and `gate_score` still reads it (B4). With
+  `lexical=None` the layer is unchanged from P2-A3.
+- Wiring: `factory.lexical_index(cfg)` (`None` for `none`; sqlite fails by
+  name without FTS5); `tools._pipeline`/`_agent`/`compile_update` pass it;
+  `tools.rebuild_lexical(domain=)`; CLI `llmwiki lexical rebuild [--domain]`;
+  `health()` reports the lexical backend and path. `Settings`:
+  `lexical_backend` (`sqlite`|`memory`|`none`, default `sqlite` per the
+  "defaults are production" convention), `lexical_db_path` (default
+  `{LOCAL_STORAGE_PATH}/lexical`), `hybrid_pool_k`; all in `.env.example`.
+- `tests/conftest.py`: fifth autouse isolation fixture `LEXICAL_BACKEND=none`
+  and the shared `settings` fixture pins `lexical_backend="none"` -
+  **deviation from plan §21.10's `memory` pin**, deliberately: `none` is the
+  byte-identical Phase 0/1 path the wiki-first, citation and byte-identity
+  tests are written against; the lexical tests opt in.
+- `FakeLLM`'s `route_domain` synthesis now matches domain names against the
+  `# Source` section only (the prompt's registry listing names every domain
+  and made the double route everything to the first one).
+
+**Related files.** `src/llmwiki/lexical/{__init__,base,memory,sqlite}.py`
+(new), `src/llmwiki/pipeline/lexical_rebuild.py` (new),
+`src/llmwiki/agent/{retrieval,query}.py`, `src/llmwiki/pipeline/ingest.py`,
+`src/llmwiki/wiki/compiler.py`, `src/llmwiki/{config,factory,tools,cli}.py`,
+`src/llmwiki/llm/fake.py`, `.env.example`, `tests/conftest.py`,
+`tests/unit/{test_lexical,test_retrieval,test_lexical_rebuild}.py` (new),
+`CLAUDE.md`, `docs/implement-plan-v1.4.md` (§21.9 row), `HISTORY.md`.
+
+**Tests.** 644 passed (606 after P2-A3); `ruff check .`, `mypy` and the
+offline scripts pass (`smoke_flow --offline` now exercises the SQLite FTS5
+path end to end, since the default backend is `sqlite`). Load-bearing tests
+untouched. *New:* `test_lexical.py` (12 × 2 backends: protocol, exact term,
+hyphenated identifiers + stemming, ranking, **FTS syntax injection**, quoting,
+idempotent upsert, delete-by-source, reset, never-built → `[]`, blank
+queries; one file per index + name validation), `test_retrieval.py` (8: RRF
+arithmetic, deterministic ties, **gate reads the cosine not the fused
+score**, pool/fuse/cosine-kept, two-scope hybrid, lexical-only hit never
+opens the wiki gate, ingest writes both halves + delete, compiler mirrors
+gists), `test_lexical_rebuild.py` (4: rebuild == incremental per domain,
+one-domain rebuild leaves others alone, refuses with `none`, sqlite files
+under the lexical root via `tools`).
+
+---
+
+## 2026-09-19 — Phase 2 P2-A3: query-side domain scopes and the retrieval seam
+
+**Goal.** Milestone P2-A3 of plan §21.9: a question searches a defined set
+of domains - explicit, or by policy - and every dense query on the query
+path goes through one seam (`agent/retrieval.py`) so hybrid retrieval and
+reranking (P2-B) slot in without another call site changing. A general-only
+registry is still byte-for-byte the pre-Phase-2 query path.
+
+**Implementation.**
+
+- New `src/llmwiki/agent/retrieval.py`: `retrieve_layer(kind, query,
+  vector, scopes, k, *, vectors, settings)` - one query per scope against
+  `domain_index_name(base, scope)`, hits tagged with `domain` and their raw
+  cosine as `dense_score`, merged by score across scopes; a single scope is
+  the pre-Phase-2 call (same index name, same `k`). `gate_score(hit)` is what
+  the wiki-confidence gate compares (`dense_score`, else `score`) - the
+  B4 decision, in place before B lands.
+- `wiki/domains.py:resolve_scopes(explicit, policy, registry, route=)`:
+  explicit wins (unknown → `UnknownDomain`); general-only registry or
+  `policy=general` → `[general]`; `all` → every registered domain, no model
+  call; `routed` → the caller-supplied `route()` (one `route_domain` call),
+  falling back to `all` when it names nothing usable.
+- `QueryAgent`: `registry` (read once per agent = once per request),
+  `scopes_for(domain, question)`, `retrieve_layer(...)`,
+  `search(query, k, domain=None)` (gate now `any(gate_score ≥ …)`, aligned
+  with the graph), `answer(query, k, domain=None)` (scopes into the graph's
+  initial state and the LangSmith run metadata; `Answer.domains` set);
+  `_build_context` loads one manifest per *distinct hit domain*, lazily,
+  reads pages with `domain=hit.domain`, adds `(domain: d)` to non-general
+  page headers and stamps `Citation.domain`. `_run_scopes` (instance state;
+  one agent per request) is what the toolkit's tools default to.
+- Graph: `QueryState.scopes`; `retrieve` uses `retrieve_layer` and
+  `gate_score`; `resolve_citations` fills `Answer.domains`; the agent-step
+  prompt gains a `# Domains` section (searching / registered) only when a
+  domain is registered. Toolkit: `search_wiki`/`search_chunks` take
+  `domain: str = ""` (empty = the run's scopes; unknown → observation),
+  `get_page(slug, domain="general")`.
+- Surface: `tools.search_wiki`/`answer` take `domain=` (search is now
+  metered too, since `routed` makes a call); REST `/search?domain=`,
+  `/answer?domain=` (404 unknown); MCP `search_wiki(domain=)`; CLI
+  `search`/`ask --domain`, `ask` prints domains and cost. `Settings`:
+  `query_domain_policy` (`all`|`routed`|`general`, default `all`),
+  `query_max_domains` (2); both in `.env.example`.
+
+**Related files.** `src/llmwiki/agent/retrieval.py` (new),
+`src/llmwiki/agent/{query,graph,toolkit}.py`, `src/llmwiki/wiki/domains.py`,
+`src/llmwiki/{config,tools,cli}.py`, `src/llmwiki/api/routes.py`,
+`src/llmwiki/mcp/server.py`, `.env.example`, `tests/unit/test_query_scopes.py`
+(new), `tests/unit/{test_agent_toolkit,test_routes,test_tools_and_mcp}.py`,
+`CLAUDE.md`, `docs/implement-plan-v1.4.md` (§21.9 row), `HISTORY.md`.
+
+**Tests.** 606 passed (591 after P2-C1); `ruff check .`, `mypy`, the
+offline scripts pass. The wiki-first tests
+(`test_wiki_is_searched_before_the_chunk_index`,
+`test_chunk_index_is_untouched_when_the_wiki_answers`) and the citation
+contract are untouched. *Changed shape:* three `test_agent_toolkit.py`
+assertions on the tools' argument sets/renderings now include `domain`.
+*New:* `test_query_scopes.py` (14): the `resolve_scopes` matrix;
+`retrieve_layer` single-scope identity + tagging, multi-scope merge, empty
+scopes; general-only registry queries exactly the Phase-1 indexes; `all`
+fans out once per domain per layer and tags citations; explicit domain
+searches only that domain (unknown raises); **`test_query_reads_only_the_
+manifests_of_hit_domains`** (load-bearing scale guard); `routed` asks the
+router once and is capped; `general` policy; `search` scopes like `answer`;
+the toolkit's default/explicit/unknown domain handling; the step prompt's
+`# Domains` section. `test_routes.py` (+1 search/answer with domain, 404),
+transport parity extended to `search_wiki`/CLI `search`/`ask`.
+
+---
+
+## 2026-09-19 — Phase 2 P2-C1: the ingest worker - per-domain serialization, restart recovery, parking
+
+**Goal.** Milestone P2-C1 of plan §21.9: remove linear point L4 of design
+§4.10 (unserialized concurrent ingests). Before this, REST and the capture
+channels ran `process_source` on the ASGI server's anonymous thread pool -
+unbounded, unserialized, forgotten on restart - so two sources compiling
+into the same wiki raced on the manifest and the index.
+
+**Implementation.**
+
+- New `src/llmwiki/pipeline/worker.py`. `domain_lock(name)` - one
+  process-wide `threading.Lock` per domain. `mark_pending` / `clear_pending`
+  / `list_pending` over `status/_pending/{id}` markers. `CompileWorker(
+  settings, store, process, set_status, capped)`: `submit()` (bounded
+  `ThreadPoolExecutor(WORKER_THREADS)` in `threads` mode; runs in the caller
+  in `inline` mode), `run_now()`, `recover()` (resubmits every pending
+  marker - bounded by owed work, not corpus size), `status()` →
+  `WorkerStatus`, `shutdown()`. Under `capped()` a source is *parked*: status
+  `paused` with the reason, marker kept, retried every
+  `WORKER_RESUME_INTERVAL_S` seconds on a daemon timer or at once via
+  `resume()`. The `capped` hook is wired to `tools.processing_capped`, which
+  returns `False` until the cost guard lands (P2-C2).
+- `pipeline/ingest.py`: `capture()` writes the pending marker; `process()`
+  holds `domain_lock(domain)` around embed + compile only (extraction and
+  routing stay unlocked, so other sources' cheap stages overlap with one
+  domain's compile) and clears the marker on every exit path.
+- `factory.compile_worker(cfg)` (cached like every adapter);
+  `tools.enqueue_source` (what REST and both channels now `add_task`),
+  `worker_status`, `recover_pending`, `resume_processing`,
+  `shutdown_worker`, `processing_capped`. `process_source` is unchanged and
+  still what MCP `ingest_source` and the CLI call - serialization holds
+  regardless of the caller because the lock lives in the pipeline.
+- `api/app.py`: one lifespan wraps the MCP app's - `recover_pending()` at
+  startup, `shutdown_worker()` at stop. REST: `GET /worker`, `POST
+  /worker/resume` (bearer). CLI: `llmwiki worker [--resume]`; the CLI pins
+  `WORKER_MODE=inline` for itself (a command waits for its own work).
+- `Settings`: `worker_mode` (`threads`|`inline`, default `threads`),
+  `worker_threads` (4), `worker_resume_interval_s` (60); all in
+  `.env.example`. `tests/conftest.py` gains the fourth autouse isolation
+  fixture (`WORKER_MODE=inline`) and pins the shared `settings` fixture the
+  same way, so `TestClient`'s run-background-tasks-before-returning semantics
+  and every route test written against them stay deterministic.
+
+**Related files.** `src/llmwiki/pipeline/worker.py` (new),
+`src/llmwiki/pipeline/ingest.py`, `src/llmwiki/{factory,tools,config,cli}.py`,
+`src/llmwiki/api/{app,routes}.py`, `src/llmwiki/channels/{telegram,email}.py`,
+`.env.example`, `tests/conftest.py`, `tests/unit/test_worker.py` (new),
+`CLAUDE.md`, `docs/implement-plan-v1.4.md` (§21.9 row), `HISTORY.md`.
+
+**Tests.** 591 passed (579 after P2-A2); `ruff check .`, `mypy`, the three
+offline scripts pass. Load-bearing tests untouched. *Changed shape:* none -
+the channel tests that monkeypatch `tools.process_source` still hold because
+the worker resolves it at call time. *New:* `test_worker.py` (11): markers
+round-trip; one lock per domain; inline submit clears the marker; capture
+writes the marker and `enqueue_source` clears it; `recover()` resubmits
+every pending source and clears a failed one's marker too; the app lifespan
+recovers on startup; a capped worker parks (status `paused`, marker kept,
+`status().paused`) and `resume()` drains; the threaded worker's timer
+retries a parked source; **`test_same_domain_compiles_never_interleave_but_
+different_domains_do`** (load-bearing for C3: four sources on four threads,
+timed `compile_source` intervals disjoint within a domain, overlapping
+across); `run_now` blocks on the domain lock; `/worker` shape and
+`/worker/resume` auth.
+
+---
+
+## 2026-09-19 — Phase 2 P2-A2: the domain router, channel domain hints, routing probe
+
+**Goal.** Milestone P2-A2 of plan §21.9: the "automated domain routing"
+bullet of design §5. One cheap forced-schema call files a source under a
+registered domain, and only when there is something to choose between; the
+model can never create a domain or file a source under one that does not
+exist.
+
+**Implementation.**
+
+- New `src/llmwiki/wiki/router.py`: `DomainRouter(llm, registry,
+  min_confidence)`. `route_source(doc)` builds the prompt from the registry
+  listing (`general` last as "anything else") plus the title and the first
+  1 500 chars of the extracted text, calls `op="route_domain"` with the
+  registry as the schema's enum, and returns a `DomainAssignment` plus the
+  usage record. An unregistered name from the model, or a registered one
+  below `min_confidence`, becomes `general` with the model's pick kept as
+  `suggested_domain` (slugified, ≤ 32 chars, dropped if it names a
+  registered/reserved domain). `route_query(question, max_domains)` (for
+  P2-A3's `routed` policy) returns registered names only, capped; nothing
+  usable ⇒ `[]` = "search everything". Prompts `route_domain_source.md` /
+  `route_domain_query.md` from P2-1.
+- `pipeline/ingest.py:route()` is now cheapest-first: explicit `domain=` →
+  no call; registry general-only → no call; `DOMAIN_ROUTING=off` → no call;
+  else one router call whose usage is ledgered as `kind="ingest"` against
+  the decided domain. The decision is persisted to `routing.json` as before.
+- `Settings`: `domain_routing` (`auto`|`off`, default `auto`),
+  `domain_route_min_confidence` (0.6); both in `.env.example`.
+- `KNOWN_OPS` += `route_domain` (8); the drift guard now scans
+  `wiki/router.py`.
+- Capture channels (plan §21.7): new `channels/domain_prefix.py`
+  (`split_hashtag_domain`, `split_bracket_domain`). Telegram: a leading
+  `#domain` on the caption or the text is an explicit domain, stripped from
+  what is stored; an unknown one is acked ("Unknown domain …; nothing
+  captured") rather than 500ing. Email: a leading `[domain]` on the subject
+  likewise; an unknown one answers `200 {"ok": false, "error": …}` because
+  Mailgun retries 5xx.
+- `scripts/backfill.py --domain` filters sources by their persisted routing
+  and prints each result's domain. New `scripts/probe_domain_routing.py`
+  (`--offline`, `--source`, `--min-confidence`, `--json`): prints the raw
+  router decision per source without writing anything - the calibration
+  tool for `DOMAIN_ROUTE_MIN_CONFIDENCE`.
+- `tests/doubles.ScriptedLLM` now also records `schema` per call (additive).
+
+**Related files.** `src/llmwiki/wiki/router.py` (new),
+`src/llmwiki/channels/domain_prefix.py` (new), `scripts/probe_domain_routing.py`
+(new), `src/llmwiki/pipeline/ingest.py`, `src/llmwiki/config.py`,
+`src/llmwiki/llm/routing_config.py`, `src/llmwiki/channels/{telegram,email}.py`,
+`scripts/backfill.py`, `.env.example`, `tests/doubles.py`,
+`tests/unit/test_router.py` (new), `tests/unit/{test_channels,test_phase1_scripts,
+test_routing_config}.py`, `CLAUDE.md`, `docs/implement-plan-v1.4.md` (§21.9 row),
+`HISTORY.md`.
+
+**Tests.** 579 passed (560 after P2-A1); `ruff check .`, `mypy`, the three
+offline scripts and the new probe's `--offline` run all pass. Load-bearing
+tests untouched. *Changed shape:*
+`test_routing_config.py::test_the_tracked_providers_config_gives_vllm_and_llamacpp_their_own_env_vars`'s
+throwaway ops table gains a `route_domain` row (the loader requires a row
+per known op). *New:* `test_router.py` (13 - confident pick; low confidence
+demoted with suggestion; unregistered name never a destination; suggestion
+normalised/dropped; garbage → general; query routing capped/registered-only;
+**`test_general_only_registry_makes_no_model_call`** and
+**`test_explicit_domain_never_calls_the_router`** as the scale guards;
+`DOMAIN_ROUTING=off`; router call ledgered; end-to-end `process()` routes
+before choosing the chunk index; `compile_update` reuses the decision),
+`test_channels.py` (+6 prefix parsing, Telegram text/caption/unknown,
+email prefix/unknown), `test_phase1_scripts.py` (+2 probe verdicts and an
+offline end-to-end run).
+
+---
+
+## 2026-09-19 — Phase 2 P2-A1: domain-aware layout, registry, `list_domains`, per-domain compile and lint
+
+**Goal.** Milestone P2-A1 of plan §21.9: partition the wiki by domain
+without moving a byte of the existing corpus. `general` *is* the Phase 0/1
+layout; any other domain nests beside it. Removes linear points L1 and L2
+from design §4.10's table for every non-general domain and keeps the
+`general`-only wiki byte-identical to what Phase 1 wrote (proved by a
+fixture generated from the pre-Phase-2 compiler).
+
+**Implementation.**
+
+- *Keys* (`storage/layout.py`, plan §21.4): `check_domain` (regex, ≤ 32
+  chars, reserved names; `general` valid as a scope, unregistrable),
+  `domain_prefix`, `gists_key`, `index_key`, `overview_key`,
+  `domain_index_name` (`{base}` for general, `{base}-{d}` otherwise),
+  `domain_of_key`, `wiki_page(slug, type, domain=GENERAL)`,
+  `wiki_source_note(id, domain)`, `raw_routing`, `raw_vision`,
+  `pending_key`; constants `DOMAINS_PREFIX`, `DOMAINS_KEY`,
+  `RESERVED_DOMAINS`. Every general key equals its Phase-1 constant.
+- *Registry* (new `wiki/domains.py`, plan §21.2 A3): `load_registry` /
+  `save_registry` over `wiki/_meta/domains.json` (absent ⇒ general only),
+  `upsert_domain` (keeps `created`, empty description keeps the old one),
+  `remove_domain` (refuses while the domain holds pages unless `force`; never
+  deletes pages), `require_domain` (`None` ⇒ general; unknown ⇒
+  `UnknownDomain`), `DomainScope`, `render_domains_section`.
+- *Manifests, pages, index* (`wiki/gists.py`, `wiki/pages.py`): `load_gists` /
+  `save_gists` / `write_index` / `render_index` take `domain`; general's index
+  gains a `## Domains` section rendered from the registry alone, only when a
+  domain exists; a domain's index is titled `Index - {d}` with an
+  `[[index|All domains]]` back-link and lists `overview` pages first;
+  `render_page` writes `domain:` only for non-general pages; `read_page` /
+  `write_page` resolve the key from the page's domain.
+- *Compiler* (`wiki/compiler.py`): `compile_source(doc, force, domain=GENERAL)`
+  loads only that domain's manifest, queries and upserts
+  `domain_index_name(gists_index, domain)`, stamps `domain` on created pages
+  and the source note, saves the manifest and index under the domain, reads
+  the registry (one object) only when writing general's index, and ledgers
+  with `domain=`. `CompileResult.domain` is set.
+- *Lint* (`wiki/lint.py`): per domain - every registered domain by default or
+  one via `domain=`; keys attributed with `domain_of_key`; new finding kind
+  `unknown_domain` for a `wiki/domains/{d}/` folder that is not registered;
+  `LintFinding.domain`, `LintReport.domains`; repairs scoped to the domain.
+- *Vectors* (`vector/base.py`, `memory.py`, `vectorize.py`): additive
+  `ensure_index(index)` on the protocol; memory is a no-op that reports
+  creation (plus `index_names()` for tests); Vectorize creates the index
+  (cosine, `probe_dim`), asserts the `FILTERABLE` metadata indexes and polls
+  until describable (`describe_index`).
+- *Pipeline* (`pipeline/ingest.py`): `capture(domain=)` validates against the
+  registry *before* any fetch or write and records it on the immutable
+  `SourceMeta.domain`; `route(meta, doc)` (explicit ⇒ that domain; else
+  general - the model-backed router is P2-A2) persists a
+  `DomainAssignment` to `raw/{id}/routing.json`; `load_routing()`;
+  `_embed(doc, domain)` writes the domain's chunk index; `compile_source`
+  gets the domain; `SourceStatus.domain/suggested_domain` set.
+- *Surface*: `tools.get_page/list_concepts/lint_wiki/ingest_source/ingest_now`
+  gain `domain=`; `compile_update` and `delete_source` read `routing.json`;
+  new `tools.list_domains/upsert_domain/remove_domain` (`upsert` also calls
+  `ensure_index` for both of the domain's indexes). REST: `GET /domains`,
+  `PUT /domains/{name}` (bearer, 422 on a bad name), `DELETE /domains/{name}`
+  (bearer; 409 with pages unless `?force=true`; 404 unknown), `domain` on
+  `POST /ingest`, `/upload` (form field), `/concepts`, `/page/{slug}`,
+  `/lint` (404 for an unknown domain). MCP: seventh tool `list_domains`
+  (read-only); `domain` on `get_page`, `list_concepts`, `ingest_source`. CLI:
+  `domains list|add|update|remove [--force]`, `--domain` on `ingest`,
+  `page`, `concepts`, `lint`; lint output names each finding's domain.
+- *Also fixed in passing:* `llmwiki --offline` was not offline in a checkout
+  that ships `config/providers.py` + `config/ops.py` - the routing table
+  outranks `LLM_PROVIDER=fake`, so an `--offline ingest` compiled with the
+  real OpenRouter route. `cli.OFFLINE_ENV` now points both config paths at a
+  nonexistent file (the guard `scripts/smoke_flow.py` already used) and sets
+  `LANGSMITH_TRACING=false`.
+
+**Not in this milestone (by design):** query-side `domain` scoping
+(`search_wiki`, `answer`, the graph's tools) - P2-A3; the model-backed
+router - P2-A2; `KNOWN_OPS` unchanged.
+
+**Related files.** `src/llmwiki/wiki/domains.py` (new),
+`src/llmwiki/storage/layout.py`, `src/llmwiki/wiki/{gists,pages,compiler,lint}.py`,
+`src/llmwiki/vector/{base,memory,vectorize}.py`, `src/llmwiki/pipeline/ingest.py`,
+`src/llmwiki/tools.py`, `src/llmwiki/api/routes.py`, `src/llmwiki/mcp/server.py`,
+`src/llmwiki/cli.py`, `src/llmwiki/models/page.py` (`LintFinding.domain`,
+`unknown_domain`, `LintReport.domains`), `tests/fixtures/phase1_general_wiki/objects.json`
+(new - generated from the pre-Phase-2 compiler), `tests/unit/{test_layout_domains,
+test_domains}.py` (new), `tests/unit/{test_routes,test_tools_and_mcp,test_vector_contract,
+test_config}.py`, `CLAUDE.md`, `docs/implement-plan-v1.4.md` (§21.9 row), `HISTORY.md`.
+
+**Tests.** 560 passed (507 after P2-1), 1 skipped; `ruff check .`, `mypy`,
+`smoke_flow --offline`, `eval_answer --offline`, `probe_query_graph --offline
+--matrix` all pass. The five load-bearing tests are untouched -
+`test_compiler_no_full_scan.py` did not change a character, which is the
+point of the "general is the Phase-1 layout" decision. *Changed shape:*
+`test_tools_and_mcp.py::test_mcp_exposes_exactly_the_six_canonical_tools` →
+`..._the_canonical_tools` (six + `list_domains`, nothing else), and the
+transport-parity test now also checks `domain` on every capture surface and
+the read tools. *New:* `test_layout_domains.py` (10), `test_domains.py` (15,
+including **two new load-bearing tests** added to `CLAUDE.md`:
+`test_general_only_wiki_is_byte_identical_to_phase1` and
+`test_compile_never_loads_another_domains_manifest`), `test_routes.py` (+7:
+`/domains` CRUD + auth + 409/422/404, ingest/upload with `domain`, end-to-end
+compile into a domain with general untouched, `compile_update` staying in
+the routed domain), `test_tools_and_mcp.py` (+1 `list_domains`),
+`test_vector_contract.py` (+1 `ensure_index` on both adapters),
+`test_config.py` (+1 `OFFLINE_ENV`).
+
+---
+
+## 2026-09-19 — Phase 2 P2-1: partitioned cost ledger, query-side cost, Phase 2 models/prompts/ops
+
+**Goal.** Milestone P2-1 of plan §21.9 — the foundations every later Phase 2
+milestone builds on, with **no behaviour change** visible to a caller: the
+same answers, the same pages, the same routes. Two of the five linear-cost
+points named in design §4.10 are removed here (the single growing cost
+ledger; the missing query-side cost), and the L0 models, prompts and ops
+rows the other milestones need are put in place.
+
+**Implementation.**
+
+- *Partitioned ledger* (plan §21.2 C1). New `src/llmwiki/wiki/ledger.py`:
+  `CostLedger(store, writer)` appends to
+  `wiki/_meta/cost/{YYYY-MM}/{DD}-{writer}.jsonl` (keys built by the new
+  `layout.cost_key`/`cost_month_prefix`/`cost_key_day`/`check_cost_writer`),
+  under one process-local lock; `read(since, until, domain=)` lists only the
+  month prefixes the window overlaps and reads the legacy
+  `wiki/_meta/cost.jsonl` through until `migrate_legacy()` moves its lines
+  into `{DD}-legacy.jsonl` keys and deletes it; `summarize()` aggregates by
+  model/op/domain/kind/day plus the top ten sources. `Compiler._append_costs`
+  now calls the ledger (`kind="compile"`); `read_cost_ledger` stays as a
+  compat reader over both. The writer name is `Settings.cost_writer`
+  (`COST_WRITER`, default `api`); `cli.py` sets `cli`, `scripts/backfill.py`
+  `backfill`, `scripts/eval_answer.py` `eval`, `scripts/smoke_flow.py`
+  `smoke` - each via `os.environ.setdefault`, so an explicit value still
+  wins. `tools.cost_summary` reads through `factory.ledger()` and
+  `ledger.summarize()` and therefore now also fills the new breakdown fields.
+- *Query-side cost* (plan §21.2 C2). New `src/llmwiki/llm/metering.py`:
+  `MeteredLLM` (a transparent wrapper; unknown attributes resolve on the
+  wrapped client) and `collect_usage()` (a `contextvars` collector, nestable,
+  no-op when none is open). `factory.llm_client` wraps whatever it builds;
+  `tools.answer` opens a collector around the graph, sets `Answer.cost_usd`
+  and appends the records as `kind="query"`; `tools.judge_answer` does the
+  same as `kind="eval"`. A ledger write failure is logged, never fails an
+  answer. Verified against the real LangGraph graph
+  (`test_tools_answer_records_query_cost_through_the_real_graph`): the
+  compile that populated the wiki is not counted twice.
+- *Models* (plan §21.3, all additive with defaults): `GENERAL_DOMAIN`,
+  `SourceMeta.domain`, `SourceState += "paused"`, `SourceStatus += domain /
+  suggested_domain / vision_calls`, `ImageInput`, `DomainAssignment`
+  (`models/source.py`); `PageType += "overview"`, `PageFrontMatter.domain`,
+  `Domain`, `DomainRegistry` (`models/page.py`); `SearchHit += domain /
+  dense_score / lexical_score` (`models/chunk.py`); `CostKind`,
+  `CostRecord += domain / kind`, `CostSummary += by_op / by_domain / by_day /
+  by_kind / top_sources / since / until`, `Citation.domain`,
+  `CompileResult.domain`, `Answer += cost_usd / domains`, `SynthesisResult`,
+  `WorkerStatus`, `AlertState` (`models/plan.py`). Every pre-Phase-2 object
+  on disk parses unchanged; `render_page` does not yet write `domain` (P2-A1).
+- *Ops, prompts, doubles* (plan §21.2 X1). Three `config/ops.py` rows
+  (`route_domain`, `describe_image` → `openrouter`/`google/gemini-2.5-flash-lite`,
+  `synthesize_domain`); four SKILL.md-format prompts
+  (`route_domain_source.md`, `route_domain_query.md`, `describe_image.md`,
+  `synthesize_domain.md`); `FakeLLM._synthesize` rows for all three ops.
+  **Deviation from the milestone text:** `KNOWN_OPS` stays at 7 for now -
+  `test_known_ops_matches_every_real_call_site` requires the set to equal
+  the ops the code actually calls, so each name joins `KNOWN_OPS` in the
+  milestone that adds its call site (A2, A4, D1). Extra `config/ops.py` rows
+  are permitted by the loader and are in place so deployments are ready.
+- *Layering* (plan §21.5): `tests/unit/test_layering.py` gains the L1 rows
+  `lexical`, `rerank`, `notify` and adds the three names to every banned set
+  where `websearch` is; inert until the packages exist.
+- Also fixed in passing: `scripts/browse_vectors.py:135` exceeded the ruff
+  line length, so `ruff check .` was red at HEAD.
+
+**Related files.** `src/llmwiki/wiki/ledger.py` (new),
+`src/llmwiki/llm/metering.py` (new), `src/llmwiki/chains/prompts/{route_domain_source,
+route_domain_query,describe_image,synthesize_domain}.md` (new),
+`src/llmwiki/{config,factory,tools,cli}.py`, `src/llmwiki/wiki/compiler.py`,
+`src/llmwiki/storage/layout.py`, `src/llmwiki/llm/fake.py`,
+`src/llmwiki/models/{source,page,chunk,plan}.py`, `config/ops.py`,
+`scripts/{backfill,eval_answer,smoke_flow,browse_vectors}.py`, `.env.example`,
+`tests/unit/{test_ledger,test_metering}.py` (new),
+`tests/unit/{test_layering,test_factory,test_fake_llm,test_prompts_loader,
+test_config,test_lint_and_cost}.py`, `CLAUDE.md`, `docs/implement-plan-v1.4.md`
+(§21.9 row), `HISTORY.md`.
+
+**Tests.** 507 passed (459 before), 1 skipped, offline; `ruff check .` and
+`mypy` clean; `smoke_flow.py --offline`, `eval_answer.py --offline` and
+`probe_query_graph.py --offline --matrix` pass. The five load-bearing tests
+are untouched. *Changed shape, not weakened:* the two `test_factory.py`
+assertions on the concrete client class now look through `MeteredLLM`
+(`client.inner`) - announced in plan §21.10's spirit, the wrapper is the new
+contract of `factory.llm_client`. *New:* `test_ledger.py` (20 - keys, writer
+validation, per-writer keys, threaded appends, **the month-window scale
+guard** `test_windowed_read_lists_only_the_months_in_the_window`, legacy
+read-through, migrate, summarize), `test_metering.py` (7 - collector
+semantics, transparency, nesting, the real-graph query/eval recording),
+`test_fake_llm.py` (+3), `test_prompts_loader.py` (REAL_PROMPTS 5 → 11),
+`test_config.py` (+1 default), `test_lint_and_cost.py` (+1 partitioned +
+legacy through `cost_summary`). *Environment note:* two tests in the suite
+read the real `.env` through the shared `settings` fixture and fail when it
+has `LANGSMITH_TRACING=true`
+(`test_agent_graph.py::test_run_id_is_a_uuid_only_when_tracing_is_on`); that
+predates this change - run with `LANGSMITH_TRACING=false pytest` on such a
+box, as done here.
+
+---
+
+## 2026-09-18 — Phase 2 design locked: design v1.7 §4.10, plan v1.3 §21 (P2-0)
+
+**Goal.** Turn KB design §5's six-bullet Phase 2 list into an approved,
+executable design before any Phase 2 code is written. Documentation only;
+no code, configuration or test changed. This is milestone **P2-0** of the
+plan it introduces.
+
+**What was decided (design v1.4 → 1.7, new §4.10; plan v1.4 → 1.3, new
+§21).** Scope is four workstreams — **A** domain partitioning + automated
+routing (+ a scheduled per-domain synthesis job), **B** hybrid search +
+reranking, **C** usage dashboards + cost alerts (+ a per-domain serialized
+ingest worker), **D** selective multimodal; the custom mobile app is
+deferred. The design is organised around the five places in the Phase 1
+code whose cost grows with corpus size (whole-wiki gist manifest, whole-index
+rewrite per compile, one growing cost ledger, unserialized concurrent
+ingests, dense-only retrieval) rather than around the features. The load-
+bearing choices:
+
+- `general` *is* the Phase 0/1 layout under a name; other domains nest
+  beside it (`wiki/domains/{d}/…`, indexes `{base}-{d}`). Vectors partition
+  by index (the existing `index` seam), not by a metadata filter — so no
+  data migration and no re-upsert of existing vectors. Domains are a
+  curated registry (`wiki/_meta/domains.json`), never auto-created; routing
+  is one `route_domain` call per source, or none for a single-domain wiki.
+  Query scope is explicit or a policy (`all` default), never a hidden call.
+- Hybrid = a `LexicalIndex` protocol shaped like `VectorStore` (SQLite FTS5,
+  one file per index, derived and rebuildable) + reciprocal-rank fusion +
+  a `Reranker` protocol (Workers AI `bge-reranker-base`, same CF creds). The
+  `WIKI_CONFIDENCE` gate keeps reading the dense cosine (`SearchHit.
+  dense_score`), so wiki-first semantics and the two Phase 0 wiki-first tests
+  do not move.
+- Cost ledger moves to `wiki/_meta/cost/{YYYY-MM}/{DD}-{writer}.jsonl` so the
+  api, cron jobs and CLI never share a key; query-side cost is captured by a
+  `MeteredLLM` wrapper (closes the §20.1 gap); alerts evaluate on every
+  append; an optional monthly hard cap pauses post-capture processing only
+  (capture, search and answer keep working).
+- Vision is a **separate optional protocol** `VisionLLMClient.describe()`
+  — `complete()` (P5) stays byte-identical. Extractors stay LLM-free and
+  emit rendered pages; `pipeline/describe.py` turns them into markdown
+  before `extracted.md` is written; descriptions cached at
+  `raw/{id}/vision.json`; `VISION_MODE=off` is today's behaviour.
+- Three new ops (`route_domain`, `describe_image`, `synthesize_domain`;
+  `KNOWN_OPS` → 10), three new L1 packages (`lexical/`, `rerank/`,
+  `notify/`), `list_domains` as the seventh canonical MCP tool.
+
+Three user decisions recorded in §21: `list_domains` is added (not folded
+into `list_concepts`); `describe_image` ships routed to `openrouter` /
+`google/gemini-2.5-flash-lite` (the current default `glm-5.3-flash` is
+text-only; id to be verified at P2-D1); `/dashboard` accepts the bearer
+token via header or `?token=`.
+
+**Implementation.** `docs/llmwiki-KB-design_v1.4.md`: header → 1.7 with the
+update line; §4.2 gains the "hybrid also means lexical + dense" note; §4.4
+gains the Phase 2 bullet (the compiler's "whole wiki" becomes bounded by
+domain); §4.6's tool list notes `list_domains`; new §4.10 (five
+subsections: domains, hybrid retrieval, cost, multimodal, non-goals); §5's
+Phase 2 block points each bullet at its §4.10 subsection and marks the
+mobile app deferred. `docs/implement-plan-v1.4.md`: header → 1.3, contents
+row, new §21 (scope, locked decisions A1–A8/B1–B5/C1–C6/D1–D4/X1–X3, data
+model, key layout, module layout by layer with the `test_layering.py` rows,
+algorithms, surfaces, env vars + ops rows, milestones P2-1 … P2-Z, testing
+plan incl. the eight new permanent scale guards, risks). `TODOS.md`: the
+deferred items. `CLAUDE.md`: "designed, not started" paragraph.
+
+**Related files.** `docs/llmwiki-KB-design_v1.4.md`,
+`docs/implement-plan-v1.4.md`, `TODOS.md`, `CLAUDE.md`, `HISTORY.md`.
+
+**Tests.** None changed — documentation only; the 459-test suite is
+untouched. §21.10 is the testing plan every later milestone is held to: the
+five load-bearing tests stay untouched, the changed-shape tests are named
+(MCP tool count, `process_source` → `enqueue_source` patches, cloud-backend
+defaults, legacy-ledger read-through, scanned-PDF-raises kept as the
+`VISION_MODE=off` case), and `tests/unit/test_phase2_scale_guards.py` joins
+the load-bearing list when P2-A1 lands.
+
+---
+
+## 2026-09-18 — README: curl examples for querying the wiki over HTTP
+
+**Goal.** Every curl in the README was an *ingest* example (`POST /upload`,
+`POST /ingest`, `GET /sources/{id}`); the query side only said "`GET
+/answer`" in passing. A first attempt at querying with `curl -X POST
+.../answer` gets a `405`, which the README did not explain. Documentation
+only; no code change.
+
+**Implementation.** New subsection "Querying the wiki with curl" in
+`README.md` under "Query agent, tracing and evaluation": states up front
+that `/answer` is a `GET` with `q`/`k` query parameters and no bearer token
+(`src/llmwiki/api/routes.py`), uses `curl -G --data-urlencode` so questions
+with `?`/`&`/spaces are safe, shows a basic call, a `jq`-pretty-printed
+one, an answer-plus-sources filter and a query-graph inspection filter
+(`steps`, `used_rag_fallback`, cited `source_id`s, `external_refs`); an
+annotated example of the `Answer` shape (`src/llmwiki/models/plan.py`);
+and the `run_id` → `POST /feedback` follow-up, which *is* a POST and
+*does* need the token. Ends with the three failure modes a first try hits
+(`405` from `-X POST`, `422` from `-d` without `-G`, connection refused →
+`/healthz`).
+
+**Related files.** `README.md`, `HISTORY.md`.
+
+**Tests.** None — documentation only. The examples were written against
+the route signatures and response model at the time of writing; the
+`/answer` route is exercised by `tests/unit/test_routes.py`.
+
+---
+
 ## 2026-09-18 — Technical document: every `system=` call site in one table (§3.6)
 
 **Goal.** Answer two recurring questions from one place: *why* only two

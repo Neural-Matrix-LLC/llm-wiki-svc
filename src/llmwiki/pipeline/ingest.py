@@ -19,8 +19,11 @@ from urllib.parse import urlsplit
 from llmwiki.config import Settings
 from llmwiki.embedding.base import Embedder
 from llmwiki.extractors.base import ExtractionError, detect_modality, get_extractor
+from llmwiki.lexical.base import LexicalIndex
 from llmwiki.llm.base import LLMClient
+from llmwiki.models.plan import CostRecord
 from llmwiki.models.source import (
+    DomainAssignment,
     ExtractedDoc,
     Modality,
     SourceMeta,
@@ -29,21 +32,27 @@ from llmwiki.models.source import (
     SourceStatus,
 )
 from llmwiki.pipeline.chunker import chunk_document
+from llmwiki.pipeline.worker import clear_pending, domain_lock, mark_pending
 from llmwiki.storage.base import ObjectNotFound, ObjectStore
 from llmwiki.storage.layout import (
+    GENERAL,
     content_hash_for_bytes,
     content_hash_for_url,
+    domain_index_name,
     ext_for,
     raw_extracted,
     raw_meta,
     raw_original,
     raw_prefix_for_hash,
+    raw_routing,
     source_id_for,
     source_id_from_key,
     status_key,
 )
 from llmwiki.vector.base import VectorStore
 from llmwiki.wiki.compiler import Compiler
+from llmwiki.wiki.domains import load_registry, require_domain
+from llmwiki.wiki.ledger import CostLedger
 
 logger = logging.getLogger(__name__)
 
@@ -58,12 +67,19 @@ class IngestPipeline:
         embedder: Embedder,
         llm: LLMClient,
         settings: Settings,
+        lexical: LexicalIndex | None = None,
     ) -> None:
         self.store = store
         self.vectors = vectors
         self.embedder = embedder
         self.llm = llm
         self.settings = settings
+        # Phase 2 (plan §21.2 B1): the keyword half of hybrid retrieval; None
+        # means LEXICAL_BACKEND=none and nothing lexical is written.
+        self.lexical = lexical
+        # Usage of the last extract()'s image descriptions (plan §21.2 D4) -
+        # handed to the compiler so INGEST_TOKEN_BUDGET covers vision too.
+        self._vision_costs: list[CostRecord] = []
 
     # -- capture ------------------------------------------------------------
 
@@ -76,6 +92,7 @@ class IngestPipeline:
         mime: str = "",
         title: str = "",
         text: str | None = None,
+        domain: str | None = None,
     ) -> SourceRef:
         """Write the immutable raw objects. Returns immediately; nothing is compiled yet.
 
@@ -88,8 +105,17 @@ class IngestPipeline:
         * ``file`` - uploaded bytes: a PDF, or a ``.txt``/``.md`` text file.
         * ``text`` - a string pasted straight in, stored verbatim as its own
           immutable source.
+
+        ``domain`` (Phase 2, plan §21.2 A4) is the caller's explicit choice of
+        where the source is filed; it must be ``general`` or a registered
+        domain, and it is recorded on the immutable ``meta.json`` so the router
+        never second-guesses it. ``None`` leaves the decision to processing.
         """
         content_hash = self._content_hash(url=url, file=file, text=text)
+        if domain is not None:
+            # Validated before any fetch or write: an unknown domain is a
+            # caller error, and must not leave a half-captured source behind.
+            domain = require_domain(load_registry(self.store), domain)
 
         # Checked before any fetch: a URL already captured must not be pulled
         # over the network a second time just to be discarded as a duplicate.
@@ -129,6 +155,7 @@ class IngestPipeline:
             mime=resolved_mime,
             sha256=hashlib.sha256(data).hexdigest(),
             byte_size=len(data),
+            domain=domain,
         )
         extension = ext_for(resolved_mime, filename, url)
         self.store.put(raw_original(source_id, extension), data, resolved_mime)
@@ -136,6 +163,9 @@ class IngestPipeline:
             raw_meta(source_id), meta.model_dump_json(indent=2).encode(), "application/json"
         )
         self.set_status(SourceStatus(source_id=source_id, state="queued"))
+        # Owed work survives a restart (Phase 2, plan §21.2 C3): the worker's
+        # recover() resubmits every marker still present at startup.
+        mark_pending(self.store, source_id)
         logger.info("capture: source_id=%s modality=%s queued", source_id, modality)
         return SourceRef(source_id=source_id, status="queued")
 
@@ -193,18 +223,32 @@ class IngestPipeline:
             meta = self.load_meta(source_id)
             doc = self.extract(meta)
 
-            status.state = "embedding"
-            self.set_status(status)
-            logger.info("process: source_id=%s state=embedding", source_id)
-            status.chunk_count = self._embed(doc)
+            # Phase 2 (plan §21.2 A4): decide the domain once, before anything
+            # that depends on it (the chunk index, the manifest) is written.
+            assignment = self.route(meta, doc)
+            status.domain = assignment.domain
+            status.suggested_domain = assignment.suggested_domain or None
 
-            status.state = "compiling"
-            self.set_status(status)
-            logger.info("process: source_id=%s state=compiling", source_id)
-            result = Compiler(
-                self.store, self.vectors, self.embedder, self.llm, self.settings
-            ).compile_source(doc)
+            # One writer per domain manifest at a time (Phase 2, plan §21.2 C3);
+            # extraction and routing above ran unlocked, so other sources'
+            # cheap stages overlap with this domain's compile.
+            with domain_lock(assignment.domain):
+                status.state = "embedding"
+                self.set_status(status)
+                logger.info("process: source_id=%s state=embedding domain=%s",
+                            source_id, assignment.domain)
+                status.chunk_count = self._embed(doc, assignment.domain)
+
+                status.state = "compiling"
+                self.set_status(status)
+                logger.info("process: source_id=%s state=compiling", source_id)
+                result = Compiler(
+                    self.store, self.vectors, self.embedder, self.llm, self.settings,
+                    lexical=self.lexical,
+                ).compile_source(doc, domain=assignment.domain,
+                                 prior_costs=self._vision_costs)
             status.pages_touched = result.pages_touched
+            status.vision_calls = int(doc.extra.get("vision_calls", 0) or 0)
             status.state = "done"
             if result.aborted:
                 status.state = "failed"
@@ -222,6 +266,7 @@ class IngestPipeline:
         logger.info("process: source_id=%s state=%s elapsed=%.2fs",
                     source_id, status.state, status.elapsed_s)
         self.set_status(status)
+        clear_pending(self.store, source_id)
         return status
 
     def ingest_now(self, **kwargs: object) -> SourceStatus:
@@ -232,13 +277,85 @@ class IngestPipeline:
         return self.process(ref.source_id)
 
     def extract(self, meta: SourceMeta) -> ExtractedDoc:
+        """Extract, then describe any pending vision pages, then store ``extracted.md``.
+
+        Only text leaves this method (Phase 2, plan §21.2 D2): chunking, the
+        lexical index and the compiler never see an image. The description
+        step's usage is ledgered as ``kind="ingest"`` and kept on
+        ``self._vision_costs`` so the compile's budget check counts it.
+        """
         extension = ext_for(meta.mime, meta.filename, meta.url)
         data = self.store.get(raw_original(meta.source_id, extension))
-        doc = get_extractor(meta.modality).extract(meta, data)
+        cfg = self.settings
+        extractor = get_extractor(
+            meta.modality, vision_mode=cfg.vision_mode,
+            vision_max_pages=cfg.vision_max_pages_per_source,
+            vision_min_chars=cfg.vision_min_chars_per_page,
+            vision_image_area=cfg.vision_image_area_ratio,
+        )
+        doc = extractor.extract(meta, data)
+        self._vision_costs = []
+        if doc.extra.get("vision_pages"):
+            from llmwiki.pipeline.describe import describe_pending_pages
+
+            doc, usage = describe_pending_pages(doc, self.llm, cfg, self.store)
+            self._vision_costs = list(usage)
+            if usage:
+                CostLedger(self.store, writer=cfg.cost_writer).append(
+                    usage, kind="ingest", source_id=meta.source_id,
+                )
         self.store.put(raw_extracted(meta.source_id), doc.text.encode("utf-8"), "text/markdown")
         return doc
 
-    def _embed(self, doc: ExtractedDoc) -> int:
+    # -- routing (Phase 2, plan §21.2 A4) --------------------------------------------
+
+    def route(self, meta: SourceMeta, doc: ExtractedDoc) -> DomainAssignment:
+        """Decide, and persist, which domain a source is filed under.
+
+        Cheapest first: an explicit ``domain=`` at capture wins and costs
+        nothing; so does a registry with nothing but ``general`` in it, and
+        ``DOMAIN_ROUTING=off``. Otherwise one ``route_domain`` call
+        (``wiki/router.py``), whose usage is ledgered as ``kind="ingest"``.
+        The decision is written to ``raw/{id}/routing.json`` so recompiles
+        never route again.
+        """
+        if meta.domain is not None:
+            assignment = DomainAssignment(domain=meta.domain, confidence=1.0, explicit=True,
+                                          reason="named at capture")
+        else:
+            registry = load_registry(self.store)
+            if registry.is_general_only:
+                assignment = DomainAssignment(domain=GENERAL, reason="no domains registered")
+            elif self.settings.domain_routing == "off":
+                assignment = DomainAssignment(domain=GENERAL, reason="DOMAIN_ROUTING=off")
+            else:
+                from llmwiki.wiki.router import DomainRouter
+
+                router = DomainRouter(
+                    self.llm, registry, min_confidence=self.settings.domain_route_min_confidence,
+                )
+                assignment, usage = router.route_source(doc)
+                if usage:
+                    CostLedger(self.store, writer=self.settings.cost_writer).append(
+                        usage, kind="ingest", domain=assignment.domain,
+                        source_id=meta.source_id,
+                    )
+        self.store.put(
+            raw_routing(meta.source_id),
+            assignment.model_dump_json(indent=2).encode("utf-8"),
+            "application/json",
+        )
+        return assignment
+
+    def load_routing(self, source_id: str) -> DomainAssignment:
+        """The persisted routing decision; a source routed before Phase 2 is general."""
+        try:
+            raw = self.store.get(raw_routing(source_id))
+        except ObjectNotFound:
+            return DomainAssignment(domain=GENERAL, reason="pre-Phase-2 source")
+        return DomainAssignment.model_validate_json(raw)
+
+    def _embed(self, doc: ExtractedDoc, domain: str = GENERAL) -> int:
         chunks = chunk_document(
             doc,
             size=self.settings.chunk_size_chars,
@@ -253,12 +370,13 @@ class IngestPipeline:
             # The chunk text rides along so a citation needs no second fetch.
             row["text"] = chunk.text[:1000]
             metadata.append(row)
-        self.vectors.upsert(
-            self.settings.vectorize_chunks_index,
-            [chunk.id for chunk in chunks],
-            vectors,
-            metadata,
-        )
+        index = domain_index_name(self.settings.vectorize_chunks_index, domain)
+        self.vectors.upsert(index, [chunk.id for chunk in chunks], vectors, metadata)
+        if self.lexical is not None:
+            # The full chunk text is searchable; the vector row keeps its 1000
+            # chars for citations.
+            self.lexical.upsert(index, [chunk.id for chunk in chunks],
+                                [chunk.text for chunk in chunks], metadata)
         return len(chunks)
 
     # -- status -------------------------------------------------------------

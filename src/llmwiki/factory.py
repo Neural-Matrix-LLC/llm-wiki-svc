@@ -140,12 +140,87 @@ def _build_web_searcher(cfg: Settings) -> WebSearcher:
     return TavilyWebSearcher(api_key=cfg.tavily_api_key.get_secret_value())
 
 
+def lexical_index(cfg: Settings | None = None):  # type: ignore[no-untyped-def]
+    """The lexical half of hybrid retrieval, or ``None`` for ``LEXICAL_BACKEND=none``.
+
+    ``None`` is a real value (Phase 2, plan §21.2 B1): the pipeline then
+    writes no keyword rows and the retrieval seam is dense-only, byte for byte
+    the pre-Phase-2 path.
+    """
+    cfg = cfg or default_settings
+    if cfg.lexical_backend == "none":
+        return None
+    key = ("lexical", cfg.lexical_backend, str(cfg.lexical_root))
+    return _cached(key, lambda: _build_lexical_index(cfg))
+
+
+def _build_lexical_index(cfg: Settings):  # type: ignore[no-untyped-def]
+    logger.info("lexical index: backend=%s", cfg.lexical_backend)
+    if cfg.lexical_backend == "memory":
+        from llmwiki.lexical.memory import MemoryLexicalIndex
+
+        return MemoryLexicalIndex()
+
+    from llmwiki.lexical.sqlite import SqliteLexicalIndex, fts5_available
+
+    if not fts5_available():
+        raise RuntimeError(
+            "LEXICAL_BACKEND=sqlite needs an sqlite3 built with FTS5, and this interpreter's "
+            "is not; set LEXICAL_BACKEND=none (dense-only) or use a Python with FTS5"
+        )
+    return SqliteLexicalIndex(cfg.lexical_root)
+
+
+def reranker(cfg: Settings | None = None):  # type: ignore[no-untyped-def]
+    """The reranker, or ``None`` for ``RERANKER_BACKEND=none`` (Phase 2, plan §21.2 B5)."""
+    cfg = cfg or default_settings
+    if cfg.reranker_backend == "none":
+        return None
+    key = ("reranker", cfg.reranker_backend, cfg.reranker_model, cfg.cf_account_id)
+    return _cached(key, lambda: _build_reranker(cfg))
+
+
+def _build_reranker(cfg: Settings):  # type: ignore[no-untyped-def]
+    logger.info("reranker: backend=%s model=%s", cfg.reranker_backend, cfg.reranker_model)
+    if cfg.reranker_backend == "fake":
+        from llmwiki.rerank.fake import FakeReranker
+
+        return FakeReranker()
+    cfg.require("cf_account_id", "cf_api_token")
+    from llmwiki.rerank.workers_ai import WorkersAIReranker
+
+    return WorkersAIReranker(
+        account_id=cfg.cf_account_id,
+        api_token=cfg.cf_api_token.get_secret_value(),
+        model=cfg.reranker_model,
+    )
+
+
 def llm_client(cfg: Settings | None = None) -> LLMClient:
-    """Return the configured LLM client."""
+    """Return the configured LLM client, wrapped for query-side cost capture.
+
+    The wrapper (``llm/metering.py``, Phase 2 plan §21.2 C2) is transparent
+    unless a ``collect_usage()`` block is open, which only ``tools.answer`` and
+    ``tools.judge_answer`` do - the compiler keeps its own accounting.
+    """
     cfg = cfg or default_settings
     key = ("llm", cfg.llm_provider, cfg.llm_model, cfg.llm_base_url,
            str(cfg.llm_providers_config), str(cfg.llm_ops_config))
-    return _cached(key, lambda: _build_llm_client(cfg))
+    return _cached(key, lambda: _metered(_build_llm_client(cfg)))
+
+
+def _metered(client: LLMClient) -> LLMClient:
+    from llmwiki.llm.metering import MeteredLLM
+
+    return MeteredLLM(client)
+
+
+def ledger(cfg: Settings | None = None):  # type: ignore[no-untyped-def]
+    """The cost ledger for this process's writer name (Phase 2, plan §21.2 C1)."""
+    cfg = cfg or default_settings
+    from llmwiki.wiki.ledger import CostLedger
+
+    return CostLedger(object_store(cfg), writer=cfg.cost_writer)
 
 
 def _configure_langsmith(cfg: Settings) -> None:
@@ -252,7 +327,16 @@ def _build_routed_llm_client(cfg: Settings, routing: Any) -> LLMClient:
 
     from llmwiki.llm.router import RoutingLLMClient
 
-    return RoutingLLMClient(routing, clients)
+    router = RoutingLLMClient(routing, clients)
+    # Phase 2 (plan §21.2 D1): fail at startup, by name, if the vision op is
+    # routed to an adapter that cannot take images.
+    if "describe_image" in routing.ops and not router.supports_vision("describe_image"):
+        raise RuntimeError(
+            f"config/ops.py routes describe_image to provider "
+            f"{routing.ops['describe_image'].provider!r}, whose adapter has no describe(); "
+            "route it to a vision-capable provider or set VISION_MODE=off"
+        )
+    return router
 
 
 def _build_llm_client(cfg: Settings) -> LLMClient:
@@ -303,3 +387,70 @@ def reset() -> None:
     ``--offline`` flag and the test suite both do this.
     """
     _CACHE.clear()
+
+
+def compile_worker(cfg: Settings | None = None):  # type: ignore[no-untyped-def]
+    """This process's ingest worker (Phase 2, plan §21.2 C3) - one per configuration."""
+    cfg = cfg or default_settings
+    key = ("worker", cfg.worker_mode, cfg.worker_threads, cfg.storage_backend,
+           str(cfg.local_storage_path))
+    return _cached(key, lambda: _build_compile_worker(cfg))
+
+
+def _build_compile_worker(cfg: Settings):  # type: ignore[no-untyped-def]
+    from llmwiki import tools
+    from llmwiki.pipeline.ingest import IngestPipeline
+    from llmwiki.pipeline.worker import CompileWorker
+
+    logger.info("ingest worker: mode=%s threads=%d", cfg.worker_mode, cfg.worker_threads)
+    store = object_store(cfg)
+    pipeline = IngestPipeline(store, vector_store(cfg), embedder(cfg), llm_client(cfg), cfg,
+                              lexical=lexical_index(cfg))
+    return CompileWorker(
+        cfg, store,
+        process=lambda source_id: tools.process_source(source_id, cfg=cfg),
+        set_status=pipeline.set_status,
+        capped=lambda: tools.processing_capped(cfg=cfg),
+    )
+
+
+def notifier(cfg: Settings | None = None):  # type: ignore[no-untyped-def]
+    """Where cost alerts go (Phase 2, plan §21.2 C4)."""
+    cfg = cfg or default_settings
+    key = ("notifier", cfg.notify_backend, cfg.alert_telegram_chat_id)
+    return _cached(key, lambda: _build_notifier(cfg))
+
+
+def _build_notifier(cfg: Settings):  # type: ignore[no-untyped-def]
+    if cfg.notify_backend == "fake":
+        from llmwiki.notify.fake import FakeNotifier
+
+        return FakeNotifier()
+    if cfg.notify_backend == "telegram":
+        cfg.require("telegram_bot_token", "alert_telegram_chat_id")
+        from llmwiki.notify.telegram import TelegramNotifier
+
+        return TelegramNotifier(cfg.telegram_bot_token.get_secret_value(),
+                                cfg.alert_telegram_chat_id)
+    from llmwiki.notify.log import LogNotifier
+
+    return LogNotifier()
+
+
+def cost_alerts(cfg: Settings | None = None):  # type: ignore[no-untyped-def]
+    """The running-totals guard behind alerts and the hard cap (Phase 2, plan §21.2 C4/C5)."""
+    cfg = cfg or default_settings
+    key = ("alerts", cfg.storage_backend, str(cfg.local_storage_path), cfg.cost_writer,
+           cfg.cost_alert_daily_usd, cfg.cost_alert_monthly_usd, cfg.cost_hard_cap_monthly_usd,
+           cfg.notify_backend)
+    return _cached(key, lambda: _build_cost_alerts(cfg))
+
+
+def _build_cost_alerts(cfg: Settings):  # type: ignore[no-untyped-def]
+    from llmwiki.wiki.alerts import CostAlerts
+
+    def waiting() -> int:
+        status = compile_worker(cfg).status()
+        return sum(status.queued.values()) + len(status.parked)
+
+    return CostAlerts(object_store(cfg), ledger(cfg), notifier(cfg), cfg, queued=waiting)

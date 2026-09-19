@@ -132,7 +132,8 @@ def main() -> int:
     from llmwiki.vector.vectorize import VectorizeStore
 
     store = VectorizeStore(
-        settings.cf_account_id, settings.cf_api_token.get_secret_value(), probe_dim=settings.embedding_dim
+        settings.cf_account_id, settings.cf_api_token.get_secret_value(),
+        probe_dim=settings.embedding_dim,
     )
     try:
         k = min(args.limit, 100)

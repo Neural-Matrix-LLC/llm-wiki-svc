@@ -4,6 +4,46 @@ Future-planning items that are not yet scheduled into a phase. Each entry
 records what is known so the work can be picked up without re-deriving it.
 Move an item to `HISTORY.md` when it lands.
 
+## Deferred from the Phase 2 design (2026-09-18)
+
+Recorded when design v1.4 §4.10 / plan §21 were locked. None is scheduled;
+each is stated so it can be picked up without re-deriving the decision.
+
+- **Custom mobile app** — design §5's conditional Phase 2 item; stays
+  conditional on proven messaging friction. Telegram/email plus the
+  `#domain` / `[domain]` prefixes (plan §21.7) are the capture story.
+- **Compile-correctness golden set** (`scripts/eval_compile.py`) — the
+  deferred Phase 1 dataset, and the natural measurement for the per-domain
+  synthesis job (plan §21.2 A8). Shape: fixture source → expected pages
+  touched / must-link, run offline like `eval_answer.py`.
+- **Lexical retrieval inside the compiler's `_locate`** — Phase 2 keeps the
+  compiler's own lookup dense + exact-slug (§4.4 machinery untouched). Once
+  `LexicalIndex` exists (P2-B1) the change is one more query per probe.
+- **Qdrant as an alternative hybrid store** — rejected for Phase 2 (a
+  stateful container with fixed RAM plus a migration off Vectorize); the
+  `LexicalIndex`/`Reranker` seams mean it would slot in as a backend, not a
+  redesign.
+- **Qualified cross-domain wikilinks** — `[[slug]]` is ambiguous in Obsidian
+  when two domains share a slug (plan §21.2 A7). Fix when observed: write
+  `[[domains/{d}/concepts/{slug}|title]]` for non-general pages in
+  `append_sources_section` and the page prompts.
+- **Renaming `general`**, **monthly ledger retention**, and **sharing one
+  Telegram client** between `notify/telegram.py` and
+  `channels/telegram.py:_ack` — small follow-ups once the pieces exist.
+- **Per-hit retrieval scores in eval output** — plan §21.9 asked
+  `eval_answer.py` to print gate/score distributions after P2-B2; the
+  `Answer` model does not carry per-hit `dense_score`/`rerank_score`, so this
+  needs a small additive field (e.g. `Answer.retrieval: list[SearchHit]`
+  trimmed) before the script can print them.
+- **`domains reassign`** — moving an already-compiled source to another
+  domain = `delete_by_source` in the old chunk/lexical indexes, re-embed +
+  recompile into the new one, and a lint pass on the pages that still list
+  it. Not needed until a real corpus mis-routes something worth moving.
+- **Rerank-raised wiki confidence** — whether a strong reranker score should
+  count as "the wiki answers" when the dense cosine is below
+  `WIKI_CONFIDENCE`. Decide from the score distributions
+  `scripts/eval_answer.py` prints after P2-B2, on the real corpus.
+
 ## Ingestion: two more URL source kinds (2026-09-17)
 
 Both extend the five-source-kind surface (technical document §3.1.1) with a

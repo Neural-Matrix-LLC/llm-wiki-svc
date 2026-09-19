@@ -9,6 +9,7 @@ import logging
 from llmwiki import factory
 from llmwiki.config import Settings
 from llmwiki.llm import routing_config
+from llmwiki.llm.metering import MeteredLLM
 
 
 def test_llm_client_build_logs_the_provider_and_model(caplog) -> None:
@@ -59,7 +60,10 @@ def test_routed_mode_builds_a_routing_client_and_answers(tmp_path) -> None:
 
     from llmwiki.llm.router import RoutingLLMClient
 
-    assert isinstance(client, RoutingLLMClient)
+    # Phase 2 (plan §21.2 C2): the factory hands out the client behind the
+    # transparent metering wrapper; the routed client is what it wraps.
+    assert isinstance(client, MeteredLLM)
+    assert isinstance(client.inner, RoutingLLMClient)
     response = client.complete(op="answer_query", system="s", prompt="p")
     assert response.text
     factory.reset()
@@ -107,6 +111,7 @@ def test_absent_routing_config_leaves_the_fallback_path_untouched(tmp_path) -> N
     from llmwiki.llm.fake import FakeLLM
     from llmwiki.llm.router import RoutingLLMClient
 
-    assert isinstance(client, FakeLLM)
-    assert not isinstance(client, RoutingLLMClient)
+    assert isinstance(client, MeteredLLM)
+    assert isinstance(client.inner, FakeLLM)
+    assert not isinstance(client.inner, RoutingLLMClient)
     factory.reset()

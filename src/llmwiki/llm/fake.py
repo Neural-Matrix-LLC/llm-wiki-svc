@@ -59,6 +59,32 @@ class FakeLLM:
         data = self._synthesize(op, prompt, schema)
         return LLMResponse(text=data.get("text", json.dumps(data)), data=data, usage=usage)
 
+    def describe(
+        self,
+        *,
+        op: str,
+        system: str,
+        prompt: str,
+        images: list,
+        model: str | None = None,
+        max_tokens: int | None = None,
+        temperature: float | None = None,
+    ) -> LLMResponse:
+        """Vision form (Phase 2): a deterministic description naming what it was given."""
+        self.calls.append({
+            "op": op, "system": system, "prompt": prompt, "model": model,
+            "max_tokens": max_tokens, "temperature": temperature, "images": len(images),
+        })
+        usage = CostRecord(op=op, model=model or "fake", input_tokens=len(prompt) // 4 + 800,
+                           output_tokens=96, cost_usd=0.0)
+        if op in self.responses:
+            data = self.responses[op]
+            return LLMResponse(text=data.get("text", json.dumps(data)), data=data, usage=usage)
+        sizes = ", ".join(f"{len(image.data)} bytes {image.media_type}" for image in images)
+        text = (f"Offline description of {len(images)} image(s) ({sizes}) for: {prompt}\n\n"
+                "Transcribed text: (none - offline double)")
+        return LLMResponse(text=text, data={"text": text}, usage=usage)
+
     def _synthesize(self, op: str, prompt: str, schema: dict | None = None) -> dict:
         # Query-agent skill selection (plan §19.5, R5) reuses the answer_query
         # op with its own schema shape rather than a distinct op - detected
@@ -76,6 +102,38 @@ class FakeLLM:
                     "reason": "offline: answer from what was retrieved"}
         if op == "judge_answer":
             return {"grounded": True, "score": 1.0, "reasoning": "offline: not judged"}
+        # Phase 2 (plan §21.2 X1). route_domain: pick the first registered domain
+        # the schema offers other than general when the prompt mentions it,
+        # else general - deterministic, never invents a name. The query form
+        # asks for a list ("domains") instead of one ("domain").
+        if op == "route_domain":
+            props = (schema or {}).get("properties", {})
+            if "domains" in props:
+                enum = props["domains"].get("items", {}).get("enum", [])
+                return {"domains": [d for d in enum if d != "general"][:1] or enum[:1]}
+            enum = props.get("domain", {}).get("enum", [])
+            # Only the source itself counts - the prompt's registry listing
+            # names every domain, and would otherwise match every time.
+            lowered = prompt.split("# Source", 1)[-1].lower()
+            for name in enum:
+                if name != "general" and name.lower() in lowered:
+                    return {"domain": name, "confidence": 0.9, "suggested_domain": "",
+                            "reason": "offline: name appears in the source"}
+            return {"domain": "general", "confidence": 1.0, "suggested_domain": "",
+                    "reason": "offline: nothing registered matched"}
+        if op == "describe_image":
+            return {"text": f"Offline image description ({len(prompt)} chars of context)."}
+        if op == "synthesize_domain":
+            return {
+                "title": "Overview",
+                "gist": "Offline overview of the domain.",
+                "body": (
+                    "## Overview\n\n"
+                    f"{' '.join(prompt.split()[:60])}\n\n"
+                    "## Key pages\n\n"
+                    "Compiled offline by the fake LLM.\n"
+                ),
+            }
         terms = self._salient_terms(prompt)
         if op == "summarize_source":
             return {

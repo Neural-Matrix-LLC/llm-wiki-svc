@@ -24,12 +24,14 @@ the wait.
 
 from __future__ import annotations
 
+import base64
 from collections.abc import Callable
 from typing import Any
 
 from llmwiki.llm import pricing
 from llmwiki.llm.base import LLMResponse
 from llmwiki.models.plan import CostRecord
+from llmwiki.models.source import ImageInput
 
 TOOL_NAME = "emit"
 
@@ -97,6 +99,33 @@ class LangChainLLM:
             self._models[key] = self._build(model, max_tokens, temperature)
         return self._models[key]
 
+    def describe(
+        self,
+        *,
+        op: str,
+        system: str,
+        prompt: str,
+        images: list[ImageInput],
+        model: str | None = None,
+        max_tokens: int | None = None,
+        temperature: float | None = None,
+    ) -> LLMResponse:
+        """Vision form of :meth:`complete` (Phase 2, plan §21.2 D1).
+
+        LangChain's provider-neutral multimodal message: ``image_url`` parts
+        carrying ``data:`` URIs, then the text part. Works for OpenAI, Google,
+        OpenRouter and vLLM vision models alike.
+        """
+        content: list[dict[str, Any]] = [
+            {"type": "image_url",
+             "image_url": {"url": f"data:{image.media_type};base64,"
+                                  f"{base64.b64encode(image.data).decode('ascii')}"}}
+            for image in images
+        ]
+        content.append({"type": "text", "text": prompt})
+        return self.complete(op=op, system=system, prompt=content, model=model,  # type: ignore[arg-type]
+                             max_tokens=max_tokens, temperature=temperature)
+
     def complete(
         self,
         *,
@@ -120,7 +149,7 @@ class LangChainLLM:
         # Named by op so a LangSmith trace reads "agent_step", "answer_query",
         # not "ChatOpenAI" (Phase 1-D, D9). Free when tracing is off.
         message = runnable.invoke(
-            [SystemMessage(system), HumanMessage(prompt)],
+            [SystemMessage(system), HumanMessage(content=prompt)],
             config={"run_name": op, "metadata": {"op": op, "model": chosen}},
         )
 

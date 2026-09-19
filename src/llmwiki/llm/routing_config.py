@@ -45,6 +45,15 @@ KNOWN_OPS = frozenset({
     # route it to the cheapest model - and the eval-only groundedness judge.
     "agent_step",
     "judge_answer",
+    # Phase 2 (design §4.10.1): the source/query domain router - one small
+    # forced-schema call, cheapest model, only when >1 domain is registered.
+    "route_domain",
+    # Phase 2 (design §4.10.1): the scheduled per-domain overview page.
+    "synthesize_domain",
+    # Phase 2 (design §4.10.4): image / page-as-image description - the only
+    # op that goes through VisionLLMClient.describe(); must route to a
+    # vision-capable model.
+    "describe_image",
 })
 
 DEFAULT_TEMPERATURE = 1.0

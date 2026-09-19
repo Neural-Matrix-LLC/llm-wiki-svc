@@ -133,12 +133,13 @@ def test_action_schema_enumerates_offered_tools_plus_answer(agent) -> None:
     assert schema["properties"]["action"]["enum"] == [
         "search_wiki", "search_chunks", "get_page", "answer",
     ]
-    assert set(schema["properties"]["args"]["properties"]) == {"query", "k", "slug"}
+    # Phase 2: every search/read tool takes an optional domain scope.
+    assert set(schema["properties"]["args"]["properties"]) == {"query", "k", "slug", "domain"}
     assert schema["required"] == ["action", "reason"]
 
 
 def test_describe_tools_lists_each_tool_with_its_arguments(agent) -> None:
     text = toolkit.describe_tools(toolkit.build_tools(agent))
-    assert "- search_wiki(query: string, k: integer)" in text
-    assert "- get_page(slug: string)" in text
+    assert "- search_wiki(query: string, k: integer, domain: string)" in text
+    assert "- get_page(slug: string, domain: string)" in text
     assert text.endswith("answer from what was retrieved")

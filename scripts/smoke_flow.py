@@ -39,7 +39,7 @@ def main() -> int:
     args = ap.parse_args()
 
     if args.offline:
-        os.environ.update(STORAGE_BACKEND="local", VECTOR_BACKEND="memory",
+        os.environ.update(RERANKER_BACKEND="fake", STORAGE_BACKEND="local", VECTOR_BACKEND="memory",
                           EMBEDDING_BACKEND="fake", LLM_PROVIDER="fake")
         os.environ.setdefault("LOCAL_STORAGE_PATH", str(REPO / ".data"))
         # LLM_PROVIDER=fake alone is not enough: factory.py checks
@@ -54,6 +54,7 @@ def main() -> int:
     from llmwiki import __version__, tools
     from llmwiki.config import load_settings
 
+    os.environ.setdefault("COST_WRITER", "smoke")  # Phase 2, plan §21.2 C1
     settings = load_settings()
     print(f"llmwiki {__version__} | storage={settings.storage_backend} "
           f"vector={settings.vector_backend} embed={settings.embedding_backend} "
@@ -112,12 +113,71 @@ def main() -> int:
 
     step(7, "lint")
     report = tools.lint_wiki(dry_run=True, cfg=settings)
-    print(f"    {report.page_count} pages, {len(report.findings)} findings")
+    print(f"    {report.page_count} pages, {len(report.findings)} findings "
+          f"(domains: {', '.join(report.domains)})")
     for finding in report.findings[:5]:
         print(f"      {finding.kind}: {finding.slug} - {finding.detail}")
 
+    # --- Phase 2 (design §4.10): a second domain, scoped and fanned-out queries,
+    # hybrid retrieval, usage, and - offline only - an image described by the
+    # fake vision model. Only in --offline mode, so a live run never registers
+    # a throwaway domain in the real registry.
+    extra_ids: list[str] = []
+    if args.offline:
+        step(8, "phase 2: a second domain")
+        domain = "smoke-domain"
+        tools.upsert_domain(domain, "Smoke-test domain (offline only)", cfg=settings)
+        second = tools.ingest_now(
+            text="# Paged attention\n\nPagedAttention keeps KV-cache blocks XK-7781 resident "
+                 "on the GPU so decoding never copies them.\n",
+            title="Paged attention notes", domain=domain, cfg=settings,
+        )
+        assert second.state == "done" and second.domain == domain, second
+        extra_ids.append(second.source_id)
+        names = [d.name for d in tools.list_domains(cfg=settings)]
+        assert names == ["general", domain], names
+        assert tools.list_concepts(domain=domain, cfg=settings), "the domain has no pages"
+        assert not any(g.slug == "paged-attention" for g in tools.list_concepts(cfg=settings)), (
+            "general's manifest must not see the domain's pages")
+        print(f"    domains={names}; {second.pages_touched} page(s) compiled into {domain}")
+
+        step(9, "phase 2: scoped and fanned-out retrieval (hybrid + fake reranker)")
+        scoped = tools.search_wiki("XK-7781 paged attention", domain=domain, cfg=settings)
+        assert scoped and all(h.domain == domain for h in scoped), scoped
+        everywhere = tools.answer("what keeps KV-cache blocks on the GPU?", cfg=settings)
+        assert everywhere.domains == ["general", domain], everywhere.domains
+        assert everywhere.citations, "the fanned-out answer carries no citations"
+        lexical_hits = sum(h.lexical_score is not None for h in scoped)
+        print(f"    scoped hits={len(scoped)} (lexical={lexical_hits}); "
+              f"answer searched {everywhere.domains}, cost ${everywhere.cost_usd:.4f}")
+
+        step(10, "phase 2: usage, worker, synthesis")
+        usage = tools.usage_summary(cfg=settings)
+        assert {"compile", "query"} <= set(usage.by_kind), usage.by_kind
+        assert domain in usage.by_domain, usage.by_domain
+        worker = tools.worker_status(cfg=settings)
+        assert not worker.paused
+        synthesized = tools.synthesize(domain, cfg=settings)[0]
+        assert synthesized.written, synthesized
+        print(f"    usage kinds={sorted(usage.by_kind)} domains={sorted(usage.by_domain)}; "
+              f"worker mode={worker.mode}; overview written ({synthesized.pages_read} pages read)")
+
+        step(11, "phase 2: an image described by the (fake) vision model")
+        import pymupdf
+
+        pixmap = pymupdf.Pixmap(pymupdf.csRGB, pymupdf.IRect(0, 0, 64, 48), False)
+        pixmap.clear_with(120)
+        vision_cfg = settings.model_copy(update={"vision_mode": "auto"})
+        image = tools.ingest_now(file=bytes(pixmap.tobytes("png")), filename="board.png",
+                                 mime="image/png", title="Whiteboard", cfg=vision_cfg)
+        assert image.state == "done" and image.vision_calls == 1, image
+        extra_ids.append(image.source_id)
+        print(f"    image source {image.source_id}: vision_calls={image.vision_calls}")
+
     if not args.keep:
         tools.delete_source(ref.source_id, cfg=settings)
+        for source_id in extra_ids:
+            tools.delete_source(source_id, cfg=settings)
         print("\n    cleaned up (pass --keep to retain)")
 
     print("\nSMOKE PASS")

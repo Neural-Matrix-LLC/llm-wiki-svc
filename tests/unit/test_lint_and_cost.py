@@ -106,3 +106,27 @@ def test_malformed_ledger_lines_are_skipped_not_fatal(store) -> None:
 
     store.put(COST_KEY, b'{"op":"a","model":"m"}\nnot json at all\n\n')
     assert len(read_cost_ledger(store)) == 1
+
+
+def test_cost_summary_reads_partitioned_and_legacy_keys_together(store) -> None:
+    """Phase 2 (plan §21.2 C1): new lines live under wiki/_meta/cost/{month}/; the
+    legacy file above is still read through, so nothing is lost before migration."""
+    from llmwiki import factory, tools
+    from llmwiki.config import Settings
+    from llmwiki.wiki.ledger import CostLedger
+
+    store.put(COST_KEY, (CostRecord(op="old", model="m", cost_usd=0.5).model_dump_json()
+                         + "\n").encode())
+    CostLedger(store, writer="api").append([CostRecord(op="new", model="m", cost_usd=0.25)])
+
+    cfg = Settings(_env_file=None, storage_backend="local",
+                   local_storage_path=store.root, vector_backend="memory",
+                   embedding_backend="fake", llm_backend="fake")
+    factory.reset()
+    summary = tools.cost_summary(cfg=cfg)
+    factory.reset()
+
+    assert summary.call_count == 2
+    assert round(summary.total_usd, 5) == 0.75
+    assert summary.by_op == {"old": 0.5, "new": 0.25}
+    assert summary.by_kind == {"compile": 0.75}

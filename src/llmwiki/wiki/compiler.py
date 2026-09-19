@@ -26,13 +26,14 @@ guards the design's central constraint and must never be weakened.
 
 from __future__ import annotations
 
-import json
 import logging
+from collections.abc import Sequence
 from datetime import date
 
 from llmwiki.chains.prompts_loader import load_prompt
 from llmwiki.config import Settings
 from llmwiki.embedding.base import Embedder
+from llmwiki.lexical.base import LexicalIndex
 from llmwiki.llm.base import LLMClient, TokenBudgetExceeded
 from llmwiki.models.page import PageFrontMatter, PageGist, WikiPage
 from llmwiki.models.plan import (
@@ -43,10 +44,11 @@ from llmwiki.models.plan import (
     SourceSummary,
 )
 from llmwiki.models.source import ExtractedDoc
-from llmwiki.storage.base import ObjectNotFound, ObjectStore
-from llmwiki.storage.layout import COST_KEY, slugify, wiki_source_note
+from llmwiki.storage.base import ObjectStore
+from llmwiki.storage.layout import GENERAL, domain_index_name, slugify, wiki_source_note
 from llmwiki.vector.base import VectorStore
 from llmwiki.wiki import gists as gists_mod
+from llmwiki.wiki.ledger import CostLedger
 from llmwiki.wiki.pages import (
     VersionConflict,
     append_sources_section,
@@ -118,25 +120,50 @@ class Compiler:
         embedder: Embedder,
         llm: LLMClient,
         settings: Settings,
+        lexical: LexicalIndex | None = None,
     ) -> None:
         self.store = store
         self.vectors = vectors
         self.embedder = embedder
         self.llm = llm
         self.settings = settings
+        # Phase 2 (plan §21.2 B1): gist rows mirrored into the keyword index
+        # so search_wiki can find a page by an exact term; None = not built.
+        self.lexical = lexical
         self._page_reads = 0
         self._costs: list[CostRecord] = []
+        self._prior_tokens = 0
+        # The domain of the compile in progress (Phase 2, plan §21.2 A1): every
+        # manifest, page and gist-vector key below is derived from it. General is
+        # the Phase 0/1 layout verbatim.
+        self._domain = GENERAL
 
     # -- public API ---------------------------------------------------------
 
-    def compile_source(self, doc: ExtractedDoc, force: bool = False) -> CompileResult:
-        """Run the full five-stage pass for one source."""
-        logger.info("compile start: source_id=%s title=%r", doc.source_id, doc.title)
+    def compile_source(
+        self, doc: ExtractedDoc, force: bool = False, domain: str = GENERAL,
+        prior_costs: Sequence[CostRecord] = (),
+    ) -> CompileResult:
+        """Run the full five-stage pass for one source, into one domain.
+
+        Only ``domain``'s manifest is ever loaded (plan §21.10's scale guard):
+        another domain's pages are invisible to this compile by construction.
+        ``prior_costs`` (Phase 2, plan §21.2 D4) is spend the same ingest
+        already made - image descriptions - counted against
+        ``INGEST_TOKEN_BUDGET`` here but ledgered by whoever made it.
+        """
+        logger.info("compile start: source_id=%s title=%r domain=%s",
+                    doc.source_id, doc.title, domain)
         self._page_reads = 0
         self._costs = []
-        result = CompileResult(source_id=doc.source_id)
+        self._prior_tokens = sum(
+            record.input_tokens + record.output_tokens + record.cache_read_tokens
+            for record in prior_costs
+        )
+        self._domain = domain
+        result = CompileResult(source_id=doc.source_id, domain=domain)
 
-        manifest = gists_mod.load_gists(self.store)
+        manifest = gists_mod.load_gists(self.store, domain)
         if not force and self._already_compiled(manifest, doc.source_id):
             result.reason = "source already compiled; nothing to do"
             result.skipped = [
@@ -206,13 +233,16 @@ class Compiler:
         vectors = self.embedder.embed(probes)
         for vector in vectors:
             hits = self.vectors.query(
-                self.settings.vectorize_gists_index,
+                self._gists_index,
                 vector,
                 k=self.settings.compile_candidate_pages,
             )
             for hit in hits:
                 slug = hit.slug or hit.id
-                if slug in manifest and slug not in found:
+                # The domain's overview page is written by the scheduled
+                # synthesis job (Phase 2, plan §21.2 A8), never patched per
+                # source - that is what keeps synthesis off the ingest path.
+                if slug in manifest and slug not in found and manifest[slug].type != "overview":
                     found[slug] = manifest[slug]
 
         # Exact-name matches the vector index may not have indexed yet.
@@ -327,6 +357,7 @@ class Compiler:
                 title=op.title or op.slug.replace("-", " ").title(),
                 slug=op.slug,
                 type=op.type,
+                domain=self._domain,
                 gist=data.get("gist", summary.gist)[:200],
                 sources=[doc.source_id],
                 updated=date.today(),
@@ -385,7 +416,8 @@ class Compiler:
     ) -> None:
         """Persist the manifest, index, source note and cost ledger. No LLM calls."""
         note = self._source_note(doc, result)
-        self.store.put(wiki_source_note(doc.source_id), note.encode("utf-8"), "text/markdown")
+        self.store.put(wiki_source_note(doc.source_id, self._domain), note.encode("utf-8"),
+                       "text/markdown")
 
         # The source note is a page, so it belongs in the manifest: a page that
         # storage has but the manifest does not is exactly what lint calls an
@@ -402,8 +434,16 @@ class Compiler:
                 version=1,
             ),
         )
-        gists_mod.save_gists(self.store, manifest)
-        gists_mod.write_index(self.store, manifest)
+        gists_mod.save_gists(self.store, manifest, self._domain)
+        # General's index also lists the registered domains - from the registry
+        # (one small read), never from their manifests. A domain's own index
+        # needs nothing beyond its manifest.
+        registry = None
+        if self._domain == GENERAL:
+            from llmwiki.wiki.domains import load_registry
+
+            registry = load_registry(self.store)
+        gists_mod.write_index(self.store, manifest, self._domain, registry)
 
         result.cost_usd = sum(record.cost_usd for record in self._costs)
         result.page_bodies_read = self._page_reads
@@ -421,7 +461,8 @@ class Compiler:
             f"sources: [{doc.source_id}]\n"
             f"updated: {date.today().isoformat()}\n"
             "version: 1\n"
-            "---\n\n"
+            + (f"domain: {self._domain}\n" if self._domain != GENERAL else "")
+            + "---\n\n"
             f"# {doc.title}\n\n"
             f"- Modality: {doc.modality}\n"
             f"- URL: {doc.url or 'n/a'}\n"
@@ -436,7 +477,7 @@ class Compiler:
         """The single counted path to a page body. Everything else uses gists."""
         page_type = manifest[slug].type if slug in manifest else "concept"
         self._page_reads += 1
-        return read_page(self.store, slug, page_type)
+        return read_page(self.store, slug, page_type, self._domain)
 
     def _sync_gist(self, page: WikiPage, manifest: dict[str, PageGist]) -> None:
         """Refresh the manifest row and the page's gist vector, together."""
@@ -451,13 +492,16 @@ class Compiler:
             version=fm.version,
         )
         gists_mod.upsert_gist(manifest, gist)
-        vector = self.embedder.embed([f"{gist.title}. {gist.gist}"])[0]
-        self.vectors.upsert(
-            self.settings.vectorize_gists_index,
-            [gist.slug],
-            [vector],
-            [gists_mod.gist_vector_metadata(gist)],
-        )
+        text = f"{gist.title}. {gist.gist}"
+        vector = self.embedder.embed([text])[0]
+        metadata = gists_mod.gist_vector_metadata(gist)
+        self.vectors.upsert(self._gists_index, [gist.slug], [vector], [metadata])
+        if self.lexical is not None:
+            self.lexical.upsert(self._gists_index, [gist.slug], [text], [metadata])
+
+    @property
+    def _gists_index(self) -> str:
+        return domain_index_name(self.settings.vectorize_gists_index, self._domain)
 
     @staticmethod
     def _already_compiled(manifest: dict[str, PageGist], source_id: str) -> bool:
@@ -468,7 +512,7 @@ class Compiler:
             self._costs.append(usage)
 
     def _check_budget(self) -> None:
-        spent = sum(
+        spent = self._prior_tokens + sum(
             record.input_tokens + record.output_tokens + record.cache_read_tokens
             for record in self._costs
         )
@@ -479,39 +523,22 @@ class Compiler:
             )
 
     def _append_costs(self, source_id: str) -> None:
-        """Append to ``wiki/_meta/cost.jsonl``.
+        """Append this compile's records to the partitioned ledger (Phase 2, plan §21.2 C1).
 
-        Object stores have no append, so this is read-modify-write.  Fine for a
-        single-writer Phase 0; a concurrent writer would need per-day ledger
-        objects instead.
+        One key per day per writing process, so the API and a cron job never
+        race on the same object; the ledger holds the process-local lock.
         """
         if not self._costs:
             return
-        try:
-            existing = self.store.get(COST_KEY).decode("utf-8")
-        except ObjectNotFound:
-            existing = ""
-        lines = [
-            record.model_copy(update={"source_id": source_id}).model_dump_json()
-            for record in self._costs
-        ]
-        payload = existing + ("" if existing.endswith("\n") or not existing else "\n")
-        payload += "\n".join(lines) + "\n"
-        self.store.put(COST_KEY, payload.encode("utf-8"), "application/x-ndjson")
+        CostLedger(self.store, writer=self.settings.cost_writer).append(
+            self._costs, kind="compile", source_id=source_id, domain=self._domain,
+        )
 
 
 def read_cost_ledger(store: ObjectStore) -> list[CostRecord]:
-    """Parse the cost ledger. Malformed lines are skipped, not fatal."""
-    try:
-        raw = store.get(COST_KEY).decode("utf-8")
-    except ObjectNotFound:
-        return []
-    records = []
-    for line in raw.splitlines():
-        if not line.strip():
-            continue
-        try:
-            records.append(CostRecord(**json.loads(line)))
-        except Exception:
-            continue
-    return records
+    """Every ledger record, partitioned keys and the legacy file alike.
+
+    Kept for the callers and tests written against the single-file ledger;
+    new code should use :class:`llmwiki.wiki.ledger.CostLedger` with a window.
+    """
+    return CostLedger(store).read()

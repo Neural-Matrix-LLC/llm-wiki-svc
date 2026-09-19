@@ -108,22 +108,25 @@ them testable with a spy store or a scripted LLM.
 
 | Path | Layer | Responsibility |
 |---|---|---|
-| `models/` | L0 | Pydantic schemas only: `source.py`, `chunk.py`, `page.py`, `plan.py`. No I/O. |
+| `models/` | L0 | Pydantic schemas only: `source.py`, `chunk.py`, `page.py`, `plan.py`. No I/O. Phase 2 (§12) added `GENERAL_DOMAIN`, `ImageInput`, `DomainAssignment`, `Domain`/`DomainRegistry`, `CostKind`, `SynthesisResult`, `WorkerStatus`, `AlertState` and `domain`/`dense_score`/`cost_usd` fields on the existing shapes. |
 | `storage/` | L1 | `ObjectStore` protocol (`base.py`), `LocalObjectStore`, `R2ObjectStore`, and `layout.py` (the *only* module that builds object keys). |
-| `extractors/` | L1 | `Extractor` protocol + modality detection (`base.py`), and one module per modality: `pdf.py`, `web.py`, `youtube.py`, `text.py`. |
+| `extractors/` | L1 | `Extractor` protocol + modality detection (`base.py`), and one module per modality: `pdf.py`, `web.py`, `youtube.py`, `text.py`, `image.py` (Phase 2). Extractors are LLM-free: `pdf.py`/`image.py` hand rendered pages to `pipeline/describe.py` (§12.4). |
 | `embedding/` | L1 | `Embedder` protocol (`base.py`), `WorkersAIEmbedder`, `FakeEmbedder`. |
-| `vector/` | L1 | `VectorStore` protocol (`base.py`), `VectorizeStore`, `MemoryVectorStore`. |
-| `llm/` | L1 | `LLMClient` protocol (`base.py`), `AnthropicLLM`, `LangChainLLM`, `FakeLLM`, the provider registry, pricing, and the R1–R3 multi-provider router (`router.py`, `routing_config.py`). `KNOWN_OPS` is seven ops since Phase 1-D (§3.5). |
+| `vector/` | L1 | `VectorStore` protocol (`base.py`, + `ensure_index` since Phase 2), `VectorizeStore`, `MemoryVectorStore`. |
+| `lexical/` | L1 | Phase 2 (§12.2): `LexicalIndex` protocol (`base.py`, the same shape as `VectorStore`), `SqliteLexicalIndex` (FTS5, one file per index), `MemoryLexicalIndex` (BM25). |
+| `rerank/` | L1 | Phase 2 (§12.2): `Reranker` protocol, `WorkersAIReranker` (`bge-reranker-base`), `FakeReranker`. |
+| `notify/` | L1 | Phase 2 (§12.3): `Notifier` protocol, `LogNotifier`, `TelegramNotifier`, `FakeNotifier` — where cost alerts go. |
+| `llm/` | L1 | `LLMClient` protocol (`base.py`) and, since Phase 2, the optional `VisionLLMClient` (`describe()`), `AnthropicLLM`, `LangChainLLM`, `FakeLLM`, the provider registry, pricing, the R1–R3 multi-provider router (`router.py`, `routing_config.py`) and `metering.py` (`MeteredLLM` + `collect_usage()`, query-side cost). `KNOWN_OPS` is ten ops since Phase 2 (§3.5, §12). |
 | `websearch/` | L1 | `WebSearcher` protocol (`base.py`), `TavilyWebSearcher` (`langchain-tavily`, imported only when selected), `FakeWebSearcher`. The query graph's optional `search_web` tool backend (§3.3, §5.11). |
-| `wiki/` | L2 | `compiler.py` (the incremental compiler), `pages.py` (read/write/parse), `gists.py` (the manifest + index), `lint.py` (scheduled global check). |
-| `agent/` | L2 | `query.py` — `QueryAgent`: public surface (`search`, `answer`, `source_exists`) plus the helpers the graph reuses. `graph.py` — the LangGraph `StateGraph` behind `answer()` (§3.3). `toolkit.py` — the LangChain tools the loop may call and the policy gate. `judge.py` — the eval-only groundedness grader. `skills.py` — `discover_skills()`, reads the repo-root `skills/` SKILL.md catalog. See §2.4. |
-| `chains/` | L1/L2-adjacent | `prompts_loader.py` + `prompts/*.md` — the seven prompt templates: the compiler's four (always), `answer_query` (query agent when no `skills/` catalog is discovered), `agent_step` (the graph's tool decision) and `judge_answer` (eval). **Not** the same thing as repo-root `skills/` — see §2.4. |
-| `pipeline/` | L3 | `ingest.py` (`IngestPipeline` — capture/extract/embed/compile orchestration), `chunker.py` (heading-aware text chunking). |
+| `wiki/` | L2 | `compiler.py` (the incremental compiler), `pages.py` (read/write/parse), `gists.py` (the manifest + index — one per domain), `lint.py` (scheduled check, per domain). Phase 2 (§12): `domains.py` (registry, `DomainScope`, `resolve_scopes`), `router.py` (`DomainRouter`), `ledger.py` (`CostLedger`), `alerts.py` (`CostAlerts`, the hard cap), `synthesis.py` (the overview page). |
+| `agent/` | L2 | `query.py` — `QueryAgent`: public surface (`search`, `answer`, `source_exists`) plus the helpers the graph reuses. `graph.py` — the LangGraph `StateGraph` behind `answer()` (§3.3). `toolkit.py` — the LangChain tools the loop may call and the policy gate. `retrieval.py` — Phase 2 (§12.2): the one dense/lexical/rerank seam every query goes through. `judge.py` — the eval-only groundedness grader. `skills.py` — `discover_skills()`, reads the repo-root `skills/` SKILL.md catalog. See §2.4. |
+| `chains/` | L1/L2-adjacent | `prompts_loader.py` + `prompts/*.md` — the prompt templates: the compiler's four (always), `answer_query` (query agent when no `skills/` catalog is discovered), `agent_step` (the graph's tool decision), `judge_answer` (eval) and, since Phase 2, `route_domain_source`/`route_domain_query`, `describe_image`, `synthesize_domain`. **Not** the same thing as repo-root `skills/` — see §2.4. |
+| `pipeline/` | L3 | `ingest.py` (`IngestPipeline` — capture/extract/describe/route/embed/compile orchestration), `chunker.py` (heading-aware text chunking). Phase 2 (§12): `worker.py` (`CompileWorker`, `domain_lock`, pending markers), `describe.py` (vision pages → markdown), `lexical_rebuild.py`. |
 | `tools.py` | L4 | Every function any transport calls. This *is* the public Python API (§6.1). |
 | `eval/` | L4 | `dataset.py` (golden-set JSONL ↔ LangSmith), `evaluators.py`, `run.py` (local runner + `langsmith.evaluate` wrapper), `feedback.py` (corrections → examples). A peer of `cli.py`: reaches the domain only through `tools.py`; `langsmith` imported function-locally. §10. |
-| `api/` | L5 | `app.py` (FastAPI app + MCP mount), `routes.py` (HTTP handlers). |
-| `mcp/` | L5 | `server.py` — the six agent-facing MCP tools, same functions as `api/routes.py`. |
-| `cli.py` | L5 | `llmwiki` console script (incl. `ask`, `feedback`). |
+| `api/` | L5 | `app.py` (FastAPI app + MCP mount + the worker's lifespan), `routes.py` (HTTP handlers), `dashboard.py` (Phase 2: the server-rendered usage page). |
+| `mcp/` | L5 | `server.py` — the seven agent-facing MCP tools (six canonical + `list_domains` since Phase 2), same functions as `api/routes.py`. |
+| `cli.py` | L5 | `llmwiki` console script (incl. `ask`, `feedback`, and since Phase 2 `domains`, `usage`, `worker`, `lexical rebuild`, `synthesize`). |
 | `channels/` | L5 | Telegram and email webhook capture channels (Phase 1 A/B). |
 | `factory.py` | outside ladder | Builds concrete adapters from `Settings`. Only `tools.py` and `cli.py` call it. |
 | `config.py` | outside ladder | `Settings` (pydantic-settings) — the only module reading `.env`/`os.environ`, except `llm/routing_config.py` (§5.6). |
@@ -1248,16 +1251,24 @@ marked 🔒 below.
 | Method & path | Auth | Body / Query | Response model | Calls |
 |---|:-:|---|---|---|
 | `GET /healthz` | — | — | `dict` | `tools.health()` |
-| `POST /ingest` | 🔒 | JSON `{url, title?}` **or** `{text, title?}` | `SourceRef` | `tools.ingest_source()` + background `process_source`. Exactly one of `url`/`text`, enforced by a model validator → 422. |
-| `POST /upload` | 🔒 | multipart `file`, `title?` | `SourceRef` | same, for the file kinds (PDF, `.txt`/`.md`, HTML, image) |
+| `POST /ingest` | 🔒 | JSON `{url, title?, domain?}` **or** `{text, title?, domain?}` | `SourceRef` | `tools.ingest_source()` + background `tools.enqueue_source` (the ingest worker, §12.3). Exactly one of `url`/`text`, enforced by a model validator → 422; an unknown `domain` → 404. |
+| `POST /upload` | 🔒 | multipart `file`, `title?`, `domain?` | `SourceRef` | same, for the file kinds (PDF, `.txt`/`.md`, HTML, image — images need `VISION_MODE=auto`, §12.4) |
 | `GET /sources/{source_id}` | — | — | `SourceStatus` | `tools.get_source_status()` |
-| `GET /search` | — | `q`, `k=5` | `list[SearchHit]` | `tools.search_wiki()` |
-| `GET /answer` | — | `q`, `k=5` | `Answer` (+ `steps`, `context`, `external_refs`, `run_id`) | `tools.answer()` |
+| `GET /search` | — | `q`, `k=5`, `domain?` | `list[SearchHit]` | `tools.search_wiki()`; 404 on an unknown domain |
+| `GET /answer` | — | `q`, `k=5`, `domain?` | `Answer` (+ `steps`, `context`, `external_refs`, `run_id`, `cost_usd`, `domains`) | `tools.answer()`; 404 on an unknown domain |
 | `POST /feedback` | 🔒 | JSON `{run_id, score (0–1), correction?}` | `{"ok", "feedback_id", "run_id"}` | `tools.record_feedback()`; **409** when tracing is off (no run to attach to), 422 on a score outside 0–1. §10.4 |
-| `GET /concepts` | — | `prefix?` | `list[PageGist]` | `tools.list_concepts()` |
-| `GET /page/{slug}` | — | — | raw markdown (`text/plain`) | `tools.get_page()` → `wiki.pages.render_page()`; 404 if absent |
+| `GET /concepts` | — | `prefix?`, `domain?` | `list[PageGist]` | `tools.list_concepts()` (one domain's manifest) |
+| `GET /page/{slug}` | — | `domain?` | raw markdown (`text/plain`) | `tools.get_page()` → `wiki.pages.render_page()`; 404 if absent |
 | `POST /compile/{source_id}` | 🔒 | `force=false` | `CompileResult` | `tools.compile_update()` |
-| `POST /lint` | 🔒 | `dry_run=true` | `LintReport` | `tools.lint_wiki()` |
+| `POST /lint` | 🔒 | `dry_run=true`, `domain?` | `LintReport` | `tools.lint_wiki()` — every domain, or one |
+| `GET /domains` | — | — | `list[Domain]` | `tools.list_domains()` (Phase 2, §12.1) |
+| `PUT /domains/{name}` | 🔒 | JSON `{description?}` | `Domain` | `tools.upsert_domain()` — registers (creates the domain's indexes) or updates; 422 on a bad/reserved name |
+| `DELETE /domains/{name}` | 🔒 | `force=false` | `{"ok", "removed"}` | `tools.remove_domain()`; **409** while the domain holds pages unless `force=true`; 404 unknown |
+| `GET /usage` | 🔒 | `month=YYYY-MM?`, `domain?` | `CostSummary` | `tools.usage_summary()` — month to date by default (§12.3) |
+| `GET /dashboard` | 🔒 (header **or** `?token=`) | `month?` | HTML | `api/dashboard.py:render()` — the one route that takes the token as a query parameter, for browsers |
+| `GET /worker` | — | — | `WorkerStatus` | `tools.worker_status()` |
+| `POST /worker/resume` | 🔒 | — | `{"ok", "resumed"}` | `tools.resume_processing()` — retry sources parked under the cost cap |
+| `POST /synthesize/{domain}` | 🔒 | — | `SynthesisResult` | `tools.synthesize()` — the scheduled overview page, on demand (§12.1) |
 
 OpenAPI/Swagger is auto-generated by FastAPI at `/docs` (interactive) and
 `/openapi.json` while the service is running.
@@ -1269,16 +1280,17 @@ MCP ASGI app and mounts it — note the `path="/"` / mount-at-`/mcp` detail
 recorded in `HISTORY.md`, easy to regress if you touch this file). Also
 runnable standalone over stdio: `python -m llmwiki.mcp.server`.
 
-Exactly six tools, deliberately no more (§5.7):
+Exactly seven tools — the six canonical ones plus, since Phase 2, the read-only `list_domains` — deliberately no more (§5.7):
 
 | MCP tool | Args | Wraps |
 |---|---|---|
-| `search_wiki` | `query: str, k: int = 5` | `tools.search_wiki` |
-| `get_page` | `slug: str` | `tools.get_page` |
-| `ingest_source` | `url: str \| None = None, text: str \| None = None, title: str = ""` | `tools.ingest_source` (and synchronously runs `process_source` before returning — MCP has no background-task concept here). `url` covers blog/YouTube/PDF links; `text` stores a pasted string verbatim; files go over REST `/upload`. |
+| `search_wiki` | `query: str, k: int = 5, domain: str \| None = None` | `tools.search_wiki` |
+| `get_page` | `slug: str, domain: str \| None = None` | `tools.get_page` |
+| `ingest_source` | `url: str \| None = None, text: str \| None = None, title: str = "", domain: str \| None = None` | `tools.ingest_source` (and synchronously runs `process_source` before returning — MCP has no background-task concept here; per-domain serialization still holds because the lock lives in the pipeline). `url` covers blog/YouTube/PDF links; `text` stores a pasted string verbatim; files go over REST `/upload`. |
 | `compile_update` | `source_id: str, force: bool = False` | `tools.compile_update` |
-| `list_concepts` | `prefix: str \| None = None` | `tools.list_concepts` |
+| `list_concepts` | `prefix: str \| None = None, domain: str \| None = None` | `tools.list_concepts` |
 | `lint_wiki` | `dry_run: bool = True` | `tools.lint_wiki` |
+| `list_domains` | — | `tools.list_domains` — the registry, `general` first; read-only (registration is CLI/REST). Phase 2. |
 
 ### 6.4 CLI (`llmwiki`, `cli.py`)
 
@@ -1288,22 +1300,31 @@ llmwiki [--offline] <command> [args]
 
 | Command | Args | Calls |
 |---|---|---|
-| `ingest` | `--url URL \| --file PATH \| --text STR` (`--text -` reads stdin), `--title` | `tools.ingest_now` |
-| `search` | `query`, `-k N` | `tools.search_wiki` |
-| `ask` | `query` | `tools.answer` — prints the text, citations, `(external)` refs, the tools called and `run_id` when tracing is on |
+| `ingest` | `--url URL \| --file PATH \| --text STR` (`--text -` reads stdin), `--title`, `--domain` | `tools.ingest_now` |
+| `search` | `query`, `-k N`, `--domain` | `tools.search_wiki` |
+| `ask` | `query`, `--domain` | `tools.answer` — prints the text, citations, `(external)` refs, the tools called, `run_id` when tracing is on, the domains searched and the cost |
 | `feedback` | `run_id`, `--score 0..1`, `--correction STR` | `tools.record_feedback` — the CLI half of the correction loop (§10.4) |
-| `page` | `slug` | `tools.get_page` (prints rendered markdown) |
-| `concepts` | `--prefix` | `tools.list_concepts` |
+| `page` | `slug`, `--domain` | `tools.get_page` (prints rendered markdown) |
+| `concepts` | `--prefix`, `--domain` | `tools.list_concepts` |
+| `domains` | `list` \| `add NAME --description` \| `update NAME --description` \| `remove NAME [--force]` | `tools.list_domains` / `upsert_domain` / `remove_domain` (Phase 2, §12.1) |
 | `compile` | `source_id`, `--force` | `tools.compile_update` |
-| `lint` | `--fix` | `tools.lint_wiki` |
-| `cost` | — | `tools.cost_summary` |
+| `lint` | `--fix`, `--domain` | `tools.lint_wiki` |
+| `lexical rebuild` | `--domain` | `tools.rebuild_lexical` — build the FTS5 index from `raw/` + the manifests (§12.2) |
+| `synthesize` | `--domain NAME` \| `--all` | `tools.synthesize` — the per-domain overview page (§12.1) |
+| `cost` | — | `tools.cost_summary` (everything ever recorded; `usage` is the bounded form) |
+| `usage` | `--month YYYY-MM`, `--domain`, `--json`, `--migrate` | `tools.usage_summary` / `migrate_cost_ledger` (§12.3) |
+| `worker` | `--resume` | `tools.worker_status` / `resume_processing` |
 | `status` | — | `tools.health` |
 | `source` | `source_id` | `tools.get_source_status` |
 | `serve` | `--host`, `--port`, `--reload` | runs `uvicorn` against `llmwiki.api.app:app` |
 
 `--offline` (must precede the subcommand) forces
 `STORAGE_BACKEND=local VECTOR_BACKEND=memory EMBEDDING_BACKEND=fake
-LLM_PROVIDER=fake` before `Settings` is built.
+LLM_PROVIDER=fake RERANKER_BACKEND=fake LANGSMITH_TRACING=false` and points
+`LLMWIKI_PROVIDERS_CONFIG`/`LLMWIKI_OPS_CONFIG` at a nonexistent path (a real
+routing table outranks `LLM_PROVIDER`) before `Settings` is built. The CLI also
+runs the ingest worker inline (`WORKER_MODE=inline`) and writes its own
+ledger keys (`COST_WRITER=cli`).
 
 ### 6.5 Configuration reference (`config.Settings`)
 
@@ -1337,6 +1358,17 @@ kept in sync with the code. In summary, grouped:
 - **Backend selection:** `STORAGE_BACKEND` (`r2|local`), `VECTOR_BACKEND`
   (`vectorize|memory`), `EMBEDDING_BACKEND` (`workers_ai|fake`),
   `LOCAL_STORAGE_PATH` — per-backend variable tables in §3.7.
+- **Phase 2 (§12):** domains — `DOMAIN_ROUTING` (`auto|off`),
+  `DOMAIN_ROUTE_MIN_CONFIDENCE`, `QUERY_DOMAIN_POLICY` (`all|routed|general`),
+  `QUERY_MAX_DOMAINS`, `SYNTHESIS_MAX_PAGES`; hybrid retrieval —
+  `LEXICAL_BACKEND` (`sqlite|memory|none`), `LEXICAL_DB_PATH`, `HYBRID_POOL_K`,
+  `RERANKER_BACKEND` (`workers_ai|fake|none`), `RERANKER_MODEL`,
+  `RERANK_MAX_CANDIDATES`; cost — `COST_WRITER`, `COST_ALERT_DAILY_USD`,
+  `COST_ALERT_MONTHLY_USD`, `COST_HARD_CAP_MONTHLY_USD`, `NOTIFY_BACKEND`
+  (`log|telegram|fake`), `ALERT_TELEGRAM_CHAT_ID`; worker — `WORKER_MODE`
+  (`threads|inline`), `WORKER_THREADS`, `WORKER_RESUME_INTERVAL_S`; vision —
+  `VISION_MODE` (`off|auto|always`), `VISION_MAX_PAGES_PER_SOURCE`,
+  `VISION_MIN_CHARS_PER_PAGE`, `VISION_IMAGE_AREA_RATIO`.
 
 `Settings.require("field_a", "field_b")` is what adapters call in their
 constructors to fail loudly, by name, on missing credentials — use it as the
@@ -1351,16 +1383,30 @@ elsewhere.
 
 ```
 raw/{source_id}/original.{ext}     immutable, written once at capture
-raw/{source_id}/meta.json          immutable, written once at capture
-raw/{source_id}/extracted.md       the one rewritable object under raw/ (re-run of extraction)
+raw/{source_id}/meta.json          immutable, written once at capture (+ `domain` when named at capture)
+raw/{source_id}/extracted.md       rewritable: the extracted (and, Phase 2, described) text
+raw/{source_id}/routing.json       rewritable (Phase 2): the DomainAssignment the router made
+raw/{source_id}/vision.json        rewritable (Phase 2): cached image/page descriptions
 status/{source_id}.json            pipeline progress, polled by GET /sources/{id}
-wiki/concepts/{slug}.md            compiled concept pages
-wiki/entities/{slug}.md            compiled entity pages
-wiki/sources/{source_id}.md        one source note per captured source
-wiki/index.md                      mechanically regenerated on every compile — no LLM call
-wiki/_meta/gists.json              the manifest — one-line gist per page, read instead of bodies
-wiki/_meta/cost.jsonl              append-only cost ledger, one CostRecord per LLM call
+status/_pending/{source_id}        Phase 2: owed work; recovered by the worker at startup
+wiki/concepts/{slug}.md            compiled concept pages            ┐
+wiki/entities/{slug}.md            compiled entity pages             │ the `general` domain =
+wiki/sources/{source_id}.md        one source note per source        │ the Phase 0/1 layout,
+wiki/overview.md                   Phase 2: the synthesised overview │ unchanged
+wiki/index.md                      regenerated per compile; + "## Domains" from the registry
+wiki/_meta/gists.json              general's manifest                ┘
+wiki/domains/{d}/{concepts,entities,sources}/…   Phase 2: every other domain, same shape
+wiki/domains/{d}/index.md  wiki/domains/{d}/overview.md  wiki/domains/{d}/_meta/gists.json
+wiki/_meta/domains.json            Phase 2: the curated domain registry (general implied)
+wiki/_meta/cost/{YYYY-MM}/{DD}-{writer}.jsonl   Phase 2: the ledger, one key per day per process
+wiki/_meta/cost/alerts.json        Phase 2: which cost alerts already fired this period
+wiki/_meta/cost.jsonl              legacy single-file ledger — read through until `usage --migrate`
+{LEXICAL_DB_PATH}/{index}.sqlite   Phase 2, *local volume not object storage*: the FTS5 index
 ```
+
+Vector and lexical index names follow the same rule (`layout.domain_index_name`):
+`general` uses `VECTORIZE_CHUNKS_INDEX`/`VECTORIZE_GISTS_INDEX` as configured;
+domain `d` uses `{base}-{d}`.
 
 `source_id` is `{hash}-{slug}` (2026-09-13; e.g.
 `06e09591603ad558-attention-is-all-you-need`): a 16-hex-char SHA-256 prefix
@@ -1382,14 +1428,14 @@ reaches a key unsanitized.
 ## 8. Testing
 
 ```bash
-pytest                                  # unit tests, ~444 tests, no network, ~6s
+pytest                                  # unit tests, ~713 tests, no network, ~13s
 pytest -m integration                   # needs a populated .env; costs money
 python scripts/smoke_flow.py --offline  # end-to-end, no keys, under 2s
 python scripts/eval_answer.py --offline # the answer-quality golden set, no keys (§10)
 ruff check . && mypy                    # the rest of the pre-commit gate
 ```
 
-Five tests are **load-bearing** (`CLAUDE.md`) — never weaken them to make a
+Eight tests are **load-bearing** (`CLAUDE.md`) — never weaken them to make a
 change pass; if a change genuinely requires touching one, that is a signal
 to stop and reconsider the change, not the test:
 
@@ -1400,6 +1446,9 @@ to stop and reconsider the change, not the test:
 | `tests/unit/test_agent.py::test_every_citation_resolves_to_a_real_raw_object` | The answer-with-citations contract (§3.3). |
 | `tests/unit/test_providers.py::test_importing_the_registry_imports_no_provider_sdk` | `pip install llmwiki` stays free of every LLM provider SDK. |
 | `tests/unit/test_agent_graph.py::test_tool_loop_is_bounded_by_agent_max_tool_calls` | Design §4.9's cost bound — a question's LLM spend is configuration, never the model's appetite (§3.3). |
+| `tests/unit/test_domains.py::test_general_only_wiki_is_byte_identical_to_phase1` | Design §4.10's organising principle: with nothing registered the compiler writes exactly what the Phase 0/1 compiler wrote (fixture `tests/fixtures/phase1_general_wiki/`, generated from the pre-Phase-2 code). Do not regenerate the fixture to make it pass. |
+| `tests/unit/test_domains.py::test_compile_never_loads_another_domains_manifest` | The per-domain form of the no-full-scan guard: a compile reads its domain's manifest and no other (§12.1). |
+| `tests/unit/test_query_scopes.py::test_query_reads_only_the_manifests_of_hit_domains` | The query-side twin: a question opens only the manifests of the domains its hits came from (§12.2). |
 
 Phase 1-D's own files: `test_agent_graph.py` (the loop: bounds, budget,
 repeat/invalid/failed calls, tool citations, web policy, `run_id`),
@@ -1411,8 +1460,25 @@ fixture corpus, feedback promotion, `langsmith` never imported),
 `LANGSMITH_API_KEY`: pushes the fixture set to a throwaway dataset and runs
 one experiment with the fake adapters).
 
+Phase 2's files (§12): `test_ledger.py`, `test_metering.py` (the ledger and
+query-side cost), `test_layout_domains.py`, `test_domains.py`,
+`test_router.py`, `test_query_scopes.py` (domains), `test_worker.py` (the
+ingest worker; the threaded tests opt in with `worker_mode="threads"`),
+`test_lexical.py`, `test_lexical_rebuild.py`, `test_retrieval.py`,
+`test_rerank.py` (hybrid retrieval), `test_alerts.py` (alerts, the hard cap,
+`/usage`, `/dashboard`), `test_synthesis.py`, `test_vision.py`,
+`test_pdf_vision_policy.py` (multimodal). Six autouse fixtures in
+`tests/conftest.py` pin every test to the pre-Phase-2 behaviour unless it
+opts in: the routing table, `skills/`, `AGENT_MAX_TOOL_CALLS=0`,
+`WORKER_MODE=inline`, `LEXICAL_BACKEND=none` and `RERANKER_BACKEND=none`
+(the last two share one fixture). Each Phase 2 scale property has a
+dedicated guard named in its `HISTORY.md` entry (bounded month-window ledger
+reads, one manifest per compile/query, rerank input ≤ the cap, vision calls
+≤ the cap, the hard cap pausing processing but not capture or answers).
+
 Other tests worth knowing about when extending a specific seam: the
-**contract tests** — `test_store_contract.py`, `test_vector_contract.py` —
+**contract tests** — `test_store_contract.py`, `test_vector_contract.py`,
+`test_lexical.py` —
 run one shared behavioural suite against every registered
 backend/implementation (§5.5); add a new backend there rather than writing a
 parallel file. `test_tools_and_mcp.py` asserts REST/MCP surface parity
@@ -1969,6 +2035,199 @@ navigating the repository. If N0–N8 land later, this document (particularly
 §2.2's directory table and §5's extension paths) will need a corresponding
 rewrite — check `docs/HISTORY.md` for a milestone entry before trusting this
 section.
+
+---
+
+## 12. Phase 2 — Domains, Hybrid Retrieval, Cost, Multimodal
+
+*(Design v1.4 §4.10; implementation design `implement-plan-v1.4.md` §21;
+landed milestone by milestone on 2026-09-19 — see `HISTORY.md`'s P2-1 …
+P2-D2 entries for the per-change detail.)* This section is the code-path
+map. Everything here is behaviour-compatible under its default switch: a
+registry with only `general`, `VISION_MODE=off`, alert thresholds of `0`
+reproduce Phase 1 exactly; `LEXICAL_BACKEND=sqlite` and
+`RERANKER_BACKEND=workers_ai` default **on** (the repo's "defaults are
+production" convention) and are one variable each to turn off.
+
+### 12.1 Domains
+
+**The layout.** `general` *is* the Phase 0/1 layout - every key and index
+name of `general` equals its pre-Phase-2 constant (`storage/layout.py`:
+`gists_key("general") == GISTS_KEY`, `domain_index_name(base, "general") ==
+base`). Any other domain `d` nests under `wiki/domains/{d}/` with the same
+shape and uses indexes `{base}-{d}` (vector *and* lexical). Partitioning by
+index rather than by metadata filter is why an upgrade needs no data
+migration. `wiki/index.md` gains a `## Domains` section rendered from the
+registry alone; a domain's `index.md` links back.
+
+**The registry** (`wiki/domains.py`, `wiki/_meta/domains.json`): admin-written
+only - `llmwiki domains add|update|remove`, `PUT/DELETE /domains/{name}` -
+and read by everything else. `upsert_domain` in `tools.py` also calls
+`VectorStore.ensure_index` for the domain's two indexes (Vectorize: create +
+`FILTERABLE` metadata indexes + readiness poll). `general` is implied, never
+a row, never removable; `remove_domain` refuses while the domain holds pages
+unless forced and never deletes pages (lint then reports `unknown_domain`).
+`require_domain` turns a caller's `None` into `general` and an unknown name
+into `UnknownDomain` (a `KeyError` → 404 over REST).
+
+**Ingest** (`pipeline/ingest.py:process`): extract → describe (§12.4) →
+**route** → embed → compile, with `domain_lock(domain)` held around embed +
+compile. `route()` is cheapest-first: explicit `domain=` at capture (on the
+immutable `SourceMeta.domain`; `#domain` on Telegram, `[domain]` on an email
+subject - `channels/domain_prefix.py`) → no call; a general-only registry →
+no call; `DOMAIN_ROUTING=off` → no call; else one `route_domain` call
+(`wiki/router.py:DomainRouter.route_source`, the registry as the schema's
+enum, the title + first 1 500 chars as the evidence). An unregistered name
+or a confidence below `DOMAIN_ROUTE_MIN_CONFIDENCE` becomes `general` with
+the pick kept as `suggested_domain`. The decision is persisted to
+`raw/{id}/routing.json`; `compile_update`, `delete_source`, `backfill.py`
+and the lexical rebuild read it, so nothing routes twice.
+`scripts/probe_domain_routing.py` prints the raw decision per source for
+calibrating the threshold.
+
+**Compile** (`wiki/compiler.py:compile_source(doc, force, domain,
+prior_costs)`): loads only that domain's manifest, queries/upserts
+`domain_index_name(gists_index, domain)`, stamps `domain` on created pages
+(rendered into the front matter only when ≠ general), writes the source note
+and index under the domain, ledgers with `domain=`. The overview page is
+never a patch candidate.
+
+**Synthesis** (`wiki/synthesis.py`, op `synthesize_domain`): scheduled only -
+`llmwiki synthesize --all`, compose `synthesize` (ops profile), `POST
+/synthesize/{domain}`. Reads the manifest and ≤ `SYNTHESIS_MAX_PAGES`
+most-sourced page bodies, one call, writes `overview.md` (`PageType`
+`overview`) with its gist row, gist vector and lexical row.
+
+### 12.2 Query: scopes, hybrid retrieval, reranking
+
+`QueryAgent.answer(query, k, domain=None)` resolves its scopes once
+(`wiki/domains.py:resolve_scopes`): explicit `domain` wins; a general-only
+registry or `QUERY_DOMAIN_POLICY=general` → `[general]`; `all` (default) →
+every registered domain, no model call; `routed` → one `route_domain` call
+(`DomainRouter.route_query`, ≤ `QUERY_MAX_DOMAINS`), falling back to `all`
+when nothing usable comes back. The scopes travel in `QueryState.scopes`, in
+the LangSmith run metadata and out as `Answer.domains`; the agent-step
+prompt lists the registered domains when there are any, and the toolkit's
+`search_wiki`/`search_chunks`/`get_page` take a `domain` argument
+(empty = the run's scopes).
+
+Every dense query on the query path goes through
+`agent/retrieval.py:retrieve_layer(kind, query, vector, scopes, k, vectors,
+settings, lexical, reranker)`:
+
+```
+per scope:   dense  = vectors.query(scope.index_name(base), vector, k=pool)   pool = k, or HYBRID_POOL_K when hybrid
+             lexical = lexical.query(same index name, query, k=pool)          LEXICAL_BACKEND != none
+fuse:        rrf_fuse(lists, K=60)  → score = Σ 1/(K+rank); dense_score / lexical_score kept
+rerank:      reranker.rerank(query, texts of fused[:RERANK_MAX_CANDIDATES], top_n=k)   RERANKER_BACKEND != none
+gate:        strong = [h for h in wiki_hits if gate_score(h) >= WIKI_CONFIDENCE]      gate_score = dense_score ?? score
+             if not strong: chunk layer (used_rag_fallback)
+```
+
+One scope with no lexical index and no reranker is the pre-Phase-2 call,
+byte for byte. Hybrid and rerank change *which* pages are read, never
+*whether* the chunk fallback runs - the two Phase 0 wiki-first tests are
+untouched. The reranker reads gist/chunk metadata text only and any failure
+keeps the fused order. `_build_context` loads one manifest per distinct hit
+domain and stamps `Citation.domain`.
+
+The lexical index (`lexical/`) is a *derived* index: `SqliteLexicalIndex`
+keeps one FTS5 file per index name under `LEXICAL_DB_PATH` (default
+`{LOCAL_STORAGE_PATH}/lexical`, i.e. `/data/lexical` in the container).
+`IngestPipeline._embed` writes each chunk's full text; `Compiler._sync_gist`
+mirrors each gist; `tools.delete_source` deletes; `llmwiki lexical rebuild`
+(`pipeline/lexical_rebuild.py`) refills it from `raw/*/extracted.md` + the
+manifests and equals what incremental ingest wrote. A never-built file
+serves `[]` with a warning - a fresh box is dense-only until the rebuild.
+`fts_query` quotes every term and joins with OR, so user input is never FTS
+syntax. The reranker (`rerank/`) is `@cf/baai/bge-reranker-base` on the same
+`CF_*` credentials as the embedder.
+
+### 12.3 Cost: ledger, query-side spend, alerts, the hard cap, the worker
+
+**Ledger** (`wiki/ledger.py:CostLedger`): one key per day per *writing
+process* - `wiki/_meta/cost/{YYYY-MM}/{DD}-{writer}.jsonl`, `writer` =
+`COST_WRITER` (`api`; the CLI sets `cli`, the scripts `backfill`/`eval`/
+`smoke`/`probe`/`migrate`, compose `synthesize` sets `synth`). Processes
+never share a key, so a read-modify-write needs only a process-local lock;
+`read(since, until)` lists exactly the month prefixes the window overlaps.
+`CostRecord` carries `domain` and `kind` (`compile`, `ingest` for routing
+and vision, `query`, `eval`, `synthesis`). The legacy `wiki/_meta/cost.jsonl`
+is read through until `llmwiki usage --migrate` (or `scripts/migrate_phase2.py
+--apply`) moves it.
+
+**Query-side spend** (`llm/metering.py`): `factory.llm_client` wraps every
+client in `MeteredLLM`; `tools.answer`, `tools.search_wiki` and
+`tools.judge_answer` open `collect_usage()` around the work and ledger what
+it collected (`kind="query"`/`"eval"`); `Answer.cost_usd` is the sum. A
+collector is a `contextvars.ContextVar`, so the compiler's own calls
+(already ledgered) are never counted twice, and LangGraph's per-node
+threads see the collector opened before `graph.invoke`.
+
+**Usage** (`tools.usage_summary(month=, domain=)` → `CostSummary` with
+`by_model/by_op/by_domain/by_kind/by_day/top_sources`): `GET /usage`,
+`llmwiki usage`, and `GET /dashboard` (`api/dashboard.py` - one server-
+rendered HTML page, inline CSS and SVG, no JavaScript; the bearer token via
+header or `?token=`).
+
+**Alerts and the cap** (`wiki/alerts.py:CostAlerts`, `notify/`): evaluated
+by `tools` after spend is recorded, from running month/day totals refreshed
+from one bounded month read at most every 60 s. `COST_ALERT_DAILY_USD` /
+`COST_ALERT_MONTHLY_USD` log a WARNING and notify (`NOTIFY_BACKEND=log|
+telegram|fake`) once per period, deduped in `wiki/_meta/cost/alerts.json`.
+`COST_HARD_CAP_MONTHLY_USD` additionally makes `tools.processing_capped()`
+true: the ingest worker parks post-capture processing (`SourceStatus.state
+= "paused"`) until the month rolls over, the cap is raised or `POST
+/worker/resume`. Capture, search and answer keep working; query spend keeps
+counting.
+
+**The worker** (`pipeline/worker.py:CompileWorker`, `factory.compile_worker`):
+REST and the channels `add_task(tools.enqueue_source, id)`; `WORKER_MODE=
+threads` drains a bounded pool of `WORKER_THREADS` (the CLI, MCP and the
+test suite run `inline`). `domain_lock(domain)` is held by the pipeline
+around embed + compile, so one domain's manifest has one writer at a time
+whoever the caller is. A pending marker `status/_pending/{id}` is written at
+capture and cleared when processing ends; the app's lifespan calls
+`tools.recover_pending()` at startup. `GET /worker` / `llmwiki worker` show
+queued, in-flight, parked and why.
+
+### 12.4 Selective multimodal (text-first)
+
+`llm/base.py:VisionLLMClient.describe(*, op, system, prompt, images, …)` is
+a *separate optional protocol*: `complete()` (P5) is byte-identical.
+`AnthropicLLM` (base64 image blocks), `LangChainLLM` (`image_url` `data:`
+parts), `FakeLLM` and `MeteredLLM` implement it; `RoutingLLMClient.describe`
+dispatches by op and refuses, by name, an adapter without it - and the
+factory refuses at startup if `describe_image` is routed to one. The
+shipped `config/ops.py` row routes it to `openrouter` /
+`google/gemini-2.5-flash-lite` (`glm-5.3-flash` is text-only).
+
+Extractors stay LLM-free. With `VISION_MODE=auto`, `extractors/pdf.py`
+renders (110 dpi, long edge ≤ 1 568 px) the pages that have fewer than
+`VISION_MIN_CHARS_PER_PAGE` chars of text layer or whose images cover
+`VISION_IMAGE_AREA_RATIO` of the page (or are dense with vector drawings) -
+a scan in reading order, a figure-heavy document by image area, at most
+`VISION_MAX_PAGES_PER_SOURCE`; `always` renders every page up to the cap.
+`extractors/image.py` turns an uploaded picture into one such page. Each
+rendered page is `extra["vision_pages"]` plus a `<!-- vision:pN -->`
+placeholder in the text. `pipeline/describe.py:describe_pending_pages`
+(called from `IngestPipeline.extract` before `extracted.md` is written)
+describes them with `describe_image`, caches every description at
+`raw/{id}/vision.json`, splices `#### Described content (…)` blocks in,
+notes over-cap pages and strips the bytes. Vision usage is ledgered as
+`kind="ingest"` and handed to the compiler as `prior_costs`, so
+`INGEST_TOKEN_BUDGET` covers it; `SourceStatus.vision_calls` reports it.
+
+### 12.5 Upgrading a deployment
+
+Nothing moves. `scripts/migrate_phase2.py --check` reports, `--apply` does,
+the three one-time steps: build the keyword index from `raw/`
+(`LEXICAL_BACKEND=sqlite` starts empty), move the legacy ledger into
+partitioned keys, and `ensure_index` for any registered domain. Then
+register domains (`llmwiki domains add …`), optionally set thresholds and a
+Telegram chat for alerts, and flip `VISION_MODE=auto` once `describe_image`
+is routed to a vision-capable model. `docs/phase2-testing-guide.md` is the
+manual pass/fail plan.
 
 ---
 

@@ -95,3 +95,6 @@ select = ["E", "F", "I", "UP", "B"]
 # Depends()/File()/Form() in argument defaults is how FastAPI declares
 # dependencies; B008 is a false positive on every FastAPI route module.
 "src/llmwiki/api/routes.py" = ["B008"]
+# The dashboard is one HTML/CSS template in an f-string; wrapping markup at
+# 100 columns would only make it harder to read (Phase 2, plan §21.2 C6).
+"src/llmwiki/api/dashboard.py" = ["E501"]

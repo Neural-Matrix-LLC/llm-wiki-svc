@@ -22,12 +22,38 @@ from __future__ import annotations
 
 import hashlib
 import re
+from datetime import date
 from urllib.parse import urlsplit, urlunsplit
+
+from llmwiki.models.source import GENERAL_DOMAIN
 
 RAW_PREFIX = "raw/"
 WIKI_PREFIX = "wiki/"
 GISTS_KEY = "wiki/_meta/gists.json"
+#: Phase 2 (plan §21.2 A1-A3). ``general`` *is* the Phase 0/1 layout: its keys
+#: are the constants above, unchanged. Every other domain nests under
+#: ``wiki/domains/{d}/`` with the same shape inside, and its vector/lexical
+#: indexes are ``{base}-{d}``. The registry of non-general domains is one JSON
+#: object at DOMAINS_KEY; ``general`` is implied and never listed there.
+DOMAINS_PREFIX = "wiki/domains/"
+DOMAINS_KEY = "wiki/_meta/domains.json"
+GENERAL = GENERAL_DOMAIN
+#: A domain name has to fit ``{index-base}-{d}`` inside Vectorize's 64-character
+#: index-name cap and must never collide with a folder the layout already uses.
+DOMAIN_MAX = 32
+RESERVED_DOMAINS = frozenset({
+    GENERAL, "domains", "_meta", "index", "concepts", "entities", "sources", "overview",
+    "raw", "status", "wiki",
+})
+#: The pre-Phase-2 single-file ledger. Still read (read-through) until
+#: ``llmwiki usage --migrate`` moves its lines into the partitioned keys below;
+#: nothing writes it any more (plan §21.2 C1).
 COST_KEY = "wiki/_meta/cost.jsonl"
+#: Phase 2 ledger: ``wiki/_meta/cost/{YYYY-MM}/{DD}-{writer}.jsonl``. One key per
+#: day per *writing process*, so the API, the CLI and the cron jobs never
+#: read-modify-write the same object, and a month's spend is one prefix list.
+COST_PREFIX = "wiki/_meta/cost/"
+ALERTS_KEY = "wiki/_meta/cost/alerts.json"
 STATUS_PREFIX = "status/"
 INDEX_KEY = "wiki/index.md"
 
@@ -41,6 +67,9 @@ _SLUG_STRIP = re.compile(r"[^a-z0-9]+")
 _HASH_RE = re.compile(r"^[0-9a-f]{16}$")
 _ID_RE = re.compile(r"^[0-9a-f]{16}(-[a-z0-9][a-z0-9-]{0,39})?$")
 _EXT_RE = re.compile(r"^[a-z0-9]{1,8}$")
+_WRITER_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,15}$")
+_DOMAIN_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,31}$")
+_MONTH_RE = re.compile(r"^\d{4}-\d{2}$")
 
 
 def slugify(text: str) -> str:
@@ -140,18 +169,108 @@ def status_key(source_id: str) -> str:
     return f"{STATUS_PREFIX}{_check_id(source_id)}.json"
 
 
-def wiki_page(slug: str, page_type: str = "concept") -> str:
-    """``wiki/concepts/{slug}.md``, ``wiki/entities/{slug}.md`` or ``wiki/sources/{id}.md``."""
+def check_domain(name: str, *, allow_general: bool = True) -> str:
+    """Validate a domain name before it becomes part of a key or an index name.
+
+    ``general`` passes when ``allow_general`` (it is a legitimate scope) and is
+    rejected when a caller is registering a *new* domain (it is implied, never
+    registered). Every other reserved word is a folder the layout already owns.
+    """
+    if name == GENERAL:
+        if allow_general:
+            return name
+        raise ValueError(f"{GENERAL!r} is implied and cannot be registered")
+    if not _DOMAIN_RE.match(name) or len(name) > DOMAIN_MAX:
+        raise ValueError(
+            f"not a valid domain name: {name!r} (lowercase letters, digits and hyphens, "
+            f"at most {DOMAIN_MAX} characters, starting with a letter or digit)"
+        )
+    if name in RESERVED_DOMAINS:
+        raise ValueError(f"{name!r} is a reserved name and cannot be a domain")
+    return name
+
+
+def domain_prefix(domain: str = GENERAL) -> str:
+    """``""`` for general (its pages sit directly under ``wiki/``), else ``wiki/domains/{d}/``."""
+    if check_domain(domain) == GENERAL:
+        return ""
+    return f"{DOMAINS_PREFIX}{domain}/"
+
+
+def gists_key(domain: str = GENERAL) -> str:
+    """The domain's gist manifest: ``wiki/_meta/gists.json`` for general."""
+    if check_domain(domain) == GENERAL:
+        return GISTS_KEY
+    return f"{domain_prefix(domain)}_meta/gists.json"
+
+
+def index_key(domain: str = GENERAL) -> str:
+    """The domain's index page: ``wiki/index.md`` for general."""
+    return INDEX_KEY if check_domain(domain) == GENERAL else f"{domain_prefix(domain)}index.md"
+
+
+def overview_key(domain: str = GENERAL) -> str:
+    """The domain's synthesis page (plan §21.2 A8): ``wiki/overview.md`` for general."""
+    return f"{WIKI_PREFIX}overview.md" if check_domain(domain) == GENERAL else (
+        f"{domain_prefix(domain)}overview.md"
+    )
+
+
+def domain_index_name(base: str, domain: str = GENERAL) -> str:
+    """The vector/lexical index a domain uses: ``base`` for general, ``{base}-{d}`` otherwise."""
+    return base if check_domain(domain) == GENERAL else f"{base}-{domain}"
+
+
+def domain_of_key(key: str) -> str | None:
+    """Which domain a ``wiki/`` key belongs to, or None for anything outside ``wiki/``.
+
+    ``wiki/_meta/...`` and ``wiki/index.md`` belong to general, like every key
+    not under ``wiki/domains/``.
+    """
+    if not key.startswith(WIKI_PREFIX):
+        return None
+    if key.startswith(DOMAINS_PREFIX):
+        name, _, _ = key[len(DOMAINS_PREFIX):].partition("/")
+        return name or None
+    return GENERAL
+
+
+def wiki_page(slug: str, page_type: str = "concept", domain: str = GENERAL) -> str:
+    """The page's key inside its domain.
+
+    General: ``wiki/concepts/{slug}.md``, ``wiki/entities/{slug}.md``,
+    ``wiki/sources/{id}.md`` - byte-for-byte the Phase 0/1 keys. Any other
+    domain: the same shape under ``wiki/domains/{d}/``.
+    """
     if page_type == "index":
-        return INDEX_KEY
+        return index_key(domain)
+    if page_type == "overview":
+        return overview_key(domain)
     folder = {"concept": "concepts", "entity": "entities", "source": "sources"}[page_type]
     safe = slugify(slug) if page_type != "source" else _check_id(slug)
-    return f"{WIKI_PREFIX}{folder}/{safe}.md"
+    if check_domain(domain) == GENERAL:
+        return f"{WIKI_PREFIX}{folder}/{safe}.md"
+    return f"{domain_prefix(domain)}{folder}/{safe}.md"
 
 
-def wiki_source_note(source_id: str) -> str:
-    """``wiki/sources/{id}.md`` - the per-source note linking back to raw/."""
-    return wiki_page(source_id, "source")
+def wiki_source_note(source_id: str, domain: str = GENERAL) -> str:
+    """``wiki/sources/{id}.md`` (or the domain's ``sources/``) - the note linking back to raw/."""
+    return wiki_page(source_id, "source", domain)
+
+
+def raw_routing(source_id: str) -> str:
+    """``raw/{id}/routing.json`` - the domain decision; derived and rewritable like extracted.md."""
+    return f"{RAW_PREFIX}{_check_id(source_id)}/routing.json"
+
+
+def raw_vision(source_id: str) -> str:
+    """``raw/{id}/vision.json`` - cached image descriptions; derived and rewritable."""
+    return f"{RAW_PREFIX}{_check_id(source_id)}/vision.json"
+
+
+def pending_key(source_id: str) -> str:
+    """``status/_pending/{id}`` - marks work the ingest worker still owes (plan §21.2 C3)."""
+    return f"{STATUS_PREFIX}_pending/{_check_id(source_id)}"
 
 
 def ext_for(mime: str, filename: str | None, url: str | None) -> str:
@@ -175,3 +294,36 @@ def ext_for(mime: str, filename: str | None, url: str | None) -> str:
         if len(tail) == 2 and _EXT_RE.match(tail[1].lower()):
             return tail[1].lower()
     return "bin"
+
+
+def check_cost_writer(writer: str) -> str:
+    """Validate a ledger writer name (``api``, ``cli``, ``backfill``...) before it is a key."""
+    if not _WRITER_RE.match(writer):
+        raise ValueError(f"not a valid cost writer name: {writer!r}")
+    return writer
+
+
+def cost_month_prefix(month: str) -> str:
+    """``wiki/_meta/cost/{YYYY-MM}/`` - everything one month's ledger holds."""
+    if not _MONTH_RE.match(month):
+        raise ValueError(f"not a YYYY-MM month: {month!r}")
+    return f"{COST_PREFIX}{month}/"
+
+
+def cost_key(day: date, writer: str) -> str:
+    """``wiki/_meta/cost/{YYYY-MM}/{DD}-{writer}.jsonl`` - one writer's lines for one day."""
+    return f"{cost_month_prefix(day.strftime('%Y-%m'))}{day:%d}-{check_cost_writer(writer)}.jsonl"
+
+
+def cost_key_day(key: str) -> date | None:
+    """The day a ledger key belongs to, or None for anything else under the prefix."""
+    if not key.startswith(COST_PREFIX) or not key.endswith(".jsonl"):
+        return None
+    rest = key[len(COST_PREFIX):]
+    month, _, name = rest.partition("/")
+    if not _MONTH_RE.match(month) or len(name) < 3 or not name[:2].isdigit():
+        return None
+    try:
+        return date.fromisoformat(f"{month}-{name[:2]}")
+    except ValueError:
+        return None

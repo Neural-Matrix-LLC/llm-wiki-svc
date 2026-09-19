@@ -27,6 +27,7 @@ from fastapi import APIRouter, BackgroundTasks, HTTPException, Request
 from starlette.datastructures import FormData
 
 from llmwiki import tools
+from llmwiki.channels.domain_prefix import split_bracket_domain
 from llmwiki.config import Settings
 from llmwiki.models.source import SourceRef
 
@@ -46,10 +47,15 @@ def build_router(cfg: Settings) -> APIRouter | None:
     async def inbound(request: Request, background: BackgroundTasks) -> dict:
         form = await request.form()
         _verify(signing_key, form)
-        refs = await _capture(form)
+        try:
+            refs = await _capture(form)
+        except KeyError as exc:
+            # An unknown "[domain]" prefix: Mailgun retries 5xx, so answer 200
+            # with the reason rather than have the same mail bounce for hours.
+            return {"ok": False, "error": f"unknown domain {exc.args[0]!r}", "source_ids": []}
         for ref in refs:
             if not ref.duplicate:
-                background.add_task(tools.process_source, ref.source_id)
+                background.add_task(tools.enqueue_source, ref.source_id)
         return {"ok": True, "source_ids": [ref.source_id for ref in refs]}
 
     return router
@@ -68,7 +74,8 @@ def _verify(signing_key: str, form: FormData) -> None:
 
 
 async def _capture(form: FormData) -> list[SourceRef]:
-    subject = str(form.get("subject") or "")
+    # Phase 2: a leading "[domain]" on the subject is an explicit domain.
+    domain, subject = split_bracket_domain(str(form.get("subject") or ""))
     body = str(form.get("stripped-text") or form.get("body-plain") or "")
     refs: list[SourceRef] = []
 
@@ -84,6 +91,7 @@ async def _capture(form: FormData) -> list[SourceRef]:
                 filename=upload.filename,
                 mime=upload.content_type or "application/octet-stream",
                 title=subject,
+                domain=domain,
             )
         )
 
@@ -91,12 +99,12 @@ async def _capture(form: FormData) -> list[SourceRef]:
         # Attachments plus a real cover note: capture the note too, rather
         # than silently dropping it.
         if body.strip():
-            refs.append(tools.ingest_source(text=body, title=subject))
+            refs.append(tools.ingest_source(text=body, title=subject, domain=domain))
         return refs
 
     bare_url = _BARE_URL.match(body) if body else None
     if bare_url:
-        refs.append(tools.ingest_source(url=bare_url.group(1), title=subject))
+        refs.append(tools.ingest_source(url=bare_url.group(1), title=subject, domain=domain))
     elif body.strip():
-        refs.append(tools.ingest_source(text=body, title=subject))
+        refs.append(tools.ingest_source(text=body, title=subject, domain=domain))
     return refs

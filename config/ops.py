@@ -61,6 +61,25 @@ OPS = [
     {"op": "judge_answer", "provider": "openrouter", "model": "z-ai/glm-5.3-flash",
      "temperature": 0.0, "max_tokens": 1024},
 
+    # Phase 2 (design §4.10, plan §21.8). Rows may exist ahead of their call
+    # sites - an extra row is allowed, a missing one for a KNOWN_OP is not - so
+    # a deployment is ready the moment each milestone lands.
+    # route_domain: one small forced-schema call per source (and per query
+    # under QUERY_DOMAIN_POLICY=routed) - cheapest model, deterministic.
+    {"op": "route_domain", "provider": "openrouter", "model": "z-ai/glm-5.3-flash",
+     "temperature": 0.0, "max_tokens": 512},
+    # describe_image needs a model that accepts images: glm-5.3-flash is
+    # text-only. Gemini Flash-Lite via the same OpenRouter credential is the
+    # cheapest capable route; verify the id on openrouter.ai/models if a call
+    # 404s. VISION_MODE=off (the default) means this row is never exercised.
+    {"op": "describe_image", "provider": "openrouter", "model": "google/gemini-2.5-flash-lite",
+     "temperature": 0.2, "max_tokens": 2048},
+    # synthesize_domain: the scheduled per-domain overview page - one call per
+    # domain per run, over up to SYNTHESIS_MAX_PAGES page bodies, so it gets
+    # the executor-class model and room to write.
+    {"op": "synthesize_domain", "provider": "openrouter", "model": "z-ai/glm-5.3-flash",
+     "temperature": 0.7, "max_tokens": 8192},
+
     # To route an op through a different provider, change its "provider" and
     # "model" - e.g., to answer queries with OpenAI while everything else
     # stays on Anthropic, first uncomment the openai row in

@@ -20,6 +20,13 @@ REAL_PROMPTS = [
     "create_page",
     "patch_page",
     "answer_query",
+    # Phase 1-D and Phase 2 (plan §21.2 X1) prompts follow the same contract.
+    "agent_step",
+    "judge_answer",
+    "route_domain_source",
+    "route_domain_query",
+    "describe_image",
+    "synthesize_domain",
 ]
 
 

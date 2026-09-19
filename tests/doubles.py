@@ -90,7 +90,7 @@ class ScriptedLLM:
         # configured (plan §19.3), rather than always seeing a concrete number.
         self.calls.append({
             "op": op, "system": system, "prompt": prompt, "model": model,
-            "max_tokens": max_tokens, "temperature": temperature,
+            "max_tokens": max_tokens, "temperature": temperature, "schema": schema,
         })
         data = self.script.get(op, {})
         return LLMResponse(

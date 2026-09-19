@@ -181,7 +181,85 @@ class Settings(BaseSettings):
     # against (Phase 1-D). Tracing is not required for local (--offline) eval.
     langsmith_eval_dataset: str = "llmwiki-answer-quality"
 
+    # --- Domains (Phase 2, design §4.10.1, plan §21.2 A4/A6) -------------------
+    # "auto": a source with no explicit domain is routed by one route_domain
+    # call - but only when at least one domain is registered; a general-only
+    # registry makes no call at all. "off": never call the router; everything
+    # not explicitly filed goes to general.
+    domain_routing: Literal["auto", "off"] = "auto"
+    # Below this confidence the router's pick is demoted to general and kept
+    # as suggested_domain.
+    domain_route_min_confidence: float = 0.6
+
+    # Query scope when no domain= is given (plan §21.2 A6): "all" fans out over
+    # every registered domain with no model call; "routed" spends one
+    # route_domain call to pick at most QUERY_MAX_DOMAINS; "general" searches
+    # only the general wiki. With nothing registered all three are identical.
+    query_domain_policy: Literal["all", "routed", "general"] = "all"
+    query_max_domains: int = 2
+    # The scheduled per-domain overview page reads at most this many page
+    # bodies (plan §21.2 A8) - one strong-model call per domain per run.
+    synthesis_max_pages: int = 10
+
+    # --- Hybrid retrieval (Phase 2, design §4.10.2, plan §21.2 B1-B4) -----------
+    # A lexical (keyword) index beside the dense one, fused by reciprocal rank.
+    # "sqlite": FTS5, one file per index under LEXICAL_DB_PATH, rebuildable from
+    # raw/ (`llmwiki lexical rebuild`); "memory": tests/offline; "none": dense
+    # only - byte for byte the pre-Phase-2 retrieval.
+    lexical_backend: Literal["sqlite", "memory", "none"] = "sqlite"
+    lexical_db_path: Path | None = None  # default: {LOCAL_STORAGE_PATH}/lexical
+    # Candidates taken from each list (dense, lexical) per scope before fusion.
+    hybrid_pool_k: int = 20
+    # A cross-encoder reorders the fused pool (at most RERANK_MAX_CANDIDATES)
+    # inside each layer; the wiki-confidence gate is unaffected. "workers_ai"
+    # reuses the CF_* credentials; "fake" is the offline double; "none" skips.
+    reranker_backend: Literal["workers_ai", "fake", "none"] = "workers_ai"
+    reranker_model: str = "@cf/baai/bge-reranker-base"
+    rerank_max_candidates: int = 40
+
+    # --- Selective multimodal (Phase 2, design §4.10.4, plan §21.2 D1-D4) --------
+    # "off": today's behaviour - images fail at extraction, scanned PDFs raise.
+    # "auto": PDF pages with fewer than VISION_MIN_CHARS_PER_PAGE chars of text
+    # layer, or (figure-heavy) pages whose images cover VISION_IMAGE_AREA_RATIO
+    # of the page, plus uploaded images, are described by the describe_image
+    # op - at most VISION_MAX_PAGES_PER_SOURCE per source. "always": every
+    # PDF page, up to the cap. The op must route to a vision-capable model.
+    vision_mode: Literal["off", "auto", "always"] = "off"
+    vision_max_pages_per_source: int = 8
+    vision_min_chars_per_page: int = 200
+    vision_image_area_ratio: float = 0.25
+
+    # --- Ingest worker (Phase 2, plan §21.2 C3/C5) ------------------------------
+    # "threads": a bounded pool of WORKER_THREADS drains what REST and the
+    # capture channels submit, one domain compiling at a time (a lock per
+    # domain). "inline": run in the caller - the CLI, the MCP tool and the test
+    # suite. WORKER_THREADS also bounds concurrent LLM calls from ingest;
+    # providers with tight rate limits want 2.
+    worker_mode: Literal["threads", "inline"] = "threads"
+    worker_threads: int = 4
+    # How often a source parked under the monthly hard cap is retried.
+    worker_resume_interval_s: float = 60.0
+
+    # --- Cost alerts and the hard cap (Phase 2, plan §21.2 C4/C5) -----------------
+    # USD thresholds over the measured ledger; 0 = off. The two alerts log a
+    # WARNING and notify once per day/month. The hard cap also pauses
+    # post-capture processing (extract/route/embed/compile) until the month
+    # rolls over or the cap is raised - capture, search and answers keep working.
+    cost_alert_daily_usd: float = 0.0
+    cost_alert_monthly_usd: float = 0.0
+    cost_hard_cap_monthly_usd: float = 0.0
+    # Where alerts go besides the log: "telegram" reuses TELEGRAM_BOT_TOKEN and
+    # needs ALERT_TELEGRAM_CHAT_ID; "fake" is the offline double.
+    notify_backend: Literal["log", "telegram", "fake"] = "log"
+    alert_telegram_chat_id: str = ""
+
     # --- Cost guardrails ---
+    # Phase 2 (plan §21.2 C1): which process is writing the cost ledger. Each
+    # writer gets its own daily key under wiki/_meta/cost/, so the API, the
+    # CLI and the cron jobs never read-modify-write the same object. The CLI
+    # and the scripts set this themselves (COST_WRITER=cli, backfill, eval...);
+    # "api" is what the service process is.
+    cost_writer: str = "api"
     compile_max_pages: int = 5
     compile_candidate_pages: int = 8
     ingest_token_budget: int = 60_000
@@ -224,6 +302,11 @@ class Settings(BaseSettings):
         self.anthropic_api_key = self.llm_api_key
         self.llm_default_model = self.llm_model
         return self
+
+    @property
+    def lexical_root(self) -> Path:
+        """Where the FTS5 files live: ``LEXICAL_DB_PATH`` or ``{LOCAL_STORAGE_PATH}/lexical``."""
+        return self.lexical_db_path or (self.local_storage_path / "lexical")
 
     def require(self, *fields: str) -> None:
         """Fail loudly, and by name, when a backend's credentials are absent.

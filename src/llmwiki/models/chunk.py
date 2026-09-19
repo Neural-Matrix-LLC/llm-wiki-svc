@@ -7,7 +7,7 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
-from llmwiki.models.source import utcnow
+from llmwiki.models.source import GENERAL_DOMAIN, utcnow
 
 
 class ChunkMetadata(BaseModel):
@@ -46,3 +46,11 @@ class SearchHit(BaseModel):
     slug: str | None = None
     source_id: str | None = None
     metadata: dict = Field(default_factory=dict)
+    # Phase 2 (plan §21.2 A7, B4). ``score`` is whatever the *last* retrieval
+    # stage produced (cosine today; fused or reranked once hybrid retrieval is
+    # on); ``dense_score`` keeps the raw cosine so the wiki-confidence gate
+    # always reads the same quantity. None means the hit never had one (a
+    # lexical-only hit).
+    domain: str = GENERAL_DOMAIN
+    dense_score: float | None = None
+    lexical_score: float | None = None

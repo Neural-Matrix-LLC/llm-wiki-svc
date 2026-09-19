@@ -35,14 +35,17 @@ from llmwiki.agent.skills import Skill
 from llmwiki.chains.prompts_loader import load_prompt
 from llmwiki.config import Settings
 from llmwiki.embedding.base import Embedder
+from llmwiki.lexical.base import LexicalIndex
 from llmwiki.llm.base import LLMClient
 from llmwiki.models.chunk import SearchHit
 from llmwiki.models.plan import Answer, Citation
+from llmwiki.rerank.base import Reranker
 from llmwiki.storage.base import ObjectStore
-from llmwiki.storage.layout import raw_meta
+from llmwiki.storage.layout import GENERAL, raw_meta
 from llmwiki.vector.base import VectorStore
 from llmwiki.websearch.base import WebSearcher
 from llmwiki.wiki import gists as gists_mod
+from llmwiki.wiki.domains import DomainScope, load_registry, resolve_scopes
 from llmwiki.wiki.pages import read_page
 
 if TYPE_CHECKING:
@@ -87,15 +90,27 @@ class QueryAgent:
         llm: LLMClient,
         settings: Settings,
         web_searcher: WebSearcher | None = None,
+        lexical: LexicalIndex | None = None,
+        reranker: Reranker | None = None,
     ) -> None:
         self.store = store
         self.vectors = vectors
         self.embedder = embedder
         self.llm = llm
         self.settings = settings
+        # Phase 2 (plan §21.2 B1): the keyword half of hybrid retrieval; None
+        # (LEXICAL_BACKEND=none) keeps retrieval dense-only.
+        self.lexical = lexical
+        # Phase 2 (plan §21.2 B5): reorders the fused pool; None = off.
+        self.reranker = reranker
         # None means the search_web tool is never even constructed (factory
         # returns None for WEB_SEARCH_BACKEND=none).
         self.web_searcher = web_searcher
+        # The scopes of the answer() in progress (Phase 2, plan §21.2 A6). The
+        # toolkit's tools read this when the model passes no domain of its
+        # own. One QueryAgent serves one request (tools._agent builds one per
+        # call), which is what makes instance state the right place.
+        self._run_scopes: list[DomainScope] = [DomainScope(GENERAL)]
 
     @cached_property
     def graph(self) -> CompiledStateGraph:
@@ -104,26 +119,60 @@ class QueryAgent:
 
         return build_query_graph(self)
 
-    def search(self, query: str, k: int = 5) -> list[SearchHit]:
+    @cached_property
+    def registry(self):  # type: ignore[no-untyped-def]
+        """The domain registry, read once per agent (= once per request)."""
+        return load_registry(self.store)
+
+    def scopes_for(self, domain: str | None, question: str) -> list[DomainScope]:
+        """Resolve the domains one query searches (plan §21.2 A6)."""
+        def route() -> list[str]:
+            from llmwiki.wiki.router import DomainRouter
+
+            chosen, _ = DomainRouter(self.llm, self.registry).route_query(
+                question, max_domains=self.settings.query_max_domains,
+            )
+            return chosen
+
+        return resolve_scopes(domain, self.settings.query_domain_policy, self.registry,
+                              route=route)
+
+    def retrieve_layer(self, kind: str, query: str, vector: list[float],
+                       scopes: list[DomainScope], k: int) -> list[SearchHit]:
+        from llmwiki.agent.retrieval import retrieve_layer
+
+        return retrieve_layer(kind, query, vector, scopes, k,  # type: ignore[arg-type]
+                              vectors=self.vectors, settings=self.settings,
+                              lexical=self.lexical, reranker=self.reranker)
+
+    def search(self, query: str, k: int = 5, domain: str | None = None) -> list[SearchHit]:
         """Gist index first; chunk index only if the wiki result is weak."""
+        from llmwiki.agent.retrieval import gate_score
+
+        scopes = self.scopes_for(domain, query)
+        self._run_scopes = scopes
         vector = self.embedder.embed([query])[0]
-        hits = self.vectors.query(self.settings.vectorize_gists_index, vector, k=k)
-        if hits and hits[0].score >= WIKI_CONFIDENCE:
+        hits = self.retrieve_layer("gists", query, vector, scopes, k)
+        if any(gate_score(hit) >= WIKI_CONFIDENCE for hit in hits):
             return hits
-        chunks = self.vectors.query(self.settings.vectorize_chunks_index, vector, k=k)
+        chunks = self.retrieve_layer("chunks", query, vector, scopes, k)
         return (hits + chunks)[:k] if hits else chunks
 
-    def answer(self, query: str, k: int = 5) -> Answer:
+    def answer(self, query: str, k: int = 5, domain: str | None = None) -> Answer:
         """Retrieve, (optionally) gather more, ground, answer, and verify citations.
 
         One graph invocation. When LangSmith tracing is on the root run's id is
         returned as ``Answer.run_id`` so the answer can be scored or corrected
-        later (``POST /feedback``); it is ``None`` otherwise.
+        later (``POST /feedback``); it is ``None`` otherwise. ``domain``
+        (Phase 2) scopes the search explicitly; otherwise
+        ``QUERY_DOMAIN_POLICY`` decides.
         """
         from langchain_core.runnables import RunnableConfig
 
         from llmwiki.agent.graph import recursion_limit
 
+        scopes = self.scopes_for(domain, query)
+        self._run_scopes = scopes
         # The root run id is minted here and handed to LangGraph, so with
         # tracing on it is exactly the LangSmith run ``POST /feedback`` will
         # find - no collector, no guessing which traced run was the root.
@@ -135,13 +184,16 @@ class QueryAgent:
             metadata={
                 "agent_max_tool_calls": self.settings.agent_max_tool_calls,
                 "agent_web_search_policy": self.settings.agent_web_search_policy,
+                "domains": [scope.name for scope in scopes],
             },
         )
-        initial: dict[str, Any] = {"query": query, "k": k}
+        initial: dict[str, Any] = {"query": query, "k": k,
+                                   "scopes": [scope.name for scope in scopes]}
         final = self.graph.invoke(initial, config=config)
 
         result: Answer = final["answer"]
         result.run_id = str(run_id) if self.settings.langsmith_tracing else None
+        result.domains = [scope.name for scope in scopes]
         logger.debug(
             "answer_query: used_rag_fallback=%s tool_calls=%d external_refs=%d",
             result.used_rag_fallback, len(result.steps), len(result.external_refs),
@@ -247,23 +299,35 @@ class QueryAgent:
         chunk_hits: list[SearchHit],
         budget: int = MAX_CONTEXT_CHARS,
     ) -> tuple[str, list[Citation]]:
-        manifest = gists_mod.load_gists(self.store)
+        # One manifest per *distinct hit domain*, loaded lazily (plan §21.10's
+        # scale guard): a query over general reads general's manifest and no
+        # other, however many domains are registered.
+        manifests: dict[str, dict] = {}
+
+        def manifest_for(domain: str) -> dict:
+            if domain not in manifests:
+                manifests[domain] = gists_mod.load_gists(self.store, domain)
+            return manifests[domain]
+
         blocks: list[str] = []
         citations: dict[str, Citation] = {}
 
         for hit in wiki_hits:
             slug = hit.slug or hit.id
-            gist = manifest.get(slug)
-            page = read_page(self.store, slug, gist.type if gist else "concept")
+            domain = hit.domain or GENERAL
+            gist = manifest_for(domain).get(slug)
+            page = read_page(self.store, slug, gist.type if gist else "concept", domain)
             if page is None:
                 continue
-            block = f"## Wiki page [[{slug}]]\n\n{page.body[:budget]}"
+            where = "" if domain == GENERAL else f" (domain: {domain})"
+            block = f"## Wiki page [[{slug}]]{where}\n\n{page.body[:budget]}"
             blocks.append(block)
             budget -= len(block)
             for source_id in page.front_matter.sources:
                 citations.setdefault(
                     source_id,
-                    Citation(source_id=source_id, title=page.front_matter.title, slug=slug),
+                    Citation(source_id=source_id, title=page.front_matter.title, slug=slug,
+                             domain=domain),
                 )
             if budget <= 0:
                 break
@@ -283,6 +347,7 @@ class QueryAgent:
                         source_id=source_id,
                         title=hit.metadata.get("title", ""),
                         url=hit.metadata.get("url"),
+                        domain=hit.domain or GENERAL,
                     ),
                 )
 

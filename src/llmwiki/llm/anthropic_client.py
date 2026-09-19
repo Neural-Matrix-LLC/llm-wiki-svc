@@ -19,6 +19,7 @@ costs nothing and needs nothing installed.
 
 from __future__ import annotations
 
+import base64
 import json
 import time
 from typing import Any
@@ -26,6 +27,7 @@ from typing import Any
 from llmwiki.llm import pricing
 from llmwiki.llm.base import LLMResponse
 from llmwiki.models.plan import CostRecord
+from llmwiki.models.source import ImageInput
 
 MAX_ATTEMPTS = 4
 CACHE_MIN_CHARS = 2000  # below roughly this, a cache breakpoint costs more than it saves
@@ -87,6 +89,28 @@ class AnthropicLLM:
         self.version = version
         self.default_max_tokens = default_max_tokens
         self.default_temperature = default_temperature
+
+    def describe(
+        self,
+        *,
+        op: str,
+        system: str,
+        prompt: str,
+        images: list[ImageInput],
+        model: str | None = None,
+        max_tokens: int | None = None,
+        temperature: float | None = None,
+    ) -> LLMResponse:
+        """Vision form of :meth:`complete` (Phase 2, plan §21.2 D1): image blocks, then the text."""
+        content: list[dict[str, Any]] = [
+            {"type": "image",
+             "source": {"type": "base64", "media_type": image.media_type,
+                        "data": base64.b64encode(image.data).decode("ascii")}}
+            for image in images
+        ]
+        content.append({"type": "text", "text": prompt})
+        return self.complete(op=op, system=system, prompt=content, model=model,  # type: ignore[arg-type]
+                             max_tokens=max_tokens, temperature=temperature)
 
     def complete(
         self,

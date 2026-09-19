@@ -7,7 +7,13 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
-from llmwiki.models.source import utcnow
+from llmwiki.models.source import GENERAL_DOMAIN, utcnow
+
+#: What kind of work a ledger line paid for (Phase 2, plan §21.2 C2). ``compile``
+#: is the per-source compiler; ``ingest`` is routing and vision on the same
+#: pipeline run; ``query`` is the answer path; ``eval`` the judge; ``synthesis``
+#: the scheduled per-domain job.
+CostKind = Literal["compile", "ingest", "query", "eval", "synthesis", "route"]
 
 OpKind = Literal["create_page", "patch_page", "add_backlink", "flag_contradiction"]
 
@@ -49,6 +55,7 @@ class CompileResult(BaseModel):
     cost_usd: float = 0.0
     aborted: bool = False
     reason: str = ""
+    domain: str = GENERAL_DOMAIN
 
     @property
     def pages_touched(self) -> int:
@@ -68,10 +75,14 @@ class CostRecord(BaseModel):
     version: str = ""
     source_id: str | None = None
     at: datetime = Field(default_factory=utcnow)
+    # Phase 2 (plan §21.2 C2): the two aggregation axes the ledger did not
+    # have. Defaults make every pre-Phase-2 line parse unchanged.
+    domain: str = GENERAL_DOMAIN
+    kind: CostKind = "compile"
 
 
 class CostSummary(BaseModel):
-    """Aggregation of the ledger, for ``llmwiki cost`` and the smoke script."""
+    """Aggregation of the ledger, for ``llmwiki cost``/``usage`` and the smoke script."""
 
     total_usd: float = 0.0
     call_count: int = 0
@@ -79,6 +90,15 @@ class CostSummary(BaseModel):
     output_tokens: int = 0
     cache_read_tokens: int = 0
     by_model: dict[str, float] = Field(default_factory=dict)
+    # Phase 2 breakdowns (plan §21.6.6). ``by_day`` keys are ISO dates;
+    # ``top_sources`` is (source_id, usd) descending, at most ten.
+    by_op: dict[str, float] = Field(default_factory=dict)
+    by_domain: dict[str, float] = Field(default_factory=dict)
+    by_day: dict[str, float] = Field(default_factory=dict)
+    by_kind: dict[str, float] = Field(default_factory=dict)
+    top_sources: list[tuple[str, float]] = Field(default_factory=list)
+    since: datetime | None = None
+    until: datetime | None = None
 
 
 class Citation(BaseModel):
@@ -88,6 +108,7 @@ class Citation(BaseModel):
     title: str = ""
     url: str | None = None
     slug: str | None = None
+    domain: str | None = None
 
 
 class AgentStep(BaseModel):
@@ -136,3 +157,40 @@ class Answer(BaseModel):
     context: str = ""
     external_refs: list[ExternalRef] = Field(default_factory=list)
     run_id: str | None = None
+    # Phase 2: measured spend of this one answer (every LLM call on the query
+    # path, summed) and the domains that were searched (plan §21.2 C2, A6).
+    cost_usd: float = 0.0
+    domains: list[str] = Field(default_factory=list)
+
+
+class SynthesisResult(BaseModel):
+    """What one run of the scheduled per-domain synthesis did (Phase 2, plan §21.2 A8)."""
+
+    domain: str
+    slug: str = "overview"
+    pages_read: int = 0
+    cost_usd: float = 0.0
+    written: bool = False
+    reason: str = ""
+
+
+class WorkerStatus(BaseModel):
+    """The ingest worker's state, for ``/healthz`` and ``GET /worker`` (plan §21.2 C3/C5)."""
+
+    mode: str = "inline"
+    paused: bool = False
+    reason: str = ""
+    queued: dict[str, int] = Field(default_factory=dict)
+    in_flight: list[str] = Field(default_factory=list)
+    parked: list[str] = Field(default_factory=list)
+
+
+class AlertState(BaseModel):
+    """Which cost alerts already fired this period.
+
+    Stored at ``wiki/_meta/cost/alerts.json`` (plan §21.2 C4).
+    """
+
+    daily_warned: str = ""
+    monthly_warned: str = ""
+    capped: str = ""

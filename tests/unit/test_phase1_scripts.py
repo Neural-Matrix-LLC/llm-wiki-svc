@@ -239,3 +239,72 @@ def test_probe_offline_matrix_passes_end_to_end(tmp_path) -> None:
     assert "PROBE PASS" in result.stdout
     # caps 0/1/4 x off/weak/always: the fake web searcher makes every policy meaningful
     assert result.stdout.count("\nok   [cap=") == 9
+
+
+# --- Phase 2: scripts/probe_domain_routing.py ------------------------------------------------
+
+
+def test_probe_domain_routing_verdicts() -> None:
+    from llmwiki.models.source import DomainAssignment
+
+    probe = _load("probe_domain_routing")
+    assert probe.decide(DomainAssignment(domain="ml", confidence=0.9), 0.6) == "routed"
+    assert probe.decide(DomainAssignment(domain="ml", confidence=0.3), 0.6) == "demoted"
+    assert probe.decide(DomainAssignment(domain="general"), 0.6) == "general"
+    assert probe.decide(DomainAssignment(domain="general", suggested_domain="x"), 0.6) == (
+        "general+suggest")
+
+
+def test_probe_domain_routing_runs_offline_end_to_end(tmp_path) -> None:
+    """Fakes + fixture docs + a two-domain registry: exit 0 and one line per source."""
+    env = {**os.environ, "LOCAL_STORAGE_PATH": str(tmp_path / "data"),
+           "LANGSMITH_TRACING": "false"}
+    result = subprocess.run(
+        [sys.executable, str(SCRIPTS / "probe_domain_routing.py"), "--offline"],
+        capture_output=True, text=True, env=env, cwd=REPO, timeout=120,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "registry: general, retrieval, web-standards" in result.stdout
+    assert result.stdout.count("conf=") == 2
+
+
+# --- Phase 2: scripts/migrate_phase2.py -------------------------------------------------------
+
+
+def test_migrate_phase2_check_then_apply_offline(tmp_path) -> None:
+    """--check exits 1 while the keyword index is unbuilt, --apply builds it, --check exits 0."""
+    from llmwiki import factory, tools
+    from llmwiki.config import Settings
+    from llmwiki.storage.layout import COST_KEY
+
+    data = tmp_path / "data"
+    cfg = Settings(_env_file=None, storage_backend="local", vector_backend="memory",
+                   embedding_backend="fake", llm_backend="fake", local_storage_path=data,
+                   embedding_dim=64, worker_mode="inline", lexical_backend="none")
+    factory.reset()
+    try:
+        tools.ingest_now(text="# Firmware\n\nThe XK-7781 controller.\n", cfg=cfg)
+        factory.object_store(cfg).put(COST_KEY, b'{"op":"old","model":"m","cost_usd":0.5}\n')
+    finally:
+        factory.reset()
+
+    env = {**os.environ, "LOCAL_STORAGE_PATH": str(data), "LANGSMITH_TRACING": "false",
+           "LEXICAL_BACKEND": "sqlite"}
+
+    def run(*flags: str) -> subprocess.CompletedProcess:
+        return subprocess.run([sys.executable, str(SCRIPTS / "migrate_phase2.py"), "--offline",
+                               *flags], capture_output=True, text=True, env=env, cwd=REPO,
+                              timeout=120)
+
+    check = run("--check")
+    assert check.returncode == 1, check.stdout + check.stderr
+    assert "to build:" in check.stdout and "legacy wiki/_meta/cost.jsonl present" in check.stdout
+
+    apply = run("--apply")
+    assert apply.returncode == 0, apply.stdout + apply.stderr
+    assert "MIGRATION DONE" in apply.stdout and "moved 1 line(s)" in apply.stdout
+    assert not (data / "wiki" / "_meta" / "cost.jsonl").exists()
+    assert list((data / "lexical").glob("*.sqlite"))
+
+    recheck = run("--check")
+    assert recheck.returncode == 0 and "nothing to do" in recheck.stdout

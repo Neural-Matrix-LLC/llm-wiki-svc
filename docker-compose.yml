@@ -271,6 +271,27 @@ services:
       # - ./config:/app/config:ro
     entrypoint: ["llmwiki", "lint"]
 
+  # Phase 2 (design §4.10.1): the scheduled per-domain synthesis - one strong-
+  # model call per domain that writes/refreshes its overview page. Same image,
+  # .env and corpus as lint; wire it to host cron weekly next to lint:
+  #   docker compose --profile ops run --rm synthesize
+  synthesize:
+    profiles: ["ops"]
+    image: ${DOCKER_USER:-local}/llmwiki:${IMAGE_TAG:-latest}
+    user: "${API_UID:-10001}:${API_GID:-10001}"
+    depends_on:
+      init-data:
+        condition: service_completed_successfully
+    env_file:
+      - path: .env
+        required: true
+    environment:
+      LOCAL_STORAGE_PATH: /data
+      COST_WRITER: synth
+    volumes:
+      - ./.data:/data
+    entrypoint: ["llmwiki", "synthesize", "--all"]
+
   # The answer-quality eval (Phase 1-D, technical document §10). Same image,
   # .env and corpus as lint; arguments pass straight through to the script:
   #   docker compose --profile ops run --rm eval                    # local run, real backends

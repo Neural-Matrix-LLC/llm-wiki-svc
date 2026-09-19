@@ -294,3 +294,129 @@ def test_app_mounts_telegram_route_when_configured(tmp_path, monkeypatch) -> Non
     # Mounted and rejected for a missing secret header (not 404 - not mounted).
     assert client.post("/channels/telegram/webhook", json={}).status_code == 401
     factory.reset()
+
+
+# --- Phase 2: the one-token domain hint (plan §21.7) -----------------------------------------
+
+
+def test_domain_prefix_parsers() -> None:
+    from llmwiki.channels.domain_prefix import split_bracket_domain, split_hashtag_domain
+
+    assert split_hashtag_domain("#ml-systems Paged attention") == ("ml-systems", "Paged attention")
+    assert split_hashtag_domain("  #ml\nsome text") == ("ml", "\nsome text")
+    assert split_hashtag_domain("no tag here #ml") == (None, "no tag here #ml")
+    assert split_hashtag_domain("#Not-Lower x") == (None, "#Not-Lower x")
+    assert split_hashtag_domain("") == (None, "")
+    assert split_bracket_domain("[ml-systems] A paper") == ("ml-systems", "A paper")
+    assert split_bracket_domain("Re: [ml] later") == (None, "Re: [ml] later")
+
+
+@pytest.mark.asyncio
+async def test_telegram_hashtag_on_text_is_an_explicit_domain(monkeypatch) -> None:
+    from llmwiki.channels import telegram
+
+    calls = []
+    monkeypatch.setattr("llmwiki.tools.ingest_source", lambda **kw: calls.append(kw) or _fake_ref())
+    monkeypatch.setattr("llmwiki.tools.process_source", lambda *a, **k: None)
+    acks = []
+
+    async def ack(client, chat_id, text):
+        acks.append(text)
+
+    monkeypatch.setattr(telegram, "_ack", ack)
+
+    class _Bg:
+        def add_task(self, *a, **k):
+            pass
+
+    await telegram._handle_update(
+        {"message": {"chat": {"id": 1}, "text": "#ml-systems KV cache blocks stay on the GPU."}},
+        "t", _Bg())
+
+    assert calls[0]["domain"] == "ml-systems"
+    assert calls[0]["text"] == "KV cache blocks stay on the GPU."
+    assert acks and acks[0].startswith("Captured")
+
+
+@pytest.mark.asyncio
+async def test_telegram_hashtag_on_a_caption_travels_with_the_photo(monkeypatch) -> None:
+    from llmwiki.channels import telegram
+
+    calls = []
+    monkeypatch.setattr("llmwiki.tools.ingest_source", lambda **kw: calls.append(kw) or _fake_ref())
+
+    async def download(client, token, file_id):
+        return b"jpegbytes"
+
+    monkeypatch.setattr(telegram, "_download", download)
+    domain, title = telegram.split_hashtag_domain("#ml Whiteboard")
+    await telegram._capture({"photo": [{"file_id": "f1"}]}, title, client=None, token="t",
+                            domain=domain)
+    assert calls[0]["domain"] == "ml" and calls[0]["title"] == "Whiteboard"
+
+
+@pytest.mark.asyncio
+async def test_telegram_unknown_domain_is_acked_not_crashed(monkeypatch) -> None:
+    from llmwiki.channels import telegram
+
+    def boom(**kw):
+        raise KeyError("nope")
+
+    monkeypatch.setattr("llmwiki.tools.ingest_source", boom)
+    acks = []
+
+    async def ack(client, chat_id, text):
+        acks.append(text)
+
+    monkeypatch.setattr(telegram, "_ack", ack)
+
+    class _Bg:
+        def add_task(self, *a, **k):
+            raise AssertionError("nothing to process")
+
+    await telegram._handle_update({"message": {"chat": {"id": 1}, "text": "#nope hi"}}, "t", _Bg())
+    assert acks == ["Unknown domain 'nope'; nothing captured."]
+
+
+def test_email_bracket_prefix_is_an_explicit_domain_and_stripped_from_the_title(
+    cfg, monkeypatch,
+) -> None:
+    from fastapi import FastAPI
+
+    from llmwiki.channels.email import build_router
+
+    cfg.mailgun_signing_key = SecretStr("key")
+    calls = []
+    monkeypatch.setattr("llmwiki.tools.ingest_source", lambda **kw: calls.append(kw) or _fake_ref())
+    monkeypatch.setattr("llmwiki.tools.process_source", lambda *a, **k: None)
+    app = FastAPI()
+    app.include_router(build_router(cfg))
+    client = TestClient(app)
+
+    form = _mailgun_form("key", subject="[ml-systems] a link",
+                         **{"stripped-text": "https://example.org/x", "attachment-count": "0"})
+    response = client.post("/channels/email/inbound", data=form)
+
+    assert response.status_code == 200, response.text
+    assert calls[0]["domain"] == "ml-systems" and calls[0]["title"] == "a link"
+
+
+def test_email_unknown_domain_answers_200_with_the_reason(cfg, monkeypatch) -> None:
+    from fastapi import FastAPI
+
+    from llmwiki.channels.email import build_router
+
+    cfg.mailgun_signing_key = SecretStr("key")
+
+    def boom(**kw):
+        raise KeyError("nope")
+
+    monkeypatch.setattr("llmwiki.tools.ingest_source", boom)
+    app = FastAPI()
+    app.include_router(build_router(cfg))
+    client = TestClient(app)
+    form = _mailgun_form("key", subject="[nope] x",
+                         **{"stripped-text": "hello", "attachment-count": "0"})
+    response = client.post("/channels/email/inbound", data=form)
+    assert response.status_code == 200
+    assert response.json() == {"ok": False, "error": "unknown domain 'nope'", "source_ids": []}

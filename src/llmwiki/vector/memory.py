@@ -20,6 +20,17 @@ class MemoryVectorStore:
     def _index(self, index: str) -> dict[str, dict]:
         return self._data.setdefault(index, {})
 
+    def ensure_index(self, index: str) -> bool:
+        """Indexes spring into existence on first use here; report whether this was it."""
+        with self._lock:
+            created = index not in self._data
+            self._index(index)
+        return created
+
+    def index_names(self) -> list[str]:
+        """Every index that has been touched - for tests and the offline scripts."""
+        return sorted(self._data)
+
     def upsert(
         self,
         index: str,

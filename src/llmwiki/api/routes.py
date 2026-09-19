@@ -9,15 +9,15 @@ import logging
 import secrets
 
 from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, UploadFile
-from fastapi.responses import PlainTextResponse
+from fastapi.responses import HTMLResponse, PlainTextResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, Field, model_validator
 
 from llmwiki import tools
 from llmwiki.config import settings
 from llmwiki.models.chunk import SearchHit
-from llmwiki.models.page import LintReport, PageGist
-from llmwiki.models.plan import Answer, CompileResult
+from llmwiki.models.page import Domain, LintReport, PageGist
+from llmwiki.models.plan import Answer, CompileResult, CostSummary, SynthesisResult, WorkerStatus
 from llmwiki.models.source import SourceRef, SourceStatus
 
 logger = logging.getLogger(__name__)
@@ -62,6 +62,8 @@ class IngestRequest(BaseModel):
     url: str | None = None
     text: str | None = None
     title: str = ""
+    # Phase 2: file the source under this registered domain (else routed).
+    domain: str | None = None
 
     @model_validator(mode="after")
     def _exactly_one_source(self) -> IngestRequest:
@@ -87,9 +89,13 @@ def ingest(request: IngestRequest, background: BackgroundTasks) -> SourceRef:
     """
     
     logger.debug(" /ingest request: %s", request)
-    ref = tools.ingest_source(url=request.url, text=request.text, title=request.title)
+    try:
+        ref = tools.ingest_source(url=request.url, text=request.text, title=request.title,
+                                  domain=request.domain)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=f"no such domain: {exc.args[0]!r}") from exc
     if not ref.duplicate:
-        background.add_task(tools.process_source, ref.source_id)
+        background.add_task(tools.enqueue_source, ref.source_id)
     return ref
 
 
@@ -98,22 +104,74 @@ async def upload(
     background: BackgroundTasks,
     file: UploadFile = File(...),
     title: str = Form(""),
+    domain: str | None = Form(None),
 ) -> SourceRef:
     """Capture an uploaded file: a PDF, a ``.txt``/``.md`` text file, HTML or an image.
 
     The modality comes from the content type and filename, not from the caller.
+    ``domain`` (a form field, Phase 2) files it under a registered domain.
     """
     logger.debug(" /upload request: filename=%s, content_type=%s", file.filename, file.content_type)
     data = await file.read()
-    ref = tools.ingest_source(
-        file=data,
-        filename=file.filename,
-        mime=file.content_type or "application/octet-stream",
-        title=title,
-    )
+    try:
+        ref = tools.ingest_source(
+            file=data,
+            filename=file.filename,
+            mime=file.content_type or "application/octet-stream",
+            title=title,
+            domain=domain or None,
+        )
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=f"no such domain: {exc.args[0]!r}") from exc
     if not ref.duplicate:
-        background.add_task(tools.process_source, ref.source_id)
+        background.add_task(tools.enqueue_source, ref.source_id)
     return ref
+
+
+@router.get("/usage", response_model=CostSummary, dependencies=[Depends(require_token)])
+def usage(month: str | None = None, domain: str | None = None) -> CostSummary:
+    """Spend by model, op, domain, kind, day and source (Phase 2). Default: month to date."""
+    try:
+        return tools.usage_summary(month=month, domain=domain)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=f"month must be YYYY-MM: {exc}") from exc
+
+
+@router.get("/dashboard", response_class=HTMLResponse)
+def dashboard(
+    month: str | None = None,
+    token: str | None = None,
+    credentials: HTTPAuthorizationCredentials | None = Depends(_bearer),
+) -> HTMLResponse:
+    """The usage dashboard (Phase 2). Bearer header, or ``?token=`` for a browser.
+
+    The same static token as every other protected route; the query-parameter
+    form exists only because a browser cannot send the header. Keep it behind
+    TLS, as the deployment already is.
+    """
+    expected = settings.ingest_api_token.get_secret_value()
+    supplied = token or (credentials.credentials if credentials else "")
+    if not secrets.compare_digest(supplied or "", expected):
+        raise HTTPException(status_code=401, detail="invalid or missing token")
+    from llmwiki.api.dashboard import render
+
+    try:
+        return HTMLResponse(render(month=month))
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=f"month must be YYYY-MM: {exc}") from exc
+
+
+@router.get("/worker", response_model=WorkerStatus)
+def worker() -> WorkerStatus:
+    """What the ingest worker is doing (Phase 2): queued, in flight, parked and why."""
+    return tools.worker_status()
+
+
+@router.post("/worker/resume", dependencies=[Depends(require_token)])
+def worker_resume() -> dict:
+    """Retry sources parked under the monthly cost cap now (after raising it)."""
+    resumed = tools.resume_processing()
+    return {"ok": True, "resumed": resumed}
 
 
 @router.get("/sources/{source_id}", response_model=SourceStatus)
@@ -123,21 +181,28 @@ def source_status(source_id: str) -> SourceStatus:
 
 
 @router.get("/search", response_model=list[SearchHit])
-def search(q: str, k: int = 5) -> list[SearchHit]:
-    """Wiki-first search."""
-    return tools.search_wiki(q, k=k)
+def search(q: str, k: int = 5, domain: str | None = None) -> list[SearchHit]:
+    """Wiki-first search. ``domain`` (Phase 2) scopes it to one domain."""
+    try:
+        return tools.search_wiki(q, k=k, domain=domain)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=f"no such domain: {exc.args[0]!r}") from exc
 
 
 @router.get("/answer", response_model=Answer)
-def answer(q: str, k: int = 5) -> Answer:
+def answer(q: str, k: int = 5, domain: str | None = None) -> Answer:
     """Answer a question with verified citations.
 
     Since Phase 1-D the response also carries ``steps`` (the tool calls the
     query graph made), ``context``, ``external_refs`` (web results, never
     citations) and ``run_id`` (the LangSmith run, when tracing is on) - the
-    handle ``POST /feedback`` takes.
+    handle ``POST /feedback`` takes. Since Phase 2 also ``cost_usd`` and
+    ``domains`` (the domains searched); ``domain`` scopes the search.
     """
-    return tools.answer(q, k=k)
+    try:
+        return tools.answer(q, k=k, domain=domain)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=f"no such domain: {exc.args[0]!r}") from exc
 
 
 class FeedbackRequest(BaseModel):
@@ -163,20 +228,57 @@ def feedback(request: FeedbackRequest) -> dict:
 
 
 @router.get("/concepts", response_model=list[PageGist])
-def concepts(prefix: str | None = None) -> list[PageGist]:
-    """List page gists - one object read regardless of wiki size."""
-    return tools.list_concepts(prefix)
+def concepts(prefix: str | None = None, domain: str | None = None) -> list[PageGist]:
+    """List one domain's page gists - one object read regardless of wiki size."""
+    try:
+        return tools.list_concepts(prefix, domain=domain)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=f"no such domain: {exc.args[0]!r}") from exc
 
 
 @router.get("/page/{slug}", response_class=PlainTextResponse)
-def page(slug: str) -> str:
+def page(slug: str, domain: str | None = None) -> str:
     """Return a page as raw markdown, so a browser or Obsidian can read it directly."""
     from llmwiki.wiki.pages import render_page
 
     try:
-        return render_page(tools.get_page(slug))
+        return render_page(tools.get_page(slug, domain=domain))
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=f"no page {slug!r}") from exc
+
+
+class DomainRequest(BaseModel):
+    """Body of ``PUT /domains/{name}``."""
+
+    description: str = ""
+
+
+@router.get("/domains", response_model=list[Domain])
+def domains() -> list[Domain]:
+    """The domain registry, ``general`` first (Phase 2). Unauthenticated, like ``/concepts``."""
+    return tools.list_domains()
+
+
+@router.put("/domains/{name}", response_model=Domain, dependencies=[Depends(require_token)])
+def put_domain(name: str, request: DomainRequest) -> Domain:
+    """Register a domain or update its description; creates its indexes (Phase 2)."""
+    try:
+        return tools.upsert_domain(name, request.description)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@router.delete("/domains/{name}", dependencies=[Depends(require_token)])
+def delete_domain(name: str, force: bool = False) -> dict:
+    """Unregister a domain. 409 while it still holds pages, unless ``?force=true``."""
+    try:
+        removed = tools.remove_domain(name, force=force)
+    except ValueError as exc:
+        status = 409 if "still has pages" in str(exc) else 422
+        raise HTTPException(status_code=status, detail=str(exc)) from exc
+    if not removed:
+        raise HTTPException(status_code=404, detail=f"no such domain: {name!r}")
+    return {"ok": True, "removed": name}
 
 
 @router.post("/compile/{source_id}", response_model=CompileResult,
@@ -186,7 +288,20 @@ def compile_source(source_id: str, force: bool = False) -> CompileResult:
     return tools.compile_update(source_id, force=force)
 
 
+@router.post("/synthesize/{domain}", response_model=SynthesisResult,
+             dependencies=[Depends(require_token)])
+def synthesize(domain: str) -> SynthesisResult:
+    """Write or refresh one domain's overview page (Phase 2). Scheduled or manual only."""
+    try:
+        return tools.synthesize(domain)[0]
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=f"no such domain: {exc.args[0]!r}") from exc
+
+
 @router.post("/lint", response_model=LintReport, dependencies=[Depends(require_token)])
-def lint(dry_run: bool = True) -> LintReport:
-    """Run the global lint on demand. Normally a scheduled job."""
-    return tools.lint_wiki(dry_run=dry_run)
+def lint(dry_run: bool = True, domain: str | None = None) -> LintReport:
+    """Run the global lint on demand - every domain, or one. Normally a scheduled job."""
+    try:
+        return tools.lint_wiki(dry_run=dry_run, domain=domain)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=f"no such domain: {exc.args[0]!r}") from exc

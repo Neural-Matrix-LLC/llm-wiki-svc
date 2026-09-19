@@ -33,7 +33,7 @@ OFFLINE_DOCS = [("sample.pdf", "application/pdf"), ("sample.html", "text/html")]
 
 
 def _offline_env() -> None:
-    os.environ.update(STORAGE_BACKEND="local", VECTOR_BACKEND="memory",
+    os.environ.update(RERANKER_BACKEND="fake", STORAGE_BACKEND="local", VECTOR_BACKEND="memory",
                       EMBEDDING_BACKEND="fake", LLM_PROVIDER="fake",
                       WEB_SEARCH_BACKEND="none", LANGSMITH_TRACING="false")
     os.environ.setdefault("LOCAL_STORAGE_PATH", str(REPO / ".data-eval"))
@@ -79,6 +79,7 @@ def main() -> int:
     from llmwiki.eval.dataset import FIXTURE_DATASET, append_examples, load_examples, push_dataset
     from llmwiki.eval.run import run_experiment, run_local
 
+    os.environ.setdefault("COST_WRITER", "eval")  # Phase 2, plan §21.2 C1
     cfg = load_settings()
     dataset_path = args.dataset or (REPO / FIXTURE_DATASET)
     print(f"llmwiki {__version__} | llm={cfg.llm_provider} routing="

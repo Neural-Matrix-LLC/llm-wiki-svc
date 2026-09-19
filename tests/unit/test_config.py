@@ -19,6 +19,7 @@ def test_defaults_are_the_cloud_backends() -> None:
     assert cfg.llm_max_tokens == 2048
     assert cfg.llm_temperature == 1.0
     assert cfg.log_level == "INFO"
+    assert cfg.cost_writer == "api", "the service process is the default ledger writer"
 
 
 def test_query_graph_defaults_are_bounded_and_web_search_is_off(monkeypatch) -> None:
@@ -257,3 +258,19 @@ def test_configure_langsmith_exports_the_env_vars(monkeypatch) -> None:
         # smith.example, which is what hung the suite).
         for name in names:
             os.environ.pop(name, None)
+
+
+def test_cli_offline_env_disables_the_routing_table_and_tracing() -> None:
+    """``llmwiki --offline`` must be offline even in a checkout that ships
+    config/providers.py + config/ops.py: the routing table outranks LLM_PROVIDER,
+    so both paths are pointed at nothing (found 2026-09-19 - an --offline ingest
+    compiled with the real OpenRouter route)."""
+    from pathlib import Path
+
+    from llmwiki.cli import OFFLINE_ENV
+
+    assert OFFLINE_ENV["LLM_PROVIDER"] == "fake"
+    for key in ("LLMWIKI_PROVIDERS_CONFIG", "LLMWIKI_OPS_CONFIG"):
+        assert not Path(OFFLINE_ENV[key]).exists()
+    assert OFFLINE_ENV["LANGSMITH_TRACING"] == "false"
+    assert OFFLINE_ENV["RERANKER_BACKEND"] == "fake", "the reranker is a Cloudflare call"

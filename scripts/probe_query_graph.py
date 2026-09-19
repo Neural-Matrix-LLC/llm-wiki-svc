@@ -57,7 +57,7 @@ TRACE_WAIT_S = 45
 
 
 def _offline_env() -> None:
-    os.environ.update(STORAGE_BACKEND="local", VECTOR_BACKEND="memory",
+    os.environ.update(RERANKER_BACKEND="fake", STORAGE_BACKEND="local", VECTOR_BACKEND="memory",
                       EMBEDDING_BACKEND="fake", LLM_PROVIDER="fake",
                       WEB_SEARCH_BACKEND="fake", LANGSMITH_TRACING="false")
     os.environ.setdefault("LOCAL_STORAGE_PATH", str(REPO / ".data-probe"))
