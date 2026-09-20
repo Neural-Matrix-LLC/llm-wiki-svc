@@ -35,6 +35,7 @@ dependencies = [
     "trafilatura",
     "uvicorn",
     "youtube-transcript-api>=1.0",  # proxy_config= on the constructor
+    "yt-dlp",  # YOUTUBE_COOKIES_PATH path: captions via a logged-in session
 ]
 
 [project.optional-dependencies]

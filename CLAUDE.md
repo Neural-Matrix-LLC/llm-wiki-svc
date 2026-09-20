@@ -120,6 +120,15 @@ surface drifts. `tests/unit/test_channels.py` covers the Telegram/email
 webhook channels (auth, message-shape → `ingest_source(...)` mapping,
 optional mount) the same way.
 
+YouTube capture from a cloud IP needs one of `YOUTUBE_PROXY_URL`
+(`youtube-transcript-api` through a rotating residential proxy) or
+`YOUTUBE_COOKIES_PATH` (yt-dlp captions with a logged-in session; wins when
+both are set) - YouTube refuses anonymous transcript requests from cloud
+egress IPs. Both routes store the same raw segment JSON; see
+`src/llmwiki/extractors/youtube.py`'s module docstring and `HISTORY.md`'s
+2026-09-20 entries. A failed fetch is acked back to the Telegram/email sender
+(200 / 406) rather than 500ing, because both providers retry non-2xx for hours.
+
 Telegram and email capture channels (`src/llmwiki/channels/`) are optional and
 webhook-based — nothing to run locally, but each needs a one-time registration
 step once `TELEGRAM_BOT_TOKEN`/`TELEGRAM_WEBHOOK_SECRET` or

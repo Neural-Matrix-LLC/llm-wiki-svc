@@ -161,10 +161,15 @@ class Settings(BaseSettings):
     telegram_bot_token: SecretStr = SecretStr("")
     telegram_webhook_secret: SecretStr = SecretStr("")
     mailgun_signing_key: SecretStr = SecretStr("")
-    # HTTP(S) proxy for YouTube transcript fetches only. YouTube refuses
-    # transcript requests from most cloud-provider egress IPs, so a deployed
-    # service needs this to capture videos at all; blank = direct request.
+    # YouTube refuses transcript requests from most cloud-provider egress IPs,
+    # so a deployed service needs one of these two to capture videos at all
+    # (extractors/youtube.py). Both blank = a direct youtube-transcript-api
+    # request, which works from a laptop.
+    #   youtube_proxy_url    - HTTP(S) proxy for youtube-transcript-api
+    #   youtube_cookies_path - Netscape cookies.txt of a logged-in session;
+    #                          switches the fetch to yt-dlp. Wins when both set.
     youtube_proxy_url: str = ""
+    youtube_cookies_path: str = ""
 
     # --- Observability: stdlib logging ---
     # Consumed by llmwiki.logging_config.configure_logging, called once by each

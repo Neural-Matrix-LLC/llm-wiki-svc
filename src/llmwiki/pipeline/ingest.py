@@ -177,7 +177,11 @@ class IngestPipeline:
             from llmwiki.extractors.youtube import fetch_transcript
 
             return (
-                fetch_transcript(url, proxy_url=self.settings.youtube_proxy_url or None),
+                fetch_transcript(
+                    url,
+                    proxy_url=self.settings.youtube_proxy_url or None,
+                    cookies_path=self.settings.youtube_cookies_path or None,
+                ),
                 "application/json",
             )
         from llmwiki.extractors.web import fetch

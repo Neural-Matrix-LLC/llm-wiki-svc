@@ -123,6 +123,13 @@ services:
       # That silently restores the single-provider fallback - precisely the
       # 2026-09-10 failure. `curl /healthz | jq .config` shows which is in force.
       # - ./config:/app/config:ro
+      #
+      # YouTube from this box's cloud IP (see YOUTUBE_COOKIES_PATH in
+      # .env.example): mount the exported cookies.txt read-only and set
+      # YOUTUBE_COOKIES_PATH=/run/llmwiki/youtube_cookies.txt in .env. Read-only
+      # is fine - the fetch copies it to a temp file because yt-dlp writes
+      # refreshed cookies back.
+      # - ./youtube_cookies.txt:/run/llmwiki/youtube_cookies.txt:ro
       # - ./skills:/app/skills:ro
     restart: unless-stopped
 

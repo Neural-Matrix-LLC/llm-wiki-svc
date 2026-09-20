@@ -5,6 +5,87 @@ reverse-chronological order. See `CLAUDE.md` for the rule this file follows.
 
 ---
 
+## 2026-09-20 — `YOUTUBE_COOKIES_PATH`: yt-dlp captions with a logged-in session as the alternative to the proxy
+
+**Goal.** Give a cloud deployment a second way past YouTube's IP block that
+costs no proxy subscription: the route the FUND-financial-Research agents
+settled on (`fund_models/util.py`, their commit `e857f14`) - yt-dlp with a
+browser-exported `cookies.txt`. Configuration picks the route:
+`YOUTUBE_COOKIES_PATH` set → yt-dlp with that session; otherwise
+`youtube-transcript-api`, through `YOUTUBE_PROXY_URL` when set (previous
+entry). Cookies win when both are set; yt-dlp honours the proxy too.
+
+**What was taken from FUND and what was not.** FUND's final form downloads
+the full audio and transcribes it locally with Whisper. That is deliberately
+*not* ported: it would add ffmpeg + openai-whisper + torch to
+`pip install llmwiki`, spend minutes of CPU per video inside the capture path
+(a webhook request), and produce a different raw format. What is ported is the
+cookie mechanism plus FUND's earlier "Tier 2" (captions via yt-dlp, which it
+still defines as `_yt_dlp_download_vtt` but no longer calls), with
+`skip_download` so the video never crosses the wire. Two FUND details carried
+over verbatim in spirit: the cookie file is copied to a temp file for each
+call because yt-dlp writes refreshed cookies back and the deployed file is a
+read-only mount; and a "Sign in to confirm you're not a bot"/403 from yt-dlp
+means the session was rejected, which the error now says (re-export the
+file). One FUND detail explicitly *not* carried over: its cookie files are
+tracked in git. Here `.gitignore` gets `*cookies*.txt`.
+
+**Implementation.**
+
+- `src/llmwiki/extractors/youtube.py` — `fetch_transcript(url, proxy_url=None,
+  cookies_path=None)` dispatches to `_segments_via_transcript_api` or
+  `_segments_via_yt_dlp`. Both return the same `text`/`start`/`duration`
+  list, so the stored raw object and `YouTubeExtractor` do not know which one
+  ran. Two pure helpers are public for testing: `pick_caption_track(info)`
+  (manual subtitles before automatic captions; `en`, then `en-*`, then
+  anything; json3 format only) and `segments_from_json3(payload)` (YouTube's
+  json3 events → segments; textless window events dropped). yt-dlp is
+  imported inside the function, like every other optional SDK.
+- `src/llmwiki/config.py`, `.env.example` — `youtube_cookies_path` /
+  `YOUTUBE_COOKIES_PATH`, with the account-ban and expiry caveats and the
+  "never commit it" rule. `.env.example`'s `YOUTUBE_PROXY_URL` note now cites
+  the library README's recommendation (rotating residential; datacenter
+  proxies are blocked like cloud IPs).
+- `src/llmwiki/pipeline/ingest.py::_fetch` — passes both settings through.
+- `docker-compose.yml` — commented read-only bind mount for the cookie file
+  next to the existing `config/` override hint.
+- `pyproject.toml`, `uv.lock` — `yt-dlp` as a core dependency (pure Python;
+  no ffmpeg needed for captions).
+- `.gitignore` — `*cookies*.txt`.
+
+**Related files.** `src/llmwiki/extractors/youtube.py`,
+`src/llmwiki/pipeline/ingest.py`, `src/llmwiki/config.py`, `.env.example`,
+`docker-compose.yml`, `pyproject.toml`, `uv.lock`, `.gitignore`.
+
+**Tests.**
+
+- No regressions: `pytest` - 477 passed, 1 skipped (same pre-existing,
+  unrelated `test_agent_graph` failure as the previous entry). `ruff` clean
+  apart from the pre-existing `scripts/browse_vectors.py` E501; `mypy` clean;
+  `scripts/smoke_flow.py --offline` passes.
+- Changed: `test_ingest.py::test_capture_passes_youtube_proxy_url_from_settings`
+  → `test_capture_passes_youtube_proxy_and_cookies_from_settings`, plus
+  `test_capture_passes_none_when_neither_youtube_knob_is_set`; the
+  `fetch_transcript` stub in `test_capture_fills_youtube_title_from_oembed`
+  takes `**kw`.
+- New, `tests/unit/test_extractors.py` (yt-dlp mocked at `yt_dlp.YoutubeDL`,
+  asserting `download=False`; no network):
+  `test_cookies_path_switches_the_fetch_to_yt_dlp` (and transcript-api is not
+  constructed), `test_yt_dlp_gets_a_temp_copy_of_the_cookie_file_and_removes_it`,
+  `test_yt_dlp_also_uses_the_proxy_when_both_are_configured`,
+  `test_yt_dlp_route_downloads_the_chosen_json3_track_only`,
+  `test_a_missing_cookie_file_is_a_clear_error_not_a_yt_dlp_call`,
+  `test_a_video_without_captions_is_a_one_line_error`,
+  `test_a_rejected_session_names_the_cookie_file_as_the_fix`,
+  `test_pick_caption_track_prefers_manual_then_english_then_json3`,
+  `test_segments_from_json3_matches_the_transcript_api_shape`.
+- Not covered by a unit test, by design: whether a given cookie file gets
+  past YouTube today. Verify on the deployment: mount the file, set
+  `YOUTUBE_COOKIES_PATH`, send a link to the bot - the failure ack now says
+  whether the session was rejected.
+
+---
+
 ## 2026-09-20 — YouTube capture from a cloud IP: report the block, stop the webhook retry storm, add `YOUTUBE_PROXY_URL`
 
 **Goal.** A YouTube link sent to the Telegram bot from the deployed service

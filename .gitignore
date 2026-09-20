@@ -150,6 +150,9 @@ activemq-data/
 # Local object store (LOCAL_STORAGE_PATH) - runtime data, never committed
 .data*/
 
+# YouTube session cookies (YOUTUBE_COOKIES_PATH) - a login, never committed
+*cookies*.txt
+
 # Environments
 .env
 .envrc

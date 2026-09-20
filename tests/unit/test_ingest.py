@@ -101,7 +101,7 @@ def test_capture_fills_web_title_from_html(pipeline, store) -> None:
 def test_capture_fills_youtube_title_from_oembed(pipeline, store, monkeypatch) -> None:
     monkeypatch.setattr(
         "llmwiki.extractors.youtube.fetch_transcript",
-        lambda url, proxy_url=None: (FIXTURES / "transcript.json").read_bytes(),
+        lambda url, **kw: (FIXTURES / "transcript.json").read_bytes(),
     )
     monkeypatch.setattr(
         "llmwiki.extractors.youtube.fetch_video_title",
@@ -303,18 +303,43 @@ def test_a_source_captured_under_the_bare_hash_id_is_still_a_duplicate(
     ], "a second folder for the same bytes"
 
 
-def test_capture_passes_youtube_proxy_url_from_settings(pipeline, store, monkeypatch) -> None:
-    """The proxy is a Settings field; the extractor stays a pure function of its args."""
+def test_capture_passes_youtube_proxy_and_cookies_from_settings(
+    pipeline, store, monkeypatch
+) -> None:
+    """Both knobs are Settings fields; the extractor stays a pure function of its args."""
     seen: dict = {}
 
-    def fake_fetch(url, proxy_url=None):
-        seen["proxy_url"] = proxy_url
+    def fake_fetch(url, proxy_url=None, cookies_path=None):
+        seen.update(proxy_url=proxy_url, cookies_path=cookies_path)
         return (FIXTURES / "transcript.json").read_bytes()
 
     monkeypatch.setattr("llmwiki.extractors.youtube.fetch_transcript", fake_fetch)
     monkeypatch.setattr("llmwiki.extractors.youtube.fetch_video_title", lambda url: "t")
     monkeypatch.setattr(pipeline.settings, "youtube_proxy_url", "http://u:p@proxy.example:8080")
+    monkeypatch.setattr(
+        pipeline.settings, "youtube_cookies_path", "/run/llmwiki/youtube_cookies.txt"
+    )
 
     pipeline.capture(url="https://www.youtube.com/watch?v=dQw4w9WgXcQ")
 
-    assert seen["proxy_url"] == "http://u:p@proxy.example:8080"
+    assert seen == {
+        "proxy_url": "http://u:p@proxy.example:8080",
+        "cookies_path": "/run/llmwiki/youtube_cookies.txt",
+    }
+
+
+def test_capture_passes_none_when_neither_youtube_knob_is_set(pipeline, store, monkeypatch) -> None:
+    seen: dict = {}
+
+    def fake_fetch(url, proxy_url=None, cookies_path=None):
+        seen.update(proxy_url=proxy_url, cookies_path=cookies_path)
+        return (FIXTURES / "transcript.json").read_bytes()
+
+    monkeypatch.setattr("llmwiki.extractors.youtube.fetch_transcript", fake_fetch)
+    monkeypatch.setattr("llmwiki.extractors.youtube.fetch_video_title", lambda url: "t")
+    monkeypatch.setattr(pipeline.settings, "youtube_proxy_url", "")
+    monkeypatch.setattr(pipeline.settings, "youtube_cookies_path", "")
+
+    pipeline.capture(url="https://www.youtube.com/watch?v=dQw4w9WgXcQ")
+
+    assert seen == {"proxy_url": None, "cookies_path": None}
