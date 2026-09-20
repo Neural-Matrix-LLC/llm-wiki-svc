@@ -69,6 +69,10 @@ services:
     build:
       context: .
       target: runtime
+      args:
+        # 1 adds openai-whisper (+torch) and ffmpeg for YOUTUBE_WHISPER_MODEL;
+        # the default image stays without them. Rebuild after changing it.
+        WITH_WHISPER: ${WITH_WHISPER:-0}
     image: ${DOCKER_USER:-local}/llmwiki:${IMAGE_TAG:-latest}
     # Defaults to the image's own non-root user, so a deploy box sets nothing.
     # On a dev box that also runs the `dev` service against the same ./.data,
@@ -130,6 +134,10 @@ services:
       # is fine - the fetch copies it to a temp file because yt-dlp writes
       # refreshed cookies back.
       # - ./youtube_cookies.txt:/run/llmwiki/youtube_cookies.txt:ro
+      #
+      # With WITH_WHISPER=1 and YOUTUBE_WHISPER_MODEL set: keep the downloaded
+      # model weights (base = ~140 MB) across container recreations.
+      # - whisper-cache:/home/llmwiki/.cache/whisper
       # - ./skills:/app/skills:ro
     restart: unless-stopped
 

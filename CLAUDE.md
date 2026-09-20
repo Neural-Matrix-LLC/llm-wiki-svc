@@ -124,10 +124,15 @@ YouTube capture from a cloud IP needs one of `YOUTUBE_PROXY_URL`
 (`youtube-transcript-api` through a rotating residential proxy) or
 `YOUTUBE_COOKIES_PATH` (yt-dlp captions with a logged-in session; wins when
 both are set) - YouTube refuses anonymous transcript requests from cloud
-egress IPs. Both routes store the same raw segment JSON; see
-`src/llmwiki/extractors/youtube.py`'s module docstring and `HISTORY.md`'s
-2026-09-20 entries. A failed fetch is acked back to the Telegram/email sender
-(200 / 406) rather than 500ing, because both providers retry non-2xx for hours.
+egress IPs. A video with no captions at all falls through to
+`YOUTUBE_WHISPER_MODEL` (opt-in `llmwiki[whisper]` extra + ffmpeg, or the image
+built with `WITH_WHISPER=1`) - never a block. All three routes store the same
+raw segment JSON; see `src/llmwiki/extractors/youtube.py`'s module docstring
+and `HISTORY.md`'s 2026-09-20 entries. The Telegram webhook answers 200 before
+capturing (a Starlette background task does capture → ack → process) because
+Telegram re-delivers anything not acked within seconds and a capture can take
+minutes; a failed fetch is acked to the sender (`Capture failed: ...`, or 406
+on the email channel) rather than 500ing.
 
 Telegram and email capture channels (`src/llmwiki/channels/`) are optional and
 webhook-based — nothing to run locally, but each needs a one-time registration

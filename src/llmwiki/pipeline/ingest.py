@@ -181,6 +181,7 @@ class IngestPipeline:
                     url,
                     proxy_url=self.settings.youtube_proxy_url or None,
                     cookies_path=self.settings.youtube_cookies_path or None,
+                    whisper_model=self.settings.youtube_whisper_model or None,
                 ),
                 "application/json",
             )

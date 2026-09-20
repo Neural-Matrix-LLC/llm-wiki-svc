@@ -168,8 +168,12 @@ class Settings(BaseSettings):
     #   youtube_proxy_url    - HTTP(S) proxy for youtube-transcript-api
     #   youtube_cookies_path - Netscape cookies.txt of a logged-in session;
     #                          switches the fetch to yt-dlp. Wins when both set.
+    #   youtube_whisper_model - "base"/"small"/...: a video with NO captions is
+    #                          transcribed locally from its audio (llmwiki[whisper]
+    #                          extra + ffmpeg). Blank = such a video fails cleanly.
     youtube_proxy_url: str = ""
     youtube_cookies_path: str = ""
+    youtube_whisper_model: str = ""
 
     # --- Observability: stdlib logging ---
     # Consumed by llmwiki.logging_config.configure_logging, called once by each

@@ -5,6 +5,101 @@ reverse-chronological order. See `CLAUDE.md` for the rule this file follows.
 
 ---
 
+## 2026-09-20 — `YOUTUBE_WHISPER_MODEL`: audio transcription for videos with no captions; Telegram capture moves behind the 200
+
+**Goal.** Not every video has a caption track. When neither the transcript
+API nor yt-dlp finds one, download the audio and transcribe it locally with
+Whisper - FUND-financial-Research's final tier, ported this time, but gated.
+
+**Design.**
+
+- **Third tier, opt-in.** `YOUTUBE_WHISPER_MODEL` (blank = off; `base`,
+  `small`, ...) and a `llmwiki[whisper]` extra. openai-whisper pulls torch
+  (~2 GB) and needs ffmpeg, so neither is in `requirements.txt` or the default
+  image; `docker compose build` with `WITH_WHISPER=1` (build arg, Dockerfile)
+  adds both. A set model without the package or without ffmpeg is a one-line
+  `ExtractionError` naming the install, raised *before* any audio download.
+- **Only for "no captions".** A new `NoCaptions(ExtractionError)` is what the
+  two caption routes raise when the video is reachable but has no track
+  (`NoTranscriptFound`/`TranscriptsDisabled` from the transcript API; no json3
+  track from yt-dlp). Only that falls through to Whisper. A block, an expired
+  session, a dead link are still reported - Whisper never papers over a bad
+  proxy or cookie file, and with the model unset a no-captions failure says
+  `YOUTUBE_WHISPER_MODEL` is the fix.
+- **Same raw shape.** `segments_from_whisper` turns `transcribe()`'s segments
+  into the same `text`/`start`/`duration` list (ms precision), so `raw/` and
+  `YouTubeExtractor` are unchanged for the third time.
+- **Audio only, cleaned up.** `bestaudio/best` with `outtmpl` in a
+  `mkdtemp` directory that `finally` removes; the same cookies/proxy as the
+  caption routes via the shared `_yt_dlp_opts` context manager (which also
+  owns the temp-copy-of-the-cookie-file rule from the previous entry). The
+  model is loaded once per process (`lru_cache`), ~1 GB of RAM for `base`.
+- **Telegram: capture behind the response.** Whisper is minutes of CPU per
+  video, and `channels/telegram.py` ran capture inline in the request.
+  Telegram re-delivers any update it has not seen a 2xx for within seconds,
+  so a slow capture would start the same transcription again in parallel.
+  `_handle_update` now only queues `_capture_and_process` as a Starlette
+  background task; the route answers 200 immediately, the task does
+  capture → ack (`Captured. source_id=...` / `Capture failed: ...`) →
+  process, and `ingest_source` runs via `asyncio.to_thread` so `/healthz`
+  (the Docker healthcheck) keeps answering during the fetch. An unexpected
+  exception in the task is logged with its traceback and acked generically -
+  the response is gone by then and silence would be the only alternative.
+  The email channel is unchanged (it still returns `source_ids`, so its
+  capture stays inline); a Whisper-length capture through Mailgun may exceed
+  its webhook timeout - use Telegram or REST for those. Noted in
+  `.env.example`.
+
+**Also.** `requirements.txt` gains `yt-dlp==2026.8.19`: the Docker build
+installs from that file, not `pyproject.toml`, so the previous entry's
+dependency was not in the image. A full `pip freeze` re-pin was *not* done -
+the venv has drifted from the lockfile independently of this work
+(`google-genai`, `ast-serialize`, ...) and re-pinning those belongs to its own
+change.
+
+**Related files.** `src/llmwiki/extractors/youtube.py`,
+`src/llmwiki/channels/telegram.py`, `src/llmwiki/pipeline/ingest.py`,
+`src/llmwiki/config.py`, `pyproject.toml`, `requirements.txt`, `Dockerfile`,
+`docker-compose.yml`, `.env.example`.
+
+**Tests.**
+
+- No regressions: `pytest` - 489 passed, 1 skipped (same pre-existing,
+  unrelated `test_agent_graph` failure). `ruff`/`mypy` clean apart from the
+  pre-existing `scripts/browse_vectors.py` E501;
+  `scripts/smoke_flow.py --offline` passes; `docker compose config` and
+  `docker build --check` validate with `WITH_WHISPER` 0 and 1.
+- Changed, `tests/unit/test_channels.py`:
+  `test_a_failed_fetch_is_acked_to_the_chat_not_raised` now exercises
+  `_capture_and_process` (the task) rather than `_handle_update`.
+  `test_yt_dlp_route_downloads_the_chosen_json3_track_only` additionally
+  asserts no download happened; `test_a_video_without_captions_is_a_one_line_error`
+  asserts the message names `YOUTUBE_WHISPER_MODEL`. The `fetch_transcript`
+  stubs in `test_ingest.py` take `whisper_model`.
+- New, `tests/unit/test_channels.py`:
+  `test_handle_update_queues_the_capture_and_returns` (ingest must not run
+  before the response), `test_handle_update_ignores_an_update_without_a_message`,
+  `test_a_successful_capture_acks_then_processes` (order),
+  `test_a_crash_after_the_200_is_reported_to_the_chat`.
+- New, `tests/unit/test_extractors.py` (`whisper` faked in `sys.modules`,
+  `shutil.which` patched, yt-dlp fake writes the "audio" file for
+  `download=True`; no network, no torch):
+  `test_whisper_runs_only_when_there_are_no_captions`,
+  `test_no_captions_falls_through_to_whisper_on_the_audio` (format, cookie
+  temp copy, temp dir removed, segment shape),
+  `test_transcript_api_no_captions_also_falls_through_to_whisper`,
+  `test_a_block_never_falls_through_to_whisper`,
+  `test_whisper_configured_but_not_installed_is_a_clear_error`,
+  `test_whisper_without_ffmpeg_is_a_clear_error`,
+  `test_whisper_model_is_loaded_once_per_process`,
+  `test_segments_from_whisper_matches_the_transcript_api_shape`.
+- Not covered by a unit test, by design: real Whisper output quality/speed.
+  Verify on the deployment with `WITH_WHISPER=1`, `YOUTUBE_WHISPER_MODEL=base`
+  and a captionless video; expect minutes, and the service log line
+  `youtube <id> has no captions; transcribing audio with whisper base`.
+
+---
+
 ## 2026-09-20 — `YOUTUBE_COOKIES_PATH`: yt-dlp captions with a logged-in session as the alternative to the proxy
 
 **Goal.** Give a cloud deployment a second way past YouTube's IP block that

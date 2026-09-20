@@ -20,6 +20,7 @@ from llmwiki.extractors.youtube import (
     fetch_video_title,
     pick_caption_track,
     segments_from_json3,
+    segments_from_whisper,
     video_id,
 )
 from llmwiki.models.source import SourceMeta
@@ -318,11 +319,22 @@ class _FakeYoutubeDL:
     def __exit__(self, *exc) -> None:
         return None
 
+    downloads: list[str] = []
+
     def extract_info(self, url: str, download: bool):
-        assert download is False, "captions only - the video must never be downloaded"
         if self.raise_ is not None:
             raise self.raise_
+        if download:
+            # The audio tier: yt-dlp writes the file into outtmpl's directory.
+            opts = type(self).constructed[-1]
+            path = opts["outtmpl"].replace("%(id)s", self.info["id"]).replace("%(ext)s", "webm")
+            Path(path).write_bytes(b"not really audio")
+            type(self).downloads.append(path)
+            return {**self.info, "_path": path}
         return self.info
+
+    def prepare_filename(self, info: dict) -> str:
+        return info["_path"]
 
     def urlopen(self, url: str):
         type(self).fetched_urls.append(url)
@@ -341,6 +353,7 @@ def ytdlp(monkeypatch, tmp_path):
     pytest.importorskip("yt_dlp")
     _FakeYoutubeDL.constructed = []
     _FakeYoutubeDL.fetched_urls = []
+    _FakeYoutubeDL.downloads = []
     _FakeYoutubeDL.info = _info(subtitles={"en": _track("en-manual", "vtt", "json3")})
     _FakeYoutubeDL.body = json.dumps(_JSON3).encode()
     _FakeYoutubeDL.raise_ = None
@@ -391,6 +404,8 @@ def test_yt_dlp_route_downloads_the_chosen_json3_track_only(ytdlp) -> None:
     fetch_transcript("https://youtu.be/dQw4w9WgXcQ", cookies_path=str(ytdlp.cookies))
 
     assert ytdlp.fetched_urls == ["https://yt/en-manual.json3"]
+    assert ytdlp.downloads == [], "captions only - the video must never be downloaded"
+    assert ytdlp.constructed[0]["skip_download"] is True
 
 
 def test_a_missing_cookie_file_is_a_clear_error_not_a_yt_dlp_call(ytdlp, tmp_path) -> None:
@@ -407,6 +422,7 @@ def test_a_video_without_captions_is_a_one_line_error(ytdlp) -> None:
         fetch_transcript("https://youtu.be/dQw4w9WgXcQ", cookies_path=str(ytdlp.cookies))
 
     assert "\n" not in str(excinfo.value)
+    assert "YOUTUBE_WHISPER_MODEL" in str(excinfo.value), "the fix for this one is Whisper"
 
 
 def test_a_rejected_session_names_the_cookie_file_as_the_fix(ytdlp) -> None:
@@ -457,3 +473,161 @@ def test_segments_from_json3_matches_the_transcript_api_shape() -> None:
     ]
     assert set(segments[0]) == {"text", "start", "duration"}
     assert segments_from_json3({}) == []
+
+
+# --- Whisper tier (YOUTUBE_WHISPER_MODEL) ------------------------------------
+
+_WHISPER_RESULT = {
+    "text": " hello world again",
+    "segments": [
+        {"start": 0.0, "end": 2.5, "text": " hello world"},
+        {"start": 2.5, "end": 2.5, "text": "   "},  # empty, dropped
+        {"start": 4.0, "end": 5.2, "text": " again"},
+    ],
+}
+
+
+class _FakeWhisperModule:
+    """Stands in for the `whisper` package: records loads and transcriptions."""
+
+    loaded: list[str] = []
+    transcribed: list[str] = []
+
+    class _Model:
+        def transcribe(self, audio_path: str) -> dict:
+            assert Path(audio_path).exists(), "audio must be on disk when whisper runs"
+            _FakeWhisperModule.transcribed.append(audio_path)
+            return _WHISPER_RESULT
+
+    @classmethod
+    def load_model(cls, name: str):
+        cls.loaded.append(name)
+        return cls._Model()
+
+
+@pytest.fixture
+def whisper(monkeypatch):
+    import sys
+
+    from llmwiki.extractors import youtube
+
+    _FakeWhisperModule.loaded = []
+    _FakeWhisperModule.transcribed = []
+    monkeypatch.setitem(sys.modules, "whisper", _FakeWhisperModule)
+    monkeypatch.setattr(youtube.shutil, "which", lambda name: "/usr/bin/ffmpeg")
+    youtube._load_whisper_model.cache_clear()
+    return _FakeWhisperModule
+
+
+def test_whisper_runs_only_when_there_are_no_captions(ytdlp, whisper) -> None:
+    """Captions present -> Whisper is never touched, even when configured."""
+    fetch_transcript(
+        "https://youtu.be/dQw4w9WgXcQ", cookies_path=str(ytdlp.cookies), whisper_model="base"
+    )
+
+    assert whisper.loaded == []
+    assert ytdlp.downloads == []
+
+
+def test_no_captions_falls_through_to_whisper_on_the_audio(ytdlp, whisper) -> None:
+    ytdlp.info = _info()  # no caption tracks at all
+
+    data = fetch_transcript(
+        "https://youtu.be/dQw4w9WgXcQ", cookies_path=str(ytdlp.cookies), whisper_model="base"
+    )
+
+    assert whisper.loaded == ["base"]
+    assert len(ytdlp.downloads) == 1
+    audio_opts = ytdlp.constructed[-1]
+    assert audio_opts["format"] == "bestaudio/best"
+    assert audio_opts["cookiefile"] != str(ytdlp.cookies), "same temp-copy rule as captions"
+    assert not Path(ytdlp.downloads[0]).exists(), "audio temp dir must be removed"
+    assert json.loads(data) == [
+        {"text": "hello world", "start": 0.0, "duration": 2.5},
+        {"text": "again", "start": 4.0, "duration": 1.2},
+    ]
+
+
+def test_transcript_api_no_captions_also_falls_through_to_whisper(
+    transcript_api, ytdlp, whisper
+) -> None:
+    """Without cookies the caption lookup is transcript-api; the audio still goes via yt-dlp."""
+    from youtube_transcript_api._errors import NoTranscriptFound
+
+    # staticmethod: a bare lambda on the class would bind `self` as the video id.
+    transcript_api.raise_ = staticmethod(lambda vid: NoTranscriptFound(vid, ["en"], {}))
+    ytdlp.info = _info()
+
+    data = fetch_transcript("https://youtu.be/dQw4w9WgXcQ", whisper_model="base")
+
+    assert whisper.transcribed, "whisper must have run"
+    assert "cookiefile" not in ytdlp.constructed[-1]
+    assert json.loads(data)[0]["text"] == "hello world"
+
+
+def test_a_block_never_falls_through_to_whisper(transcript_api, ytdlp, whisper) -> None:
+    """Whisper fixes 'no captions', not 'refused'; a bad proxy must still be reported."""
+    from youtube_transcript_api._errors import RequestBlocked
+
+    transcript_api.raise_ = RequestBlocked
+
+    with pytest.raises(ExtractionError, match="YouTube blocked"):
+        fetch_transcript("https://youtu.be/dQw4w9WgXcQ", whisper_model="base")
+
+    assert whisper.loaded == [] and ytdlp.downloads == []
+
+
+def test_whisper_configured_but_not_installed_is_a_clear_error(ytdlp, monkeypatch) -> None:
+    import builtins
+    import sys
+
+    ytdlp.info = _info()
+    monkeypatch.delitem(sys.modules, "whisper", raising=False)
+    real_import = builtins.__import__
+
+    def no_whisper(name, *args, **kwargs):
+        if name == "whisper":
+            raise ImportError("No module named 'whisper'")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", no_whisper)
+
+    with pytest.raises(ExtractionError, match=r"llmwiki\[whisper\]"):
+        fetch_transcript(
+            "https://youtu.be/dQw4w9WgXcQ", cookies_path=str(ytdlp.cookies), whisper_model="base"
+        )
+
+    assert ytdlp.downloads == [], "no audio download when it could not be transcribed anyway"
+
+
+def test_whisper_without_ffmpeg_is_a_clear_error(ytdlp, whisper, monkeypatch) -> None:
+    from llmwiki.extractors import youtube
+
+    ytdlp.info = _info()
+    monkeypatch.setattr(youtube.shutil, "which", lambda name: None)
+
+    with pytest.raises(ExtractionError, match="ffmpeg is not on PATH"):
+        fetch_transcript(
+            "https://youtu.be/dQw4w9WgXcQ", cookies_path=str(ytdlp.cookies), whisper_model="base"
+        )
+
+    assert ytdlp.downloads == []
+
+
+def test_whisper_model_is_loaded_once_per_process(ytdlp, whisper) -> None:
+    ytdlp.info = _info()
+    for _ in range(2):
+        fetch_transcript(
+            "https://youtu.be/dQw4w9WgXcQ", cookies_path=str(ytdlp.cookies), whisper_model="base"
+        )
+
+    assert whisper.loaded == ["base"]
+    assert len(whisper.transcribed) == 2
+
+
+def test_segments_from_whisper_matches_the_transcript_api_shape() -> None:
+    assert segments_from_whisper(_WHISPER_RESULT) == [
+        {"text": "hello world", "start": 0.0, "duration": 2.5},
+        {"text": "again", "start": 4.0, "duration": 1.2},
+    ]
+    assert segments_from_whisper({}) == []

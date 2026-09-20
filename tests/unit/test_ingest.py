@@ -309,8 +309,8 @@ def test_capture_passes_youtube_proxy_and_cookies_from_settings(
     """Both knobs are Settings fields; the extractor stays a pure function of its args."""
     seen: dict = {}
 
-    def fake_fetch(url, proxy_url=None, cookies_path=None):
-        seen.update(proxy_url=proxy_url, cookies_path=cookies_path)
+    def fake_fetch(url, proxy_url=None, cookies_path=None, whisper_model=None):
+        seen.update(proxy_url=proxy_url, cookies_path=cookies_path, whisper_model=whisper_model)
         return (FIXTURES / "transcript.json").read_bytes()
 
     monkeypatch.setattr("llmwiki.extractors.youtube.fetch_transcript", fake_fetch)
@@ -319,27 +319,30 @@ def test_capture_passes_youtube_proxy_and_cookies_from_settings(
     monkeypatch.setattr(
         pipeline.settings, "youtube_cookies_path", "/run/llmwiki/youtube_cookies.txt"
     )
+    monkeypatch.setattr(pipeline.settings, "youtube_whisper_model", "base")
 
     pipeline.capture(url="https://www.youtube.com/watch?v=dQw4w9WgXcQ")
 
     assert seen == {
         "proxy_url": "http://u:p@proxy.example:8080",
         "cookies_path": "/run/llmwiki/youtube_cookies.txt",
+        "whisper_model": "base",
     }
 
 
 def test_capture_passes_none_when_neither_youtube_knob_is_set(pipeline, store, monkeypatch) -> None:
     seen: dict = {}
 
-    def fake_fetch(url, proxy_url=None, cookies_path=None):
-        seen.update(proxy_url=proxy_url, cookies_path=cookies_path)
+    def fake_fetch(url, proxy_url=None, cookies_path=None, whisper_model=None):
+        seen.update(proxy_url=proxy_url, cookies_path=cookies_path, whisper_model=whisper_model)
         return (FIXTURES / "transcript.json").read_bytes()
 
     monkeypatch.setattr("llmwiki.extractors.youtube.fetch_transcript", fake_fetch)
     monkeypatch.setattr("llmwiki.extractors.youtube.fetch_video_title", lambda url: "t")
     monkeypatch.setattr(pipeline.settings, "youtube_proxy_url", "")
     monkeypatch.setattr(pipeline.settings, "youtube_cookies_path", "")
+    monkeypatch.setattr(pipeline.settings, "youtube_whisper_model", "")
 
     pipeline.capture(url="https://www.youtube.com/watch?v=dQw4w9WgXcQ")
 
-    assert seen == {"proxy_url": None, "cookies_path": None}
+    assert seen == {"proxy_url": None, "cookies_path": None, "whisper_model": None}

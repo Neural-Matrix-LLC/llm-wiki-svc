@@ -17,6 +17,7 @@ machinery this design never runs.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 import secrets
@@ -69,9 +70,21 @@ def build_router(cfg: Settings) -> APIRouter | None:
 
 
 async def _handle_update(update: dict, token: str, background: BackgroundTasks) -> None:
+    """Queue the capture and return, so the route answers 200 at once.
+
+    Capture fetches the source synchronously (a page, a transcript - or, with
+    YOUTUBE_WHISPER_MODEL, minutes of audio transcription). Telegram re-delivers
+    any update it has not seen a 2xx for within seconds, so doing that work
+    before responding would start the same fetch again in parallel; the
+    background task sends the outcome to the chat instead.
+    """
     message = update.get("message") or update.get("channel_post")
     if not message:
         return
+    background.add_task(_capture_and_process, message, token)
+
+
+async def _capture_and_process(message: dict, token: str) -> None:
     chat_id = (message.get("chat") or {}).get("id")
     title = message.get("caption") or ""
 
@@ -83,16 +96,18 @@ async def _handle_update(update: dict, token: str, background: BackgroundTasks) 
             return
         except (tools.ExtractionError, ValueError) as exc:
             # A fetch the source refused (YouTube blocking a cloud IP, a dead
-            # link, an empty message body): tell the sender and ack the update.
-            # Telegram re-delivers anything not answered with a 2xx, so letting
-            # this propagate as a 500 would replay the same blocked request
-            # every few seconds for hours.
+            # link, an empty message body): tell the sender why.
             logger.warning("telegram capture failed for chat %s: %s", chat_id, exc)
             await _ack(client, chat_id, f"Capture failed: {exc}")
             return
-        if not ref.duplicate:
-            background.add_task(tools.process_source, ref.source_id)
+        except Exception:
+            # Already past the 200 - the sender would otherwise hear nothing.
+            logger.exception("telegram capture crashed for chat %s", chat_id)
+            await _ack(client, chat_id, "Capture failed unexpectedly; see the service log.")
+            return
         await _ack(client, chat_id, f"Captured. source_id={ref.source_id}")
+        if not ref.duplicate:
+            await asyncio.to_thread(tools.process_source, ref.source_id)
 
 
 async def _capture(
@@ -102,25 +117,32 @@ async def _capture(
     photo = message.get("photo")  # list of sizes, largest last
     text = message.get("text")
 
+    # ingest_source is synchronous and may spend minutes on a fetch; run it
+    # off the event loop so /healthz (the Docker healthcheck) keeps answering.
     if document is not None:
         file_id = document["file_id"]
         filename = document.get("file_name") or f"{file_id}.jpg"
         mime = document.get("mime_type") or "image/jpeg"
         data = await _download(client, token, file_id)
-        return tools.ingest_source(file=data, filename=filename, mime=mime, title=title)
+        return await asyncio.to_thread(
+            tools.ingest_source, file=data, filename=filename, mime=mime, title=title
+        )
 
     if photo:
         file_id = photo[-1]["file_id"]
         data = await _download(client, token, file_id)
-        return tools.ingest_source(
-            file=data, filename=f"{file_id}.jpg", mime="image/jpeg", title=title
+        return await asyncio.to_thread(
+            tools.ingest_source,
+            file=data, filename=f"{file_id}.jpg", mime="image/jpeg", title=title,
         )
 
     if text:
         bare_url = _BARE_URL.match(text)
         if bare_url:
-            return tools.ingest_source(url=bare_url.group(1), title=title)
-        return tools.ingest_source(text=text, title=title)
+            return await asyncio.to_thread(
+                tools.ingest_source, url=bare_url.group(1), title=title
+            )
+        return await asyncio.to_thread(tools.ingest_source, text=text, title=title)
 
     raise _NothingToCapture()
 

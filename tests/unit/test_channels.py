@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import hmac
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from fastapi.testclient import TestClient
@@ -165,12 +165,42 @@ def _fake_ref():
 
 
 @pytest.mark.asyncio
+async def test_handle_update_queues_the_capture_and_returns(monkeypatch) -> None:
+    """Regression (2026-09-20): capture ran inline, so a slow fetch held the 200.
+
+    Telegram re-delivers an update it has not seen a 2xx for within seconds;
+    with YOUTUBE_WHISPER_MODEL a capture can take minutes, which would start
+    the same transcription again in parallel. The handler must only queue.
+    """
+    from llmwiki.channels import telegram
+
+    def never(**kw):
+        raise AssertionError("ingest_source must not run before the response")
+
+    monkeypatch.setattr("llmwiki.tools.ingest_source", never)
+    background = MagicMock()  # BackgroundTasks.add_task is sync
+    message = {"chat": {"id": 7}, "text": "https://youtu.be/LJF3frcDgRM"}
+
+    await telegram._handle_update({"message": message}, "t", background)
+
+    background.add_task.assert_called_once_with(telegram._capture_and_process, message, "t")
+
+
+@pytest.mark.asyncio
+async def test_handle_update_ignores_an_update_without_a_message() -> None:
+    from llmwiki.channels import telegram
+
+    background = MagicMock()
+    await telegram._handle_update({"edited_message": {}}, "t", background)
+    background.add_task.assert_not_called()
+
+
+@pytest.mark.asyncio
 async def test_a_failed_fetch_is_acked_to_the_chat_not_raised(monkeypatch) -> None:
     """Regression (2026-09-20): a YouTube URL from a cloud IP 500'd the webhook.
 
-    Telegram re-delivers any update not answered with a 2xx, so the same
-    blocked fetch was replayed every few seconds. The handler must swallow the
-    capture failure, tell the sender why, and let the route return 200.
+    The background task must swallow the capture failure, tell the sender
+    why, and queue nothing for processing.
     """
     from llmwiki import tools
     from llmwiki.channels import telegram
@@ -187,14 +217,54 @@ async def test_a_failed_fetch_is_acked_to_the_chat_not_raised(monkeypatch) -> No
         acks.append((chat_id, text))
 
     monkeypatch.setattr(telegram, "_ack", fake_ack)
-    background = AsyncMock()
 
-    update = {"message": {"chat": {"id": 7}, "text": "https://www.youtube.com/watch?v=LJF3frcDgRM"}}
-    await telegram._handle_update(update, "t", background)  # must not raise
+    message = {"chat": {"id": 7}, "text": "https://www.youtube.com/watch?v=LJF3frcDgRM"}
+    await telegram._capture_and_process(message, "t")  # must not raise
 
     assert acks == [(7, "Capture failed: YouTube blocked the transcript request for LJF3frcDgRM")]
     assert processed == []
-    background.add_task.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_a_successful_capture_acks_then_processes(monkeypatch) -> None:
+    from llmwiki.channels import telegram
+
+    monkeypatch.setattr("llmwiki.tools.ingest_source", lambda **kw: _fake_ref())
+    order = []
+    monkeypatch.setattr("llmwiki.tools.process_source", lambda sid: order.append(("process", sid)))
+
+    async def fake_ack(client, chat_id, text):
+        order.append(("ack", text))
+
+    monkeypatch.setattr(telegram, "_ack", fake_ack)
+
+    await telegram._capture_and_process({"chat": {"id": 7}, "text": "notes"}, "t")
+
+    assert order == [
+        ("ack", f"Captured. source_id={_fake_ref().source_id}"),
+        ("process", _fake_ref().source_id),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_a_crash_after_the_200_is_reported_to_the_chat(monkeypatch) -> None:
+    """The response is gone by then - silence would be the only alternative."""
+    from llmwiki.channels import telegram
+
+    def boom(**kw):
+        raise RuntimeError("storage down")
+
+    monkeypatch.setattr("llmwiki.tools.ingest_source", boom)
+    acks = []
+
+    async def fake_ack(client, chat_id, text):
+        acks.append(text)
+
+    monkeypatch.setattr(telegram, "_ack", fake_ack)
+
+    await telegram._capture_and_process({"chat": {"id": 7}, "text": "notes"}, "t")
+
+    assert acks == ["Capture failed unexpectedly; see the service log."]
 
 
 def test_webhook_returns_200_when_capture_fails(cfg, monkeypatch) -> None:
