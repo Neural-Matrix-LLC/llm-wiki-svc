@@ -5,7 +5,104 @@ reverse-chronological order. See `CLAUDE.md` for the rule this file follows.
 
 ---
 
+## 2026-09-20 — YouTube capture from a cloud IP: report the block, stop the webhook retry storm, add `YOUTUBE_PROXY_URL`
+
+**Goal.** A YouTube link sent to the Telegram bot from the deployed service
+answered the webhook with a 500 and a 40-line traceback, and the same video
+then hit YouTube again every ~20 s.
+
+**Root cause (two, stacked).**
+
+1. `youtube_transcript_api` raised `RequestBlocked`: YouTube refuses the
+   innertube transcript request from most cloud-provider egress IPs. That is
+   an environmental fact, not a bug, and the library's own answer is a proxy
+   (`GenericProxyConfig`). The service had no way to configure one.
+2. `channels/telegram.py` let `ExtractionError` propagate out of the webhook.
+   Telegram re-delivers any update not acknowledged with a 2xx, so each 500
+   scheduled another delivery - the log shows the identical update at
+   00:20:13, 00:20:30 and 00:21:03, each re-fetching the blocked video. The
+   Mailgun inbound webhook had the same shape (Mailgun retries non-2xx for
+   8 hours; only 406 tells it to stop), and `POST /ingest` 500'd the same way.
+
+**An earlier uncommitted attempt was reverted** rather than kept: it caught
+`RequestBlocked` inside `fetch_transcript` and stored `[]` as the raw
+transcript so capture "succeeded" with a stub page. That breaks two design
+rules at once: `raw/` is immutable and content-addressed by URL
+(`content_hash_for_url`), so the empty placeholder would make every later
+send of the same link a "duplicate, skipping" - the video could never be
+captured once a proxy was configured - and a wiki page saying "transcript
+unavailable" is compiled, embedded and cited as if it were a source. The same
+diff had also moved `__version__` from 0.9.0 *down* to 0.1.2; that is
+reverted too.
+
+**Implementation.**
+
+- `src/llmwiki/extractors/youtube.py` — `fetch_transcript(url, proxy_url=None)`.
+  A set `proxy_url` becomes `GenericProxyConfig(http_url=..., https_url=...)`
+  on the `YouTubeTranscriptApi` constructor. `RequestBlocked`/`IpBlocked`
+  become a one-line `ExtractionError` that names the video id, whether a
+  proxy was in use, and the setting to fix it; every other failure keeps only
+  the first line of the library's message. Nothing is stored on failure, so
+  the URL stays capturable. The pre-1.0 `get_transcript` fallback is gone -
+  `proxy_config=` only exists on the 1.x constructor - and `pyproject.toml`
+  pins `youtube-transcript-api>=1.0` (1.2.4 is installed).
+- `src/llmwiki/config.py`, `.env.example` — `YOUTUBE_PROXY_URL` (blank =
+  direct request). `pipeline/ingest.py::_fetch` passes it through; the
+  extractor stays a pure function of its arguments.
+- `src/llmwiki/tools.py` — re-exports `ExtractionError`. The layering rule
+  (`test_layering.py`) keeps `api/` and `channels/` away from `extractors/`,
+  and `tools` is the one module every transport is allowed to reach.
+- `src/llmwiki/channels/telegram.py` — `_handle_update` catches
+  `tools.ExtractionError | ValueError` from `_capture`, logs a warning, acks
+  the chat with `Capture failed: <reason>` and returns normally, so the route
+  answers 200 and Telegram stops re-delivering. Nothing is queued for
+  processing.
+- `src/llmwiki/channels/email.py` — the same failures become HTTP 406 with
+  the reason in `detail`, the one non-2xx Mailgun does not retry.
+- `src/llmwiki/api/routes.py` — `POST /ingest` maps `ExtractionError` to 422
+  with the reason, instead of a 500.
+
+**Related files.** `src/llmwiki/extractors/youtube.py`,
+`src/llmwiki/pipeline/ingest.py`, `src/llmwiki/config.py`,
+`src/llmwiki/tools.py`, `src/llmwiki/channels/telegram.py`,
+`src/llmwiki/channels/email.py`, `src/llmwiki/api/routes.py`,
+`pyproject.toml`, `.env.example`.
+
+**Tests.**
+
+- No regressions: `pytest` - 467 passed, 1 skipped. (One failure is
+  pre-existing and unrelated:
+  `test_agent_graph.py::test_run_id_is_a_uuid_only_when_tracing_is_on` fails
+  identically on the parent commit because the shared `settings` fixture reads
+  this checkout's real `.env`, which has LangSmith tracing on.) `ruff check`
+  clean apart from a pre-existing E501 in `scripts/browse_vectors.py`; `mypy`
+  clean; `scripts/smoke_flow.py --offline` passes.
+- Changed: `test_ingest.py::test_capture_fills_youtube_title_from_oembed` -
+  the `fetch_transcript` stub now accepts the `proxy_url` kwarg.
+- New, `tests/unit/test_extractors.py` (library mocked at
+  `youtube_transcript_api.YouTubeTranscriptApi`, no network):
+  `test_fetch_transcript_goes_direct_when_no_proxy_is_configured`,
+  `test_fetch_transcript_routes_through_youtube_proxy_url`,
+  `test_a_youtube_ip_block_is_a_one_line_error_that_names_the_fix`,
+  `test_other_transcript_failures_keep_only_the_first_line`.
+- New, `tests/unit/test_ingest.py`:
+  `test_capture_passes_youtube_proxy_url_from_settings`.
+- New, `tests/unit/test_channels.py`:
+  `test_a_failed_fetch_is_acked_to_the_chat_not_raised` (the ack text, no
+  processing queued), `test_webhook_returns_200_when_capture_fails` (through
+  the route - the 2xx is what stops the retries),
+  `test_email_webhook_answers_406_when_capture_fails`.
+- New, `tests/unit/test_routes.py`:
+  `test_ingest_answers_422_when_the_url_cannot_be_fetched`.
+- Not covered by a unit test, by design: whether a given proxy actually gets
+  past YouTube. Verify on the deployment with `YOUTUBE_PROXY_URL` set and a
+  link sent to the bot; the ack now says which of the two (proxy or direct)
+  was tried.
+
+---
+
 ## 2026-09-18 — Technical document: every `system=` call site in one table (§3.6)
+
 
 **Goal.** Answer two recurring questions from one place: *why* only two
 files under repo-root `skills/` are model-selectable while the other five

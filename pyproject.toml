@@ -34,7 +34,7 @@ dependencies = [
     "python-frontmatter",
     "trafilatura",
     "uvicorn",
-    "youtube-transcript-api",
+    "youtube-transcript-api>=1.0",  # proxy_config= on the constructor
 ]
 
 [project.optional-dependencies]

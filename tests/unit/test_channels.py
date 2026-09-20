@@ -164,6 +164,67 @@ def _fake_ref():
     return SourceRef(source_id="a" * 16, duplicate=False)
 
 
+@pytest.mark.asyncio
+async def test_a_failed_fetch_is_acked_to_the_chat_not_raised(monkeypatch) -> None:
+    """Regression (2026-09-20): a YouTube URL from a cloud IP 500'd the webhook.
+
+    Telegram re-delivers any update not answered with a 2xx, so the same
+    blocked fetch was replayed every few seconds. The handler must swallow the
+    capture failure, tell the sender why, and let the route return 200.
+    """
+    from llmwiki import tools
+    from llmwiki.channels import telegram
+
+    def blocked(**kw):
+        raise tools.ExtractionError("YouTube blocked the transcript request for LJF3frcDgRM")
+
+    monkeypatch.setattr("llmwiki.tools.ingest_source", blocked)
+    processed = []
+    monkeypatch.setattr("llmwiki.tools.process_source", lambda sid: processed.append(sid))
+    acks = []
+
+    async def fake_ack(client, chat_id, text):
+        acks.append((chat_id, text))
+
+    monkeypatch.setattr(telegram, "_ack", fake_ack)
+    background = AsyncMock()
+
+    update = {"message": {"chat": {"id": 7}, "text": "https://www.youtube.com/watch?v=LJF3frcDgRM"}}
+    await telegram._handle_update(update, "t", background)  # must not raise
+
+    assert acks == [(7, "Capture failed: YouTube blocked the transcript request for LJF3frcDgRM")]
+    assert processed == []
+    background.add_task.assert_not_called()
+
+
+def test_webhook_returns_200_when_capture_fails(cfg, monkeypatch) -> None:
+    """End to end through the route: the 2xx is what stops Telegram's retries."""
+    from llmwiki import tools
+    from llmwiki.channels import telegram
+
+    _set_telegram(cfg)
+
+    def blocked(**kw):
+        raise tools.ExtractionError("blocked")
+
+    monkeypatch.setattr("llmwiki.tools.ingest_source", blocked)
+    monkeypatch.setattr(telegram, "_ack", AsyncMock())
+
+    from fastapi import FastAPI
+
+    app = FastAPI()
+    app.include_router(telegram.build_router(cfg))
+    client = TestClient(app)
+
+    response = client.post(
+        "/channels/telegram/webhook",
+        json={"message": {"chat": {"id": 1}, "text": "https://youtu.be/LJF3frcDgRM"}},
+        headers={"X-Telegram-Bot-Api-Secret-Token": "shh"},
+    )
+    assert response.status_code == 200
+    assert response.json() == {"ok": True}
+
+
 # --- Email -------------------------------------------------------------
 
 
@@ -255,6 +316,34 @@ def test_email_webhook_ingests_an_attachment_and_the_cover_note(cfg, monkeypatch
 
 
 # --- Optional mount into the FastAPI app -----------------------------------
+
+
+def test_email_webhook_answers_406_when_capture_fails(cfg, monkeypatch) -> None:
+    """406 is the one non-2xx Mailgun does not retry for 8 hours."""
+    from fastapi import FastAPI
+
+    from llmwiki import tools
+    from llmwiki.channels.email import build_router
+
+    cfg.mailgun_signing_key = SecretStr("key")
+
+    def blocked(**kw):
+        raise tools.ExtractionError("YouTube blocked the transcript request for LJF3frcDgRM")
+
+    monkeypatch.setattr("llmwiki.tools.ingest_source", blocked)
+
+    app = FastAPI()
+    app.include_router(build_router(cfg))
+    client = TestClient(app)
+
+    form = _mailgun_form(
+        "key", subject="a link", **{"stripped-text": "https://youtu.be/LJF3frcDgRM",
+                                     "attachment-count": "0"},
+    )
+    response = client.post("/channels/email/inbound", data=form)
+
+    assert response.status_code == 406, response.text
+    assert "LJF3frcDgRM" in response.json()["detail"]
 
 
 def test_app_mounts_no_channel_routes_when_unconfigured(tmp_path, monkeypatch) -> None:

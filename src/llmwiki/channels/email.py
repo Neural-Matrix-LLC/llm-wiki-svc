@@ -46,7 +46,13 @@ def build_router(cfg: Settings) -> APIRouter | None:
     async def inbound(request: Request, background: BackgroundTasks) -> dict:
         form = await request.form()
         _verify(signing_key, form)
-        refs = await _capture(form)
+        try:
+            refs = await _capture(form)
+        except (tools.ExtractionError, ValueError) as exc:
+            # 406 is the one non-2xx Mailgun does not retry; anything else is
+            # re-delivered for 8 hours, replaying the fetch that just failed.
+            logger.warning("email capture failed: %s", exc)
+            raise HTTPException(status_code=406, detail=f"capture failed: {exc}") from exc
         for ref in refs:
             if not ref.duplicate:
                 background.add_task(tools.process_source, ref.source_id)

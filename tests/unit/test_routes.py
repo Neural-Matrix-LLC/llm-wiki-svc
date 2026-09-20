@@ -297,3 +297,20 @@ def test_feedback_forwards_to_tools_record_feedback(client, monkeypatch) -> None
     assert response.status_code == 200
     assert response.json() == {"ok": True, "feedback_id": "fb-1", "run_id": "run-1"}
     assert calls == [("run-1", 0.0, "cite 7b2f6aed523349f5-sample")]
+
+
+def test_ingest_answers_422_when_the_url_cannot_be_fetched(client, monkeypatch) -> None:
+    """A blocked or dead URL is a client-visible failure, not a 500 with a traceback."""
+    from llmwiki import tools
+
+    def blocked(**kw):
+        raise tools.ExtractionError("YouTube blocked the transcript request for LJF3frcDgRM")
+
+    monkeypatch.setattr("llmwiki.tools.ingest_source", blocked)
+
+    response = client.post(
+        "/ingest", json={"url": "https://youtu.be/LJF3frcDgRM"}, headers=AUTH
+    )
+
+    assert response.status_code == 422, response.text
+    assert "LJF3frcDgRM" in response.json()["detail"]

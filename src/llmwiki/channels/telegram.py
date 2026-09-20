@@ -81,6 +81,15 @@ async def _handle_update(update: dict, token: str, background: BackgroundTasks) 
         except _NothingToCapture:
             await _ack(client, chat_id, "Nothing to capture in that message.")
             return
+        except (tools.ExtractionError, ValueError) as exc:
+            # A fetch the source refused (YouTube blocking a cloud IP, a dead
+            # link, an empty message body): tell the sender and ack the update.
+            # Telegram re-delivers anything not answered with a 2xx, so letting
+            # this propagate as a 500 would replay the same blocked request
+            # every few seconds for hours.
+            logger.warning("telegram capture failed for chat %s: %s", chat_id, exc)
+            await _ack(client, chat_id, f"Capture failed: {exc}")
+            return
         if not ref.duplicate:
             background.add_task(tools.process_source, ref.source_id)
         await _ack(client, chat_id, f"Captured. source_id={ref.source_id}")

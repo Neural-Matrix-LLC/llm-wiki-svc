@@ -176,7 +176,10 @@ class IngestPipeline:
         if modality == "youtube":
             from llmwiki.extractors.youtube import fetch_transcript
 
-            return fetch_transcript(url), "application/json"
+            return (
+                fetch_transcript(url, proxy_url=self.settings.youtube_proxy_url or None),
+                "application/json",
+            )
         from llmwiki.extractors.web import fetch
 
         return fetch(url)

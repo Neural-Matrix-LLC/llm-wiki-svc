@@ -69,17 +69,43 @@ def fetch_video_title(url: str) -> str:
     return str(title or "").strip()
 
 
-def fetch_transcript(url: str) -> bytes:
-    """Fetch the transcript at capture time, stored verbatim as the raw source."""
+def fetch_transcript(url: str, proxy_url: str | None = None) -> bytes:
+    """Fetch the transcript at capture time, stored verbatim as the raw source.
+
+    ``proxy_url`` (``YOUTUBE_PROXY_URL``) routes the request through an HTTP(S)
+    proxy: YouTube refuses transcript requests from most cloud-provider egress
+    IPs, so a service deployed on one needs a residential/rotating proxy to
+    capture videos at all. Left unset, the request goes out directly - fine for
+    a laptop, blocked from a datacenter.
+
+    A block is reported as a one-line :class:`ExtractionError` that names the
+    fix rather than the library's multi-paragraph explanation, and nothing is
+    stored: the URL stays capturable once the proxy is configured (raw/ is
+    immutable and content-addressed by URL, so an empty placeholder would have
+    pinned the failure forever).
+    """
     from youtube_transcript_api import YouTubeTranscriptApi
+    from youtube_transcript_api._errors import IpBlocked, RequestBlocked
 
     identifier = video_id(url)
+    proxy_config = None
+    if proxy_url:
+        from youtube_transcript_api.proxies import GenericProxyConfig
+
+        proxy_config = GenericProxyConfig(http_url=proxy_url, https_url=proxy_url)
     try:
-        segments = YouTubeTranscriptApi().fetch(identifier).to_raw_data()
-    except AttributeError:  # older API surface
-        segments = YouTubeTranscriptApi.get_transcript(identifier)  # type: ignore[attr-defined]
+        segments = YouTubeTranscriptApi(proxy_config=proxy_config).fetch(identifier).to_raw_data()
+    except (RequestBlocked, IpBlocked) as exc:
+        via = f"via proxy {proxy_url}" if proxy_url else "directly (no YOUTUBE_PROXY_URL set)"
+        raise ExtractionError(
+            f"YouTube blocked the transcript request for {identifier} sent {via}; "
+            "cloud egress IPs are routinely refused - set YOUTUBE_PROXY_URL to a "
+            "residential/rotating proxy and resend the link"
+        ) from exc
     except Exception as exc:
-        raise ExtractionError(f"no transcript available for {identifier}: {exc}") from exc
+        text = str(exc).strip()
+        first_line = text.splitlines()[0] if text else type(exc).__name__
+        raise ExtractionError(f"no transcript available for {identifier}: {first_line}") from exc
     return json.dumps(segments, ensure_ascii=False).encode("utf-8")
 
 

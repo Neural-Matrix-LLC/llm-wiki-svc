@@ -87,7 +87,12 @@ def ingest(request: IngestRequest, background: BackgroundTasks) -> SourceRef:
     """
     
     logger.debug(" /ingest request: %s", request)
-    ref = tools.ingest_source(url=request.url, text=request.text, title=request.title)
+    try:
+        ref = tools.ingest_source(url=request.url, text=request.text, title=request.title)
+    except tools.ExtractionError as exc:
+        # The URL could not be fetched (YouTube refusing a cloud IP, a dead
+        # link): the request is well-formed, the source is not obtainable.
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     if not ref.duplicate:
         background.add_task(tools.process_source, ref.source_id)
     return ref

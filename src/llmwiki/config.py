@@ -161,6 +161,10 @@ class Settings(BaseSettings):
     telegram_bot_token: SecretStr = SecretStr("")
     telegram_webhook_secret: SecretStr = SecretStr("")
     mailgun_signing_key: SecretStr = SecretStr("")
+    # HTTP(S) proxy for YouTube transcript fetches only. YouTube refuses
+    # transcript requests from most cloud-provider egress IPs, so a deployed
+    # service needs this to capture videos at all; blank = direct request.
+    youtube_proxy_url: str = ""
 
     # --- Observability: stdlib logging ---
     # Consumed by llmwiki.logging_config.configure_logging, called once by each
