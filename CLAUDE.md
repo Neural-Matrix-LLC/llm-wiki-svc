@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Current State
 
-Phase 0 is **implemented**, plus plan-v1.4 §19's R1–R5 (multi-provider/per-op
+Phase 0 is **implemented**, plus plan II §19's R1–R5 (multi-provider/per-op
 LLM routing, SKILL.md-format prompts, query-agent skill invocation) and the
 five-source-kind ingestion surface (2026-09-08: PDF file, blog URL, YouTube
 URL, pure text, text file — reachable from REST, MCP, CLI and Python alike;
@@ -29,12 +29,16 @@ never citations. Two more ops exist (`agent_step`, `judge_answer`) — a new
 `complete(op=...)` call site needs a `config/ops.py` row and the drift guard
 in `tests/unit/test_routing_config.py` will say so.
 
-`pytest` runs 459 unit tests with no network access (a handful skip when a
+`pytest` runs 500 unit tests with no network access (a handful skip when a
 provider extra is absent, environment-dependent); `scripts/smoke_flow.py
 --offline` walks the whole flow end to end with fake adapters,
 `scripts/eval_answer.py --offline` scores the shipped golden set the same way
 and `scripts/probe_query_graph.py --offline --matrix` runs the query graph's
-bound/policy matrix against the doubles. The manual, pass/fail plan for
+bound/policy matrix against the doubles. `scripts/verify_capture.py` is the
+front-door check against a *running* service: `POST /ingest` a YouTube URL
+and/or `POST /upload` a PDF, then read `raw/`, `wiki/` and the chunks index
+back through the API and directly from the backends (2026-09-20;
+`tests/unit/test_verify_capture_script.py` pins its checks). The manual, pass/fail plan for
 workstreams C and D — with `scripts/check_local_llm.py` (local vLLM/llama.cpp
 diagnostic) and `scripts/probe_query_graph.py` (live bounds probe +
 LangSmith trace check) — is `docs/phase1-manual-test-plan-C-D.md`
@@ -48,17 +52,22 @@ adapter — prompt caching, measured USD cost), `openai`, `vllm`, `llamacpp`,
 `google`, `nvidia`, `deepseek` or `openrouter` (all via LangChain), or `fake`.
 `vllm`/`llamacpp` are self-hosted, OpenAI-compatible-route servers and reuse
 `openai`'s `ChatOpenAI` class under a distinct registry key/env-var pair
-(2026-09-14) — see `docs/implement-plan-v1.4.md` §7.4's addendum. As of
+(2026-09-14) — see `docs/implement-plan.md` Part II §7.4's addendum. As of
 2026-09-09
 langchain-core and every provider integration are core dependencies (not
 extras) — `uv sync` / `pip install llmwiki` installs all of them, and
 switching `LLM_PROVIDER` needs no separate install step. See `.env.example`
-for the table and `docs/implement-plan-v1.4.md` §7.5.
+for the table and `docs/implement-plan.md` Part II §7.5.
 
 - `llmwiki-KB-design.md` — architecture and scope. **Authoritative.** Read it
   before making design decisions; bump version + date when major decisions lock.
-- `implement-plan.md` — the Phase 0 plan: locked decisions, layer rules, the
-  operational runbook (§6), milestones, and the testing plan.
+- `docs/implement-plan.md` — the implementation plan. Part I is the Phase 0
+  plan (locked decisions, layer rules, the operational runbook §6, milestones,
+  the testing plan); Part II is the Phase 0.5 packaging plan plus the Phase 1
+  behaviour changes (§19 routing, §20 query graph, §21 Obsidian view of the R2
+  wiki). It is the only plan file — the version (1.5) is in its header, not
+  the filename. Each Part keeps its own section numbers, so "Part II §19" is
+  what older `HISTORY.md` entries call `implement-plan-v1.4.md` §19.
 - `HISTORY.md` — every change, including deviations from the plan and why.
 
 ### Working in this repository

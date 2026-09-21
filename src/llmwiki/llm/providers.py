@@ -24,7 +24,7 @@ at one of the three.
 
 Anthropic is deliberately absent: it keeps its native adapter in
 ``anthropic_client.py``, which is where prompt caching, forced-tool structured
-output and measured cost accounting live (implement-plan-v1.4.md 7.5).
+output and measured cost accounting live (implement-plan.md Part II §7.5).
 """
 
 from __future__ import annotations

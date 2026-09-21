@@ -6,7 +6,7 @@ under `wiki/`. Retrieval is hybrid — the compiled wiki first, a vector index a
 fallback — and every answer carries citations that resolve back to a real source.
 
 - `llmwiki-KB-design.md` — architecture and scope (authoritative)
-- `implement-plan.md` — the Phase 0 plan: milestones, runbook, tests
+- `docs/implement-plan.md` — the implementation plan: Part I Phase 0 (milestones, runbook, tests), Part II packaging + Phase 1
 - `HISTORY.md` — the change log
 
 ## Quickstart (offline, no keys)
@@ -101,7 +101,7 @@ python scripts/bootstrap_indexes.py --check   # verify Vectorize indexes exist
 llmwiki serve                                 # REST on :8010 (API_PORT in .env.example), MCP at /mcp
 ```
 
-`implement-plan.md` §6 is the full operational runbook — creating the R2 bucket,
+`implement-plan.md` Part I §6 is the full operational runbook — creating the R2 bucket,
 minting both kinds of Cloudflare token, and confirming the embedding dimension
 before any index is created. `scripts/README.md` documents every script under
 `scripts/` (setup, diagnostics, browsing what's in Vectorize, bulk backfill,

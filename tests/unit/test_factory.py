@@ -34,7 +34,7 @@ def test_anthropic_client_build_logs_its_model(caplog) -> None:
 
 
 # --- routed mode: config/providers.py + config/ops.py present -------------
-# implement-plan-v1.4.md §19.2-19.3, §19.7.3.
+# implement-plan.md Part II §19.2-19.3, §19.7.3.
 
 
 def _ops_rows(provider: str = "fake") -> str:

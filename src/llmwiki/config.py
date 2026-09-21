@@ -51,7 +51,7 @@ def configure_logging(level: str = "INFO") -> None:
 # (prompt caching, measured cost); the rest are reached through LangChain and
 # need their extra installed - see llmwiki.llm.providers.REGISTRY, which must
 # stay in step with this list. "fake" is the offline double.
-# See implement-plan-v1.4.md 7.5 and 7.6.
+# See implement-plan.md Part II §7.5 and 7.6.
 Provider = Literal[
     "anthropic",
     "fake",
@@ -75,7 +75,7 @@ class Settings(BaseSettings):
         case_sensitive=False,
     )
 
-    # --- LLM (provider-generic: the agentkit-llm env contract, plan-v1.4 7.6) ---
+    # --- LLM (provider-generic: the agentkit-llm env contract, plan II §7.6) ---
     llm_provider: Provider = "anthropic"
     llm_api_key: SecretStr = SecretStr("")
     llm_model: str = "claude-haiku-4-5"
@@ -100,7 +100,7 @@ class Settings(BaseSettings):
     # auto-derive the env var name from the field name alone
     # (LLM_PROVIDERS_CONFIG, no "WIKI") - the deliberately-prefixed
     # LLMWIKI_PROVIDERS_CONFIG/LLMWIKI_OPS_CONFIG documented in .env.example
-    # and implement-plan-v1.4.md §19.8 would otherwise be silently ignored.
+    # and implement-plan.md Part II §19.8 would otherwise be silently ignored.
     # The plain field name is kept as a second alias so direct construction
     # (``Settings(llm_providers_config=...)``, used throughout the test suite)
     # is unaffected.
@@ -207,7 +207,7 @@ class Settings(BaseSettings):
     embedding_backend: Literal["workers_ai", "fake"] = "workers_ai"
     local_storage_path: Path = Field(default=Path("./.data"))
 
-    # --- Deprecated LLM aliases, removed at N4 (plan-v1.4 7.6) ---
+    # --- Deprecated LLM aliases, removed at N4 (plan II §7.6) ---
     # Real fields, not properties, so that both a pre-rename ``.env`` and a
     # pre-rename constructor kwarg keep working.  ``extra="ignore"`` would
     # silently swallow an unknown kwarg, which is exactly how a test fixture
@@ -254,7 +254,8 @@ class Settings(BaseSettings):
         if missing:
             raise RuntimeError(
                 f"missing required configuration: {', '.join(missing)}. "
-                "Copy .env.example to .env and fill these in (see implement-plan.md section 6)."
+                "Copy .env.example to .env and fill these in "
+                "(see implement-plan.md Part I section 6)."
             )
 
 

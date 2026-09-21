@@ -460,7 +460,7 @@ build-locally/push-to-Docker-Hub workflow does need one real
   `build:` stays untouched, so `docker compose up --build` keeps working
   exactly as today for local dev.
 - `docs/deployment-plan-container-hosting.md` (this file)
-- A deploy runbook addition to `implement-plan.md` §6 (operational runbook
+- A deploy runbook addition to `implement-plan.md` Part I §6 (operational runbook
   already lives there) or a new `docs/runbook-hostinger.md`
 - Possibly a `.github/workflows/deploy.yml` if Phase 6 (CI/CD) is approved
 - **`.env.example`** — **done (2026-09-10).** Adds a "Docker Hub" block
@@ -493,5 +493,5 @@ build-locally/push-to-Docker-Hub workflow does need one real
 4. **Documentation:** this file is the record until a path is chosen; once
    implemented, log the actual change (goal, files touched, test results)
    in `HISTORY.md` per the mandatory-logging rule, and fold the Hostinger
-   runbook into `implement-plan.md` §6 alongside the existing Cloudflare
+   runbook into `implement-plan.md` Part I §6 alongside the existing Cloudflare
    bootstrap steps.

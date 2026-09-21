@@ -101,7 +101,7 @@ def test_temperature_defaults_to_one(monkeypatch) -> None:
 
 
 def test_omitted_max_tokens_and_temperature_use_the_configured_defaults(monkeypatch) -> None:
-    """implement-plan-v1.4.md §19.3: dropping model=/max_tokens=/temperature= from call
+    """implement-plan.md Part II §19.3: dropping model=/max_tokens=/temperature= from call
     sites must not silently ignore Settings.llm_max_tokens/llm_temperature - the adapter's
     own construction-time defaults are what a caller passing nothing now resolves to."""
     llm = AnthropicLLM(

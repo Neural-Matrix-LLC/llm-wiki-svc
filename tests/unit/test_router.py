@@ -1,4 +1,4 @@
-"""RoutingLLMClient dispatch - implement-plan-v1.4.md §19.3/§19.7.3."""
+"""RoutingLLMClient dispatch - implement-plan.md Part II §19.3/§19.7.3."""
 
 from __future__ import annotations
 

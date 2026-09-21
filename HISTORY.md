@@ -5,6 +5,175 @@ reverse-chronological order. See `CLAUDE.md` for the rule this file follows.
 
 ---
 
+## 2026-09-21 — The two implementation plans merged into a single `docs/implement-plan.md` (v1.5); §21 documents viewing the R2 wiki in Obsidian
+
+**Goal.** (1) Answer "how do I look at the KB graph now that `wiki/` lives in
+R2 rather than a local folder" in the plan, not in chat. (2) Fold the two
+implementation plans — `docs/implement-plan.md` v1.1 (Phase 0) and
+`docs/implement-plan-v1.4.md` v1.2 (Phase 0.5 packaging + §19/§20 Phase 1
+behaviour) — into one document, since every reader was already having to hold
+both open and the second one's "supersedes: nothing" header was no longer true
+in practice (§19 replaced Part I §11, §14/§19.8 replaced Part I §13).
+
+**Implementation detail.**
+
+- `implement-plan-v1.4.md` first went 1.2 → 1.3 with a new **§21 "Viewing the
+  R2 Wiki in Obsidian"**: the R2 key layout is already an Obsidian vault
+  layout and pages already use `[[slug]]` links, so the only gap is transport.
+  §21.2 is the one-time `rclone config create r2 s3 provider=Cloudflare ...`
+  from the `R2_*` values in `.env` (and why `rclone sync r2://llmwiki`
+  fails — the remote is a config *name*, not a URL scheme); §21.3 is
+  `rclone sync r2:$R2_BUCKET/wiki ./vault --exclude "_meta/**"` — only the
+  `wiki/` prefix, never `raw/`/`status/`, `_meta/` excluded because
+  `cost.jsonl` grows on every compile; §21.4 is the one rule — the mirror is
+  one-directional because the compiler and the scheduled lint own `wiki/`
+  (Remotely Save is fine on a read-only R2 token); §21.5 lists the
+  alternatives (Quartz/Foam/Logseq over the mirror; a `GET /graph` + D3 page
+  in FastAPI as the not-built answer to Part I §15 item 5). No env var, code
+  or test is introduced by the section.
+- Then the merge: `docs/implement-plan.md` (v1.5, keeping the plain filename — the version
+  lives in the header, so there is one plan file and no `-vX.Y` copies) = a new front matter
+  (reference convention, a "how the two Parts relate / status" table that
+  records N0–N8 as **not executed** and §19/§20/§21 as landed, a combined
+  contents table) + **Part I** (the old `implement-plan.md`, body verbatim) +
+  **Part II** (the old `implement-plan-v1.4.md` 1.3, body verbatim). **Each
+  Part keeps its original section numbering** — this is the whole reason for
+  the Part structure: ~40 live references in `src/`, `tests/`, `config/`,
+  `.env.example`, `CLAUDE.md` and the other docs cite section numbers, and
+  renumbering would have broken every one of them plus every historical entry
+  below. Five Part I sections (§3, §4, §11, §13, §15) carry a one-paragraph
+  **Superseded** callout pointing at the Part II section that replaced them;
+  the text underneath is unchanged so the Phase 0 record stays readable.
+- `docs/implement-plan-v1.4.md` is deleted (`git rm`); the old `implement-plan.md`
+  is overwritten by the merged file. The live references were rewritten mechanically:
+  `implement-plan-v1.4.md §X` → `implement-plan.md Part II §X`,
+  `plan-v1.4 §X` → `plan II §X`, `implement-plan.md §6.x` →
+  `implement-plan.md Part I §6.x`, `plan-1.1 D5` → `plan I D5`. Entries
+  below this one in `HISTORY.md` (and the stale copy in `docs/HISTORY.md`)
+  are left as written; the v1.5 front matter states the mapping
+  (`implement-plan.md §X` = Part I §X, `implement-plan-v1.4.md §X` = Part II
+  §X).
+
+**Related files.** `docs/implement-plan.md` (rewritten as the merged v1.5, 3122 lines),
+`docs/implement-plan-v1.4.md` (deleted),
+`CLAUDE.md`, `README.md`, `scripts/README.md`, `.env.example`,
+`config/ops.py`, `config/providers.py`, `src/llmwiki/config.py`,
+`src/llmwiki/factory.py`, `src/llmwiki/llm/{router,langchain_client,routing_config,providers}.py`,
+`src/llmwiki/embedding/workers_ai.py`, `scripts/check_cloudflare_setup.py`,
+`scripts/check_local_llm.py`, `tests/unit/test_{anthropic_client,config,routing_config,factory,router,langchain_client}.py`
+(docstrings/comments only), `docs/llmwiki-KB-design_v1.4.md`,
+`docs/llm-wiki-technical-document.md`, `docs/cloudflare-vectorize-setup-plan.md`,
+`docs/deployment-plan-container-hosting.md`, `docs/phase1-testing-guide.md`.
+
+**Test coverage.** No code path changed: the only edits under `src/`, `config/`,
+`scripts/` and `tests/` are comment, docstring and user-facing-message text
+(the `implement-plan.md section 6` pointer in two error messages now reads
+`implement-plan.md Part I section 6`; no test asserted on it). No tests
+added or removed; the full unit suite, `ruff` and `mypy` were run after the
+rewrite.
+
+---
+
+## 2026-09-20 — `.env`: an empty value with an inline comment is the comment, under Docker Compose
+
+**Root cause.** `scripts/verify_capture.py --youtube ...` against the compose
+`api` service on :8010 (R2 / Vectorize / Workers AI / OpenRouter, Whisper
+configured as the only YouTube route) failed at `POST /ingest` with a 422
+whose detail read `YOUTUBE_COOKIES_PATH=# Netscape-format cookies.txt
+exported from a browser logged in is not a file`. `.env` had the line
+`YOUTUBE_COOKIES_PATH=                        # Netscape-format ...`, copied
+from `.env.example`. python-dotenv - what `pydantic-settings` uses when the
+service runs locally - reads that as an empty value; Docker Compose's
+`env_file` parser reads it as the literal string `# Netscape-format cookies.txt
+exported from a browser logged in` (`docker compose config` shows it quoted).
+Same for `YOUTUBE_PROXY_URL` and `MAILGUN_SIGNING_KEY`. In the container the
+cookies route was therefore "configured" and wins over Whisper by design, so
+every YouTube ingest failed before any fetch - and the email channel mounted
+with a nonsense signing key. A value followed by a comment
+(`YOUTUBE_WHISPER_MODEL=base   # ...`) parses the same in both; only the
+empty case differs. Nothing in the suite could see it: unit tests never go
+through Compose, and locally the same file works.
+
+**Fix.** The eight such lines in `.env.example` (`LLM_BASE_URL`,
+`LANGSMITH_ENDPOINT`, `TELEGRAM_BOT_TOKEN`, `TELEGRAM_WEBHOOK_SECRET`,
+`MAILGUN_SIGNING_KEY`, `YOUTUBE_PROXY_URL`, `YOUTUBE_COOKIES_PATH`,
+`YOUTUBE_WHISPER_MODEL`) and the three in this checkout's `.env` now carry
+their comment block on the lines above a bare `KEY=`. A note at the top of
+`.env.example` states the rule. `docker compose config` now resolves all
+three to `""`.
+
+**Related files.** `.env.example`, `tests/unit/test_config.py`.
+
+**Tests.** No regressions; none removed. New:
+`test_config.py::test_env_example_has_no_empty_value_followed_by_an_inline_comment`
+scans `.env.example` for the `^KEY=\s+#` shape and names each offender.
+
+---
+
+## 2026-09-20 — `scripts/verify_capture.py`: prove a `/ingest` (YouTube) or `/upload` (PDF) capture landed in `raw/`, `wiki/` and the vector index
+
+**Goal.** `smoke_flow.py` exercises the Python core in-process; nothing
+walked a *running* service's front door and then checked all three places a
+source is supposed to end up. After the YouTube cloud-IP work, the question
+"did that capture actually store what it should, where it should?" needed a
+one-command answer.
+
+**Implementation.** A standalone script (`scripts/verify_capture.py`, no
+package imports at module level beyond `httpx`) that:
+
+- captures through REST: `POST /ingest {"url": ...}` for the YouTube URL,
+  `POST /upload` multipart for the PDF, with `INGEST_API_TOKEN` from `.env`
+  (or `--token`), and polls `GET /sources/{id}` until `done`/`failed`. A 4xx
+  is reported with the API's `detail` (so a 422 from a YouTube block names
+  the block); a duplicate is verified rather than rejected.
+- reads `raw/` directly (`factory.object_store`): `meta.json` modality and
+  url; `original.*` byte-equal to the uploaded PDF, or a `text`/`start`/
+  `duration` segment list for YouTube, in both cases hashing to
+  `meta.json`'s sha256 and matching `byte_size`; `extracted.md` non-empty.
+- reads `wiki/`: `wiki/sources/{id}.md`; `gists.json` lists the source note
+  and at least one concept/entity page citing the source (the manifest also
+  carries the note under its own id - the first run tripped on that); each
+  page's front matter carries the source, a gist and a body; `index.md`
+  links them; then the same pages via `GET /concepts` / `GET /page/{slug}`.
+- reads the chunks index (`factory.vector_store` + `factory.embedder`,
+  filtered `where={"source_id": id}`, with a short retry loop for
+  Vectorize's eventual consistency): count equals `chunk_count`, ids are
+  `{id}:0..n-1`, and each stored `text` is exactly
+  `extracted.md[char_start:char_end]` - the chunker's offsets are the
+  contract, so a stale or cross-wired vector is caught, not just a missing
+  one. Then `GET /search` for the source's own opening text must surface its
+  chunks or a page citing it.
+- refuses to start when `/healthz` reports different backends than `.env`
+  (the direct read-back would silently look at the wrong store);
+  `--rest-only` skips the direct half; `VECTOR_BACKEND=memory` degrades the
+  vector check to `GET /search` with a note, since the server's store is
+  process-local. Sources are kept by default (`--cleanup` calls
+  `tools.delete_source`).
+
+Verified live against an offline `uvicorn` on :8765 (local storage, fake
+LLM/embedder) with `tests/fixtures/sample.pdf`, and in-process for the two
+paths that server cannot reach (direct vector read-back, YouTube raw shape).
+
+**Related files.** `scripts/verify_capture.py` (new), `scripts/README.md`
+(row + section), `CLAUDE.md` (pointer, test count 459 → 499),
+`tests/unit/test_verify_capture_script.py` (new).
+
+**Tests.** No regressions (`pytest`: 497 passed, 1 skipped; the one failure,
+`test_agent_graph.py::test_run_id_is_a_uuid_only_when_tracing_is_on`,
+pre-exists this change and fails identically on a clean tree - the shared
+`settings` fixture reads this checkout's real `.env`, where tracing is on).
+No tests removed. New: `tests/unit/test_verify_capture_script.py` (8 tests)
+runs the script's `Api` against the FastAPI app under `TestClient` on the
+offline backends in one process, so the factory cache hands the script the
+same object store and memory vector store the app wrote to and every
+read-back path runs: a clean upload passes all checks; a duplicate is
+verified; a swapped `original.pdf`, a chunk whose text is not its
+`extracted.md` slice, a vector count disagreeing with the pipeline, a
+missing source note, a malformed YouTube segment list and a wrong bearer
+token are each named as failures.
+
+---
+
 ## 2026-09-20 — `YOUTUBE_WHISPER_MODEL`: audio transcription for videos with no captions; Telegram capture moves behind the 200
 
 **Goal.** Not every video has a caption track. When neither the transcript

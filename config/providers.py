@@ -1,4 +1,4 @@
-"""Providers manifest - design v1.4 §4.8.1, implement-plan-v1.4.md §19.2.
+"""Providers manifest - design v1.4 §4.8.1, implement-plan.md Part II §19.2.
 
 This is the **tracked, active** providers manifest (2026-09-10): it is
 committed, and the ``Dockerfile`` copies ``config/`` into the image, so every

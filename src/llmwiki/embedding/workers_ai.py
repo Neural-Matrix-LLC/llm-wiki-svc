@@ -44,7 +44,7 @@ class WorkersAIEmbedder:
                     raise RuntimeError(
                         f"embedding dimension mismatch: model returned {len(vector)}, "
                         f"EMBEDDING_DIM is {self._dim}. Recreate the Vectorize indexes "
-                        "or correct the setting (see implement-plan.md section 6.3)."
+                        "or correct the setting (see implement-plan.md Part I section 6.3)."
                     )
             vectors.extend(data)
         return vectors

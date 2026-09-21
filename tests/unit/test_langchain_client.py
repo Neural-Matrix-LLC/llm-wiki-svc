@@ -187,7 +187,7 @@ def test_a_temperature_change_builds_its_own_chat_model() -> None:
 
 
 def test_omitted_max_tokens_and_temperature_use_the_configured_defaults() -> None:
-    """implement-plan-v1.4.md §19.3: a caller passing neither resolves to the
+    """implement-plan.md Part II §19.3: a caller passing neither resolves to the
     adapter's own construction-time defaults, not a hardcoded 2048/1.0."""
     built: list = []
 

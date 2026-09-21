@@ -9,8 +9,8 @@
 - 1.2: Expanded Section 4.6 with a detailed multi-dimension comparison table (MCP vs FastAPI vs Python package vs Hybrid).  
 - 1.3: Added Section 4.7 — Shareable LLM Integration Layer (inspired by AgentBase pattern), packaging strategy for cross-repo reuse, LangChain/LangGraph + LangSmith alignment.  
 - 1.4: Redesigned Architecture Diagram to clearly separate Core Wiki Package, Shareable LLM Layer, Processing, and Interface layers (aligns with 4.6 Hybrid + 4.7).  
-- 1.5: Added Section 4.8 — Application-Specific LLM Routing (multi-provider credentials + per-op model routing, deliberately kept *outside* §4.7's shareable, stable `LLMConfig` contract) and Agent Skill Invocation (the five compiler/query prompts become real SKILL.md-format files; the query agent — not the compiler — gains genuine runtime skill selection). Implementation detail in `implement-plan-v1.4.md` §19.
-- 1.6: Added Section 4.9 — Query-Agent Graph, External Search & Evaluation Loop (Phase 1-D): the query agent becomes a bounded LangGraph ReAct loop over the existing `LLMClient`, an optional policy-gated web-search tool whose results are never citations, a LangSmith answer-quality golden set with deterministic + LLM-judge evaluators, and a defined correction loop (feedback endpoint, failure export, promotion). Implementation detail in `implement-plan-v1.4.md` §20. Open question 10 answered.
+- 1.5: Added Section 4.8 — Application-Specific LLM Routing (multi-provider credentials + per-op model routing, deliberately kept *outside* §4.7's shareable, stable `LLMConfig` contract) and Agent Skill Invocation (the five compiler/query prompts become real SKILL.md-format files; the query agent — not the compiler — gains genuine runtime skill selection). Implementation detail in `implement-plan.md` Part II §19.
+- 1.6: Added Section 4.9 — Query-Agent Graph, External Search & Evaluation Loop (Phase 1-D): the query agent becomes a bounded LangGraph ReAct loop over the existing `LLMClient`, an optional policy-gated web-search tool whose results are never citations, a LangSmith answer-quality golden set with deterministic + LLM-judge evaluators, and a defined correction loop (feedback endpoint, failure export, promotion). Implementation detail in `implement-plan.md` Part II §20. Open question 10 answered.
 
 ---
 
@@ -440,7 +440,7 @@ The main LLM Wiki service (FastAPI + MCP + core wiki logic) becomes one consumer
 
 ### 4.8 Application-Specific LLM Routing & Agent Skill Invocation
 
-*(New in 1.5. Implementation detail lives in `implement-plan-v1.4.md` §19 — this section states the
+*(New in 1.5. Implementation detail lives in `implement-plan.md` Part II §19 — this section states the
 architectural decision and where its boundary sits relative to §4.7.)*
 
 §4.7's `LLMConfig` is deliberately a **single provider, single model, single credential** shape —
@@ -471,7 +471,7 @@ repositories import.
   CI, and the offline smoke flow working with no setup.
 - This layer is explicitly **not** promoted into §4.7's shareable package. If a future consumer wants
   multi-provider routing, that is a new, separate evaluation against the stability contract in
-  implement-plan-v1.4.md §7.3 — not an automatic graduation of this app's `config/`.
+  implement-plan.md Part II §7.3 — not an automatic graduation of this app's `config/`.
 
 #### 4.8.2 SKILL.md-Format Prompts & Query-Agent Skill Invocation
 
@@ -483,10 +483,10 @@ repositories import.
 - The **query agent** (only) gains a genuine skill-invocation capability: rather than always loading
   `answer_query.md`, it is given the discovered skill set and picks — and can chain — among them per
   question, via a real tool-use round trip with the model. This is a scoped, early pull-forward of
-  what §4.7's `Skills` component and the existing plan's `SKILLS_DIR` (implement-plan-v1.4.md §14,
+  what §4.7's `Skills` component and the existing plan's `SKILLS_DIR` (implement-plan.md Part II §14,
   milestone N6) eventually generalize — done now, narrowly, for one agent, without waiting on N4/N6's
   FUND-adoption gate and without generalizing skills/memory/`AgentBase` speculatively ahead of a real
-  second consumer (the same anti-speculative-generality reasoning implement-plan-v1.4.md §12.1 already
+  second consumer (the same anti-speculative-generality reasoning implement-plan.md Part II §12.1 already
   applies to N6).
 
 See §5 for the phase placement of this last piece.
@@ -495,7 +495,7 @@ See §5 for the phase placement of this last piece.
 
 ### 4.9 Query-Agent Graph, External Search & Evaluation Loop (LangGraph + LangSmith)
 
-*(New in 1.6 — Phase 1 workstream D. Implementation detail in `implement-plan-v1.4.md` §20; the
+*(New in 1.6 — Phase 1 workstream D. Implementation detail in `implement-plan.md` Part II §20; the
 code-path map is in the technical document §3.3 and §10.)*
 
 Phase 0's query agent was one fixed procedure: embed → gist index → (chunk index only if weak) →

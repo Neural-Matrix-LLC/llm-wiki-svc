@@ -56,7 +56,7 @@ both servers expose an OpenAI-compatible route, but each is resolved in
 This supersedes the original 2026-09-11 groundwork, which reused the shared
 `"openai"` row/`OPENAI_BASE_URL` for whichever local server was running — a
 real cloud OpenAI key and a local endpoint could never both be active at the
-same time under that scheme. See `docs/implement-plan-v1.4.md` §7.4's
+same time under that scheme. See `docs/implement-plan.md` Part II §7.4's
 2026-09-14 addendum for the full reasoning.
 
 Not yet flipped on: `config/ops.py`'s local-routing example is still

@@ -18,7 +18,7 @@ Cloudflare API token for Vectorize + Workers AI (§6.3), the two indexes themsel
 (§6.4), and then flipping the three backend switches. This plan covers exactly that
 gap, plus a repeatable way to check it worked before trusting it with real ingests.
 
-Everything below already has a runbook in `docs/implement-plan.md` §6.2–6.4; this plan
+Everything below already has a runbook in `docs/implement-plan.md` Part I §6.2–6.4; this plan
 sequences it and adds the missing verification step — a single script that checks
 structure, credentials and permissions together, rather than finding out about a
 scoping mistake from an opaque 403 mid-ingest.

@@ -6,11 +6,12 @@ bulk maintenance and the end-to-end check. Nothing here is imported by
 
 All of them read `.env` via `llmwiki.config.load_settings()`, so run them from
 an activated venv with a real `.env` (`cp .env.example .env` and fill it in —
-see `implement-plan.md` §6), unless the script has an offline mode noted below.
+see `implement-plan.md` Part I §6), unless the script has an offline mode noted below.
 
 | Script | Purpose | Needs |
 |---|---|---|
 | [`smoke_flow.py`](smoke_flow.py) | End-to-end flow check: ingest → compile → search → answer | `--offline` needs nothing; otherwise real backends |
+| [`verify_capture.py`](verify_capture.py) | Capture a YouTube URL (`POST /ingest`) and/or a PDF (`POST /upload`) through a running service, then prove they landed in `raw/`, `wiki/` and the vector index - via the API and directly against the backends | A running service + the `.env` it runs with |
 | [`bootstrap_indexes.py`](bootstrap_indexes.py) | Create/verify the two Vectorize indexes + their metadata indexes | Cloudflare creds |
 | [`reset_vectorize.py`](reset_vectorize.py) | Wipe both Vectorize indexes and recreate them empty (fresh start) | Cloudflare creds |
 | [`check_cloudflare_setup.py`](check_cloudflare_setup.py) | Diagnose R2 / Vectorize / Workers AI setup before flipping backends on | Cloudflare creds |
@@ -36,6 +37,47 @@ python scripts/smoke_flow.py --url https://karpathy.github.io/2019/04/25/recipe/
 python scripts/smoke_flow.py --question "What is retrieval-augmented generation?"
 python scripts/smoke_flow.py --keep              # don't clean up the ingested source afterward
 ```
+
+## `verify_capture.py`
+
+The front-door counterpart of `smoke_flow.py`: instead of calling the Python
+core, it POSTs to a **running** service — `/ingest` with a YouTube URL,
+`/upload` with a PDF — polls `GET /sources/{id}` to completion, and then reads
+back every place a source must end up, twice: once through the API
+(`/concepts`, `/page/{slug}`, `/search`) and once straight from the backends
+in `.env` (object store, vector store, embedder — the same factories the
+server uses). Any check that does not hold is named and the exit code is 1.
+
+What it proves per source:
+
+- **`raw/`** — `meta.json` (modality, url), `original.*` byte-identical to the
+  uploaded PDF (or a well-formed transcript segment list for YouTube) and
+  hashing to `meta.json`'s sha256, `extracted.md` non-empty.
+- **`wiki/`** — `wiki/sources/{id}.md` exists; `gists.json` lists the source
+  note and at least one concept/entity page citing the source; each such page
+  has the source in its front matter, a gist and a body; `index.md` links
+  them; `GET /concepts` and `GET /page/{slug}` return the same pages.
+- **vectors** — every chunk of the source in the chunks index: count equals
+  the pipeline's `chunk_count`, ids are `{source_id}:0..n-1`, and each stored
+  text is exactly `extracted.md[char_start:char_end]`; plus `GET /search` for
+  the source's own opening text surfaces its chunks or a page citing it.
+
+```bash
+python scripts/verify_capture.py --pdf tests/fixtures/sample.pdf            # against http://localhost:$API_PORT
+python scripts/verify_capture.py --youtube https://www.youtube.com/watch?v=...
+python scripts/verify_capture.py --youtube ... --pdf ... --base-url http://localhost:8010
+python scripts/verify_capture.py --pdf ... --rest-only    # server runs on backends this .env cannot reach
+python scripts/verify_capture.py --pdf ... --cleanup      # delete the sources afterwards (kept by default)
+```
+
+The direct read-back needs the script's `.env` to point at the server's
+backends (same R2 bucket / Vectorize index, or the same `LOCAL_STORAGE_PATH`
+when the server is the bind-mounted `dev` container); the script refuses to
+start when `/healthz` reports different backends than `.env`. With
+`VECTOR_BACKEND=memory` the server's vectors are process-local, so only the
+`GET /search` half of the vector check runs. `tests/unit/
+test_verify_capture_script.py` pins the checks against the app under
+`TestClient`, including the failures they exist to catch.
 
 ## `bootstrap_indexes.py`
 
