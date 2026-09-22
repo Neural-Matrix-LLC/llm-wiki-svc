@@ -38,7 +38,10 @@ bound/policy matrix against the doubles. `scripts/verify_capture.py` is the
 front-door check against a *running* service: `POST /ingest` a YouTube URL
 and/or `POST /upload` a PDF, then read `raw/`, `wiki/` and the chunks index
 back through the API and directly from the backends (2026-09-20;
-`tests/unit/test_verify_capture_script.py` pins its checks). The manual, pass/fail plan for
+`tests/unit/test_verify_capture_script.py` pins its checks). `scripts/sync_wiki.py`
+sets up the rclone remote from `.env` and mirrors the R2 bucket (`raw/`,
+`status/`, `wiki/`; `--wiki-only` for `wiki/` alone) to a local Obsidian vault (plan II §21; 2026-09-22; `tests/unit/test_sync_wiki_script.py`
+pins its command lines with `subprocess.run` faked). The manual, pass/fail plan for
 workstreams C and D — with `scripts/check_local_llm.py` (local vLLM/llama.cpp
 diagnostic) and `scripts/probe_query_graph.py` (live bounds probe +
 LangSmith trace check) — is `docs/phase1-manual-test-plan-C-D.md`

@@ -20,6 +20,7 @@ see `implement-plan.md` Part I §6), unless the script has an offline mode noted
 | [`eval_answer.py`](eval_answer.py) | Score answer quality against the golden set; push it to LangSmith; run experiments; export failures; promote corrections | `--offline` needs nothing; real backends otherwise; `--push/--langsmith/--promote-feedback` need `LANGSMITH_API_KEY` |
 | [`check_local_llm.py`](check_local_llm.py) | Diagnose a self-hosted vLLM / llama.cpp endpoint before (and after) flipping `config/ops.py`'s local routing on | `VLLM_*`/`LLAMACPP_*` in `.env`; a reachable server |
 | [`probe_query_graph.py`](probe_query_graph.py) | Run one question through the query graph under one or a matrix of bound settings; check the code-enforced invariants; verify the LangSmith trace | `--offline` needs nothing; real backends otherwise; `--verify-trace` needs `LANGSMITH_TRACING=true` |
+| [`sync_wiki.py`](sync_wiki.py) | Set up the `rclone` remote for R2 from `.env` (once) and mirror the bucket — `raw/`, `status/`, `wiki/` — to a local Obsidian vault (plan II §21; `--wiki-only` for `wiki/` alone) | `rclone` on PATH; `R2_*` in `.env` (a read-only token is enough) |
 
 ---
 
@@ -267,3 +268,41 @@ Exit 1 when any invariant or trace check fails; `--offline` writes to
 answers `agent_step` with `answer` at once, so `steps` is always 0 there —
 the loop's own logic is `tests/unit/test_agent_graph.py`; this script's
 offline value is the invariant/matrix plumbing (`tests/unit/test_phase1_scripts.py`).
+
+## `sync_wiki.py`
+
+Plan II §21 as one command. The KB lives in R2 and Obsidian only opens a local
+folder, so: (1) make sure an `rclone` remote for the bucket exists — `rclone
+listremotes` — and if not (or with `--setup`) create it with
+`rclone config create r2 s3 provider=Cloudflare ...` from the `R2_*` values in
+`.env` (§21.2; the secret goes to rclone's command line, never to stdout);
+(2) `rclone lsd` the bucket and require a `wiki` prefix; (3) `rclone sync
+r2:$R2_BUCKET ./vault --exclude "wiki/_meta/**"` — the whole bucket, so
+`raw/`, `status/` and `wiki/` sit side by side and a source note's
+`raw/{id}/extracted.md` opens next to the page citing it (`gists.json`/
+`cost.jsonl` left behind; `--wiki-only` for §21.3's `wiki/`-alone form);
+(4) check `wiki/index.md` landed and print the page count per folder plus
+the number of `raw/` sources. The mirror is one-directional, R2 → local
+(§21.4); nothing here writes to the bucket.
+
+```bash
+python scripts/sync_wiki.py                  # remote if needed, then mirror to ./vault
+python scripts/sync_wiki.py ~/vault          # another destination
+python scripts/sync_wiki.py --wiki-only      # wiki/ alone: no raw/ PDFs, no status/
+python scripts/sync_wiki.py --setup          # (re)create the remote from .env, then mirror
+python scripts/sync_wiki.py --copy           # rclone copy: never delete local files (own notes in the vault)
+python scripts/sync_wiki.py --include-meta   # keep wiki/_meta/ too
+python scripts/sync_wiki.py --dry-run        # show what would move
+python scripts/sync_wiki.py --setup-only     # steps 1-2, no mirror
+python scripts/sync_wiki.py ~/vault --quiet  # for cron: no progress bar
+python scripts/sync_wiki.py --env-file .env.prod --remote r2-prod ~/vault-prod   # another environment
+```
+
+Exit 1 at the first failed step, named. With `STORAGE_BACKEND=local` it prints
+where the local vault already is and exits 0. `--env-file` reads the `R2_*`
+values from another file (shell-exported variables still win, as everywhere);
+give each environment its own `--remote` name — an existing remote is only
+accepted when its stored `access_key_id` and `endpoint` (`rclone config dump`)
+match the env file, since the bucket name is in the path but the credentials
+are in the remote, and a dev remote with a prod bucket name is the wrong data. `tests/unit/test_sync_wiki_script.py`
+pins the command lines and the pass/fail decisions with `subprocess.run` faked.

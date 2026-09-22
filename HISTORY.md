@@ -5,6 +5,103 @@ reverse-chronological order. See `CLAUDE.md` for the rule this file follows.
 
 ---
 
+## 2026-09-22 — `scripts/sync_wiki.py`: plan II §21's rclone remote + bucket mirror as one command
+
+**Goal.** §21.2–§21.3 were two shell snippets to copy by hand (`rclone config
+create ...` from four `R2_*` values, then `rclone sync r2:$R2_BUCKET/wiki
+./vault --exclude "_meta/**"`). One script does both, reading the values from
+`.env` the way every other script does, so "update my Obsidian vault from R2"
+is `python scripts/sync_wiki.py`.
+
+**Implementation detail.**
+
+- `scripts/sync_wiki.py [DEST]` (default `./vault`), four named steps, exit 1
+  at the first failure: (1) *Remote* — `rclone listremotes`; if `r2:` (or
+  `--remote NAME`) is missing, or `--setup` is given, run §21.2's
+  `rclone config create <name> s3 provider=Cloudflare access_key_id=...
+  secret_access_key=... endpoint=... acl=private no_check_bucket=true
+  --non-interactive` from `Settings.r2_*`. Placeholder (`changeme`) or empty
+  values are refused by name before rclone is called. The secret is passed on
+  rclone's argv and redacted (`***`) from every printed command line and
+  error. (2) *Bucket* — `rclone lsd <remote>:<bucket>` must list `wiki`
+  (`storage/layout.py` `WIKI_PREFIX`); a failure hints at endpoint/bucket/
+  Object Read. (3) *Mirror* — `rclone sync <remote>:<bucket> DEST --exclude
+  "wiki/_meta/**"`: the **whole bucket**, so `raw/`, `status/` and `wiki/`
+  land side by side. **Deviation from plan §21.3** ("only the `wiki/`
+  prefix"), and why: a `wiki/`-only folder did not open as a usable vault in
+  practice — every source note points at `` `raw/{id}/` ``
+  (`wiki/compiler.py`), and Karpathy's layout keeps `raw/` beside `wiki/` in
+  the one vault so `raw/{id}/extracted.md` opens next to the page that cites
+  it. §21.3 now carries a "revised 2026-09-22" note; its original form is
+  `--wiki-only` (`<remote>:<bucket>/wiki`, `--exclude "_meta/**"`, DEST is
+  then the wiki root) for a light view when `raw/` is too big to carry.
+  `--copy` swaps in `rclone copy` (never deletes, for a vault holding one's
+  own notes), `--include-meta` keeps `wiki/_meta/gists.json`/`cost.jsonl`,
+  `--dry-run` and `--quiet` (cron) pass through, otherwise `-P` progress. R2
+  is always the source and DEST the destination — §21.4's one rule; the
+  script has no code path that writes to the bucket. (4) *Check* —
+  `DEST/wiki/index.md` must exist; page counts per
+  `concepts/`/`entities/`/`sources/` and the number of `raw/` source folders
+  are printed. `--setup-only` stops after (2). With `STORAGE_BACKEND=local` it prints where `LOCAL_STORAGE_PATH/wiki`
+  is and exits 0 — nothing to mirror. Missing `rclone` on PATH is a named
+  failure with the install URL.
+- `--env-file PATH` builds `Settings(_env_file=PATH)` instead of
+  `load_settings()`, so `.env.prod` drives the remote, bucket and mirror
+  (shell-exported variables still win, as everywhere in `llmwiki`). Because the
+  bucket name is in the rclone *path* but the credentials are in the
+  *remote*, an existing remote is now only accepted when its stored
+  `access_key_id` and `endpoint` (`rclone config dump`) equal the env file's;
+  a mismatch fails step 1 by name with the hint `--remote <other-name>` /
+  `--setup`. Found on first use: this machine's `r2:` remote had been created
+  from `.env.prod`'s key, so `.env` (bucket `llmwiki-dev`) was being read
+  through the prod key — the earlier mirror worked only because that key can
+  see both buckets. One remote name per environment (`r2` / `r2-dev`) is the
+  intended shape.
+- `--obscure` is deliberately *not* passed to `rclone config create`: the s3
+  backend's `secret_access_key` is not a password-type field, so rclone stores
+  it plain either way (verified against rclone 1.75.1 in a scratch config).
+- Verified against the real `llmwiki-dev` bucket with `RCLONE_CONFIG` pointed
+  at a scratch config (so the create-remote path ran for real and the
+  machine's own `rclone.conf` was untouched): `lsd` → `raw status wiki`; the
+  mirror landed `raw/{id}/{extracted.md,meta.json,original.bin}`, `status/`
+  and `wiki/{index.md,sources/}` with `wiki/_meta/` excluded; counts printed.
+- `.gitignore` gains `/vault*/` (the default destination `./vault` — and a
+  `./vault-prod` beside it — is inside the checkout and is a view, never
+  committed) and `.env.*` with `!.env.example` re-included: `.env.prod` was
+  sitting untracked and unignored, one `git add -A` away from a commit. `scripts/README.md` gets the table row and
+  a section; plan §21 gets a one-line pointer above §21.2 and §21.5's "no
+  code is added by this section" sentence is corrected; `CLAUDE.md`'s Current
+  State names the script.
+
+**Related files.** `scripts/sync_wiki.py` (new), `scripts/README.md`,
+`.gitignore`, `docs/implement-plan.md` (§21.1/§21.5), `CLAUDE.md`.
+
+**Test coverage.** New `tests/unit/test_sync_wiki_script.py` (20 tests), loading
+the script by path like the other script tests and replacing `subprocess.run`
+with a recorder, so no rclone binary or network is touched: the `config
+create` argv matches §21.2; the mirror argv is `sync <remote>:<bucket>
+DEST --exclude wiki/_meta/**` with R2 as the source (and
+`<remote>:<bucket>/wiki … --exclude _meta/**` under `--wiki-only`), each flag
+mapped (`copy`/`include-meta`/`dry-run`/`quiet`); `redact` hides the secret and not
+the key id; an existing remote is not recreated, a missing one is, `--setup`
+forces it, placeholders refuse before rclone runs, a create failure's message
+is redacted; the bucket check requires `wiki` and names the Object Read hint;
+`vault_report` needs `wiki/index.md` (or `index.md` under `--wiki-only`),
+counts pages per folder and `raw/` source folders (0 when `raw/` is absent,
+not a failure); `main` end to end with the fake (`listremotes → config → lsd
+→ sync` of the bucket root, `1 raw sources` reported, no secret on stdout),
+`--setup-only` stops before the mirror, the `local` backend runs nothing,
+and a missing rclone exits 1; an existing remote whose stored key id (or key
+id and endpoint) differ from the env file is refused before anything is
+created or listed; `--env-file` with a temp `.env.prod` creates `r2-prod`
+from that file's values and lists `r2-prod:llmwiki-prod`, and the same file
+against the dev remote name exits 1; a missing `--env-file` exits 1. No test
+removed. Unit suite: 520 passing (one pre-existing, `.env`-dependent
+failure in `test_agent_graph.py::test_run_id_is_a_uuid_only_when_tracing_is_on`
+when `LANGSMITH_TRACING=true` is set in the real `.env`; unrelated).
+
+---
+
 ## 2026-09-21 — The two implementation plans merged into a single `docs/implement-plan.md` (v1.5); §21 documents viewing the R2 wiki in Obsidian
 
 **Goal.** (1) Answer "how do I look at the KB graph now that `wiki/` lives in

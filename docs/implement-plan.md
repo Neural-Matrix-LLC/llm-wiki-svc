@@ -3033,6 +3033,12 @@ in the way: pages use plain `[[slug]]` wikilinks (`wiki/gists.py`, `wiki/pages.p
 and it is closed with a one-directional mirror of the `wiki/` prefix. The local backend needs none
 of this: `.data/wiki/` already opens as a vault (plan-1.1 §6.7).
 
+`scripts/sync_wiki.py` (2026-09-22) does §21.2 and §21.3 in one command — it creates the remote
+from `.env` (or `--env-file .env.prod`, one `--remote` name per environment) when missing, refuses
+an existing remote whose stored key id/endpoint disagree with the env file, and runs the mirror.
+Its default mirrors the **whole bucket** (`raw/`, `status/`, `wiki/` side by side — see the
+2026-09-22 note in §21.3); `--wiki-only` is §21.3's original `wiki/`-only form.
+
 ### 21.2 One-time rclone remote
 
 R2 is S3-compatible, so `rclone` (or `aws s3 sync`, plan-1.1 §6.8) talks to it. `rclone` is
@@ -3071,6 +3077,12 @@ rclone sync r2:$R2_BUCKET/wiki ./vault --exclude "_meta/**" -P
 
 - **Only the `wiki/` prefix.** `raw/` is the immutable source store (PDFs, transcripts — large,
   and not part of the graph) and `status/` is per-source pipeline state. Neither belongs in a vault.
+  *Revised 2026-09-22:* in practice a `wiki/`-only folder did not open as a usable vault — every
+  source note points at `` `raw/{id}/` `` (`wiki/compiler.py`), and Karpathy's layout keeps `raw/`
+  beside `wiki/` in the one vault so `raw/{id}/extracted.md` opens next to the page that cites it.
+  `scripts/sync_wiki.py` therefore mirrors the bucket root by default
+  (`rclone sync r2:$R2_BUCKET ./vault --exclude "wiki/_meta/**"`) and keeps this `wiki/`-only form
+  as `--wiki-only` for a light view when `raw/` is too big to carry.
 - **`--exclude "_meta/**"`** drops `wiki/_meta/gists.json` and `wiki/_meta/cost.jsonl`
   (`storage/layout.py` `GISTS_KEY`, `COST_KEY`). Obsidian ignores non-markdown anyway; excluding
   them just keeps the vault clean and `cost.jsonl` — which grows on every compile — off the mirror.
@@ -3113,9 +3125,9 @@ through the mirror.
 | Quartz, Obsidian Publish, Foam, Logseq over the mirrored folder | zero code | A static, shareable site with a graph; or a non-Obsidian editor |
 | `GET /graph` + a D3 force-graph page in FastAPI | one endpoint, one static page, one unit test on edge extraction from `[[links]]` (`wiki/lint.py` already parses them) | Graph in a browser with no sync step at all. Not built now; it is the natural answer to plan-1.1 §15 item 5 ("read-through markdown viewer in FastAPI") if the sync step becomes a nuisance |
 
-No env var, code or test is added by this section; it is operational guidance only, which is why
-it lives in the plan rather than in `.env.example` or `HISTORY.md`'s change log (the addition of the
-section itself is logged there).
+No env var is added by this section. Its one piece of code is `scripts/sync_wiki.py` (with
+`tests/unit/test_sync_wiki_script.py`), which wraps §21.2–§21.3 and reads the `R2_*` values the
+service already has; everything else here is operational guidance.
 
 ---
 

@@ -153,8 +153,13 @@ activemq-data/
 # YouTube session cookies (YOUTUBE_COOKIES_PATH) - a login, never committed
 *cookies*.txt
 
+# Obsidian mirror of the R2 bucket (scripts/sync_wiki.py's default destination) - a view, never committed
+/vault*/
+
 # Environments
 .env
+.env.*
+!.env.example
 .envrc
 .venv
 env/
