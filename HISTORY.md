@@ -5,6 +5,108 @@ reverse-chronological order. See `CLAUDE.md` for the rule this file follows.
 
 ---
 
+## 2026-09-22 — Telegram webhook registration as a compose one-shot (production steps 3–5)
+
+**Goal.** `docs/phase1-testing-guide.md` §2 steps 3–5 (tunnel, `setWebhook`,
+`getWebhookInfo`) assumed a laptop: a host-installed `cloudflared` quick tunnel
+and `curl` with the bot token in the shell. The production VPS runs only two
+compose projects — `cloudflared` (own compose, token-managed tunnel) and
+llmwiki — with no repo checkout, no `curl` in the image, and the token only in
+`.env`. Those steps are now controlled by `docker-compose.yml`.
+
+**Root cause of the gap.** `deployment-plan-container-hosting.md` Phase 4
+step 13 routed the tunnel to `http://localhost:8010`. From a cloudflared
+*container* that is its own loopback, so the route could only 502; and a
+separately composed container is on a different Docker network from `api`.
+
+**Implementation detail.**
+
+- `docker-compose.yml`: the default network is named `llmwiki-net` (fixed,
+  not `<dir>_default`) and `api` carries the alias `llmwiki-api`, so the
+  cloudflared project (`docker-compose-cloudflared.yml`, deployed as its own
+  project in its own directory; token from that directory's `.env`, template
+  `.env.cloudflared.example`) joins it as `external` and the tunnel hostname points at
+  `http://llmwiki-api:8000`. Port mapping is now
+  `${API_BIND:-0.0.0.0}:${API_PORT}:8000` — default unchanged for WSL2 dev.
+  `API_BIND=127.0.0.1` would stop publishing plain HTTP to the internet
+  (Docker-published ports bypass `ufw`), but it was tried on the VPS and ended
+  direct `http://<vps-ip>:API_PORT` access (curl timed out), which is still
+  used. So the box keeps `API_BIND=0.0.0.0`, and the runbook lists loopback as
+  optional hardening.
+- New `telegram-webhook` service (no profile, so every `up -d` runs it; same
+  image and `.env` as `api`; `depends_on: api: service_healthy`; `api` does
+  not depend on it, so a Telegram/tunnel outage never blocks startup) running
+  `scripts/telegram_webhook.py sync`.
+- `scripts/telegram_webhook.py`: `sync` = (3) POST the public webhook URL
+  without the secret header and require 401 — proves tunnel → network → api →
+  route mounted → secret enforced, since `setWebhook` never probes the URL;
+  502/530 (retried ~30 s), 302/403 (Cloudflare Access → Bypass app) and 404
+  (token not in api's env) each get a named hint and stop before registering;
+  (4) `setWebhook` with the secret and `allowed_updates=[message,
+  channel_post]`, always resent so a rotated secret takes effect; (5)
+  `getWebhookInfo`: URL must match and no delivery error newer than this
+  registration. `info` and `delete [--drop-pending]` for later checks and
+  teardown. No-op (exit 0) while `TELEGRAM_BOT_TOKEN` or `PUBLIC_BASE_URL` is
+  blank, so a dev `up` never repoints a shared bot. The token is redacted from
+  all output, including httpx errors.
+- `docker-compose-cloudflared.yml` replaces the box's hand-written tunnel
+  compose: it read `env_file: .env` (llmwiki's) and interpolated
+  `TUNNEL_TOKEN=${TUNNEL_TOKEN}` — interpolation that `.env.cloudflared` could
+  never feed — and reached llmwiki through `host.docker.internal`. Hostinger
+  compose projects read only `.env`, so the tunnel lives in its own directory
+  with its own `.env` (`env_file: .env`, `required: true`, supplying
+  `TUNNEL_TOKEN` directly); `host.docker.internal` is gone. The separate
+  directory also keeps the two projects apart (no orphan warnings, `down` never
+  crosses over) and llmwiki's keys out of the tunnel's environment. `.gitignore` un-ignores only
+  `.env.cloudflared.example`; `.dockerignore` gains `.env.*` so a token file is
+  never sent in a build context.
+- `docs/runbook-hostinger.md` (new, 2026-09-23): the whole production procedure
+  in one place — build/smoke/push to GHCR (`DOCKER_USER=ghcr.io/neural-matrix-llc`),
+  `docker login ghcr.io` on the box (a `read:packages` token; its absence is the
+  `pull` → `unauthorized` failure), the two directories and `.env` files,
+  dashboard hostname and Access bypass, first-start order (llmwiki → tunnel →
+  re-run the one-shot), release/rollback, day-to-day operations, and a security
+  checklist. Linked from the deployment plan's Phase 4 and the testing guide.
+  §G "Cloudflare — Telegram Bot" (2026-09-23) is from the first real setup on
+  the box. The tunnel was connected, but the webhook one-shot failed with
+  `unreachable: [Errno -2] Name or service not known` because no public
+  hostname existed yet, so its DNS record didn't either. Adding one under
+  srv-llmwiki → Configure → Public Hostname (subdomain `tgbot`, service
+  `llmwiki-api:8000`) fixed it. §G is those steps: hostname, DNS check,
+  `PUBLIC_BASE_URL`, register, bot test, and renaming the subdomain
+  (`tgbot` → `llmwiki`). C4's failure table now separates the DNS failure and
+  the `[SKIP] PUBLIC_BASE_URL is blank` case.
+  The production tunnel's Cloudflare name, `srv-llmwiki`, is used in every
+  dashboard path (runbook, testing guide, `.env.cloudflared.example`,
+  `docker-compose-cloudflared.yml`); the container stays `cloudflared`.
+- `Settings.public_base_url` / `PUBLIC_BASE_URL` (new; read only by the
+  script), `API_BIND` in `.env.example`.
+- Docs: guide §2 gains "Steps 3–5 in production (docker compose)" (one-time
+  cloudflared snippet + dashboard hostname, report format, failure table);
+  deployment plan Phase 4 step 13 revised, step 14 gains the webhook Bypass
+  Access app, new step 14a.
+
+**Related files.** `docker-compose.yml`, `docker-compose-cloudflared.yml`,
+`.env.cloudflared.example`, `.gitignore`, `.dockerignore`, `scripts/telegram_webhook.py`,
+`src/llmwiki/config.py`, `.env.example`, `docs/phase1-testing-guide.md`,
+`docs/deployment-plan-container-hosting.md`, `docs/runbook-hostinger.md`, `CLAUDE.md`,
+`tests/unit/test_telegram_webhook_script.py`.
+
+**Test coverage.** New `tests/unit/test_telegram_webhook_script.py` (22 tests,
+`httpx.MockTransport`, no network): skip/refuse before any request; probe
+sent without the secret; each failing probe status names its cause and sends
+no `setWebhook`; transient 502s retried; exact `setWebhook` payload (incl.
+trailing-slash base); URL mismatch and fresh vs. stale delivery errors;
+`info`/`delete`; token never printed; compose wiring (`telegram-webhook` has
+no profile, depends on healthy `api`, `api` not on it; `llmwiki-net` name and
+`llmwiki-api` alias; `docker-compose-cloudflared.yml` joins `llmwiki-net` as
+external, reads `.env`, interpolates no token). No tests removed. Full suite: 539 passed; the one
+failure (`test_agent_graph.py::test_run_id_is_a_uuid_only_when_tracing_is_on`)
+fails identically without this change — this checkout's `.env` has
+`LANGSMITH_TRACING=true`.
+
+---
+
 ## 2026-09-22 — `scripts/sync_wiki.py`: plan II §21's rclone remote + bucket mirror as one command
 
 **Goal.** §21.2–§21.3 were two shell snippets to copy by hand (`rclone config

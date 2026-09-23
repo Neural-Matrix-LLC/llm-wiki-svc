@@ -109,7 +109,21 @@ services:
       # something else. The container's own internal port stays 8000
       # (Dockerfile EXPOSE/CMD/HEALTHCHECK) - only the host-facing mapping
       # changes, via API_PORT in .env.
-      - "${API_PORT:-8010}:8000"
+      #
+      # API_BIND (default 0.0.0.0, what the box uses) is the host address it is
+      # published on. 127.0.0.1 keeps it off the internet - Cloudflare Tunnel
+      # reaches api over llmwiki-net (below), not this port - but also ends
+      # direct http://<vps-ip>:API_PORT access. Docker-published ports bypass ufw.
+      - "${API_BIND:-0.0.0.0}:${API_PORT:-8010}:8000"
+    networks:
+      default:
+        # How the cloudflared container (docker-compose-cloudflared.yml, its own
+        # compose project in its own directory) reaches this one: it joins llmwiki-net (bottom of
+        # this file) and the tunnel's public
+        # hostname points at http://llmwiki-api:8000 - the container port, not
+        # API_PORT. "localhost:<API_PORT>" there is cloudflared's own loopback.
+        # A unique alias because "api" may exist in the other project too.
+        aliases: [llmwiki-api]
     volumes:
       # Only used when STORAGE_BACKEND=local. With STORAGE_BACKEND=r2 the
       # container is stateless and this bind mount stays empty. Bind-mounted
@@ -140,6 +154,32 @@ services:
       # - whisper-cache:/home/llmwiki/.cache/whisper
       # - ./skills:/app/skills:ro
     restart: unless-stopped
+
+  # Registers the Telegram webhook on every `up` - phase1-testing-guide.md §2
+  # steps 3-5 (tunnel check, setWebhook, getWebhookInfo) as one one-shot, using
+  # the same image and .env as api, so no token is ever typed into a shell.
+  # A no-op (exit 0) while TELEGRAM_BOT_TOKEN or PUBLIC_BASE_URL is blank.
+  # An exited telegram-webhook in `docker compose ps -a` is expected.
+  #
+  #   docker compose logs telegram-webhook              # what the last `up` did
+  #   docker compose run --rm telegram-webhook info     # re-check any time
+  #   docker compose run --rm telegram-webhook delete   # teardown
+  #
+  # Waits for api to be healthy because step 3 probes the public webhook URL
+  # through the tunnel. api does NOT depend on this: a Telegram or tunnel
+  # outage must never keep the service from starting.
+  telegram-webhook:
+    image: ${DOCKER_USER:-local}/llmwiki:${IMAGE_TAG:-latest}
+    user: "${API_UID:-10001}:${API_GID:-10001}"
+    depends_on:
+      api:
+        condition: service_healthy
+    env_file:
+      - path: .env
+        required: true
+    entrypoint: ["python", "scripts/telegram_webhook.py"]
+    command: ["sync"]
+    restart: "no"
 
   # Dev mode: the working tree is mounted into the container, so a code edit is
   # live immediately - no `build`, no `up --build`, no image push. uvicorn
@@ -310,3 +350,12 @@ services:
 
 volumes:
   llmwiki-offline-data:
+
+networks:
+  default:
+    # A fixed name (not the project-derived "<dir>_default") so the production
+    # cloudflared container, run from docker-compose-cloudflared.yml as its own
+    # project in its own directory (with its own .env), can join it as an
+    # external network. `up -d` this project first - it creates the network -
+    # then the tunnel project.
+    name: llmwiki-net

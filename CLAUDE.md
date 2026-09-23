@@ -41,7 +41,17 @@ back through the API and directly from the backends (2026-09-20;
 `tests/unit/test_verify_capture_script.py` pins its checks). `scripts/sync_wiki.py`
 sets up the rclone remote from `.env` and mirrors the R2 bucket (`raw/`,
 `status/`, `wiki/`; `--wiki-only` for `wiki/` alone) to a local Obsidian vault (plan II §21; 2026-09-22; `tests/unit/test_sync_wiki_script.py`
-pins its command lines with `subprocess.run` faked). The manual, pass/fail plan for
+pins its command lines with `subprocess.run` faked). `scripts/telegram_webhook.py`
+is guide §2 steps 3–5 for production: the `telegram-webhook` compose one-shot
+runs it on every `docker compose up -d` — probe the public webhook URL through
+the tunnel (401 = pass), `setWebhook`, `getWebhookInfo` — and it is a no-op
+while `PUBLIC_BASE_URL` is blank (2026-09-22;
+`tests/unit/test_telegram_webhook_script.py` pins it with `httpx.MockTransport`,
+plus the compose wiring: network `llmwiki-net`, `api` alias `llmwiki-api`). The tunnel
+itself is `docker-compose-cloudflared.yml` (own project in its own VPS directory, joins
+`llmwiki-net`); its token goes in that directory's `.env` - Hostinger projects read only
+`.env` - from the committed template `.env.cloudflared.example`. Setup and start order on the box:
+`docs/runbook-hostinger.md`. The manual, pass/fail plan for
 workstreams C and D — with `scripts/check_local_llm.py` (local vLLM/llama.cpp
 diagnostic) and `scripts/probe_query_graph.py` (live bounds probe +
 LangSmith trace check) — is `docs/phase1-manual-test-plan-C-D.md`

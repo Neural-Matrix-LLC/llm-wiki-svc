@@ -160,6 +160,7 @@ activemq-data/
 .env
 .env.*
 !.env.example
+!.env.cloudflared.example
 .envrc
 .venv
 env/

@@ -390,15 +390,40 @@ nothing, because the running container has the source baked in at
 the image you think it is: it only exists in images built after 2026-09-10.
 
 ### Phase 4 — Ingress, TLS, auth
-13. Install `cloudflared` on the box, create a named Tunnel, route a
-    subdomain (e.g. `llmwiki.<yourdomain>`) to `http://localhost:8010`
-    (the host-facing port from Phase 3, not the container's internal 8000).
-    No inbound firewall port needed — outbound-only connection to
-    Cloudflare's edge.
+
+The executable, step-by-step form of Phases 2–5 for the box as deployed
+(GHCR image, containerised tunnel, two compose projects) is
+[runbook-hostinger.md](runbook-hostinger.md).
+
+13. Run `cloudflared` as a container from `docker-compose-cloudflared.yml`,
+    as its own compose project in its own directory (renamed
+    `docker-compose.yml` there), with a dashboard-managed Tunnel —
+    `TUNNEL_TOKEN` in that directory's `.env` (Hostinger compose projects read
+    only `.env`; template `.env.cloudflared.example`).
+    *Revised 2026-09-22* — this step first said "install `cloudflared` on the
+    box and route to `http://localhost:8010`"; with cloudflared in a container,
+    `localhost` is the container's own loopback and the route 502s. Instead:
+    that file joins `llmwiki-net` (the fixed network name in this
+    repo's `docker-compose.yml`) and the public hostname (e.g.
+    `llmwiki.<yourdomain>`) points at `http://llmwiki-api:8000` — the
+    container port, not `API_PORT`. Snippet and order in
+    `docs/phase1-testing-guide.md` §2 "Steps 3–5 in production". `API_BIND`
+    stays `0.0.0.0` so direct `http://<vps-ip>:API_PORT` access keeps working;
+    `API_BIND=127.0.0.1` would stop publishing the host port to the internet
+    (Docker-published ports bypass `ufw`) without affecting the tunnel. No inbound firewall
+    port needed — outbound-only connection to Cloudflare's edge.
 14. Add a Cloudflare Access policy in front of the tunnel hostname (email
     OTP or GitHub login) so `/ingest`, `/upload`, and the MCP endpoint at
     `/mcp` aren't relying on `INGEST_API_TOKEN` alone against the open
-    internet.
+    internet. Webhook callers can't log in: add a second Access application
+    for `/channels/telegram/webhook` and `/channels/email/inbound` with a
+    **Bypass → Everyone** policy — those routes authenticate by their own
+    secret header / HMAC signature.
+14a. Telegram: set `TELEGRAM_BOT_TOKEN`, `TELEGRAM_WEBHOOK_SECRET` and
+    `PUBLIC_BASE_URL=https://llmwiki.<yourdomain>` in `.env`; the next
+    `docker compose up -d` runs the `telegram-webhook` one-shot, which checks
+    the tunnel path, calls `setWebhook` and verifies `getWebhookInfo`
+    (`docker compose logs telegram-webhook`).
 
 ### Phase 5 — Operability
 15. `restart: unless-stopped` is already set on the `api` service — survives

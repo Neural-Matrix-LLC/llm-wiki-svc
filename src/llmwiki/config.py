@@ -161,6 +161,11 @@ class Settings(BaseSettings):
     telegram_bot_token: SecretStr = SecretStr("")
     telegram_webhook_secret: SecretStr = SecretStr("")
     mailgun_signing_key: SecretStr = SecretStr("")
+    # The service's public HTTPS origin (e.g. the Cloudflare Tunnel hostname).
+    # Read only by scripts/telegram_webhook.py, which registers
+    # <public_base_url>/channels/telegram/webhook with Telegram on every
+    # `docker compose up`. Blank = never register (the dev default).
+    public_base_url: str = ""
     # YouTube refuses transcript requests from most cloud-provider egress IPs,
     # so a deployed service needs one of these two to capture videos at all
     # (extractors/youtube.py). Both blank = a direct youtube-transcript-api
