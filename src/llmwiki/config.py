@@ -51,7 +51,7 @@ def configure_logging(level: str = "INFO") -> None:
 # (prompt caching, measured cost); the rest are reached through LangChain and
 # need their extra installed - see llmwiki.llm.providers.REGISTRY, which must
 # stay in step with this list. "fake" is the offline double.
-# See implement-plan-v1.4.md 7.5 and 7.6.
+# See implement-plan.md Part II §7.5 and 7.6.
 Provider = Literal[
     "anthropic",
     "fake",
@@ -75,7 +75,7 @@ class Settings(BaseSettings):
         case_sensitive=False,
     )
 
-    # --- LLM (provider-generic: the agentkit-llm env contract, plan-v1.4 7.6) ---
+    # --- LLM (provider-generic: the agentkit-llm env contract, plan II §7.6) ---
     llm_provider: Provider = "anthropic"
     llm_api_key: SecretStr = SecretStr("")
     llm_model: str = "claude-haiku-4-5"
@@ -100,7 +100,7 @@ class Settings(BaseSettings):
     # auto-derive the env var name from the field name alone
     # (LLM_PROVIDERS_CONFIG, no "WIKI") - the deliberately-prefixed
     # LLMWIKI_PROVIDERS_CONFIG/LLMWIKI_OPS_CONFIG documented in .env.example
-    # and implement-plan-v1.4.md §19.8 would otherwise be silently ignored.
+    # and implement-plan.md Part II §19.8 would otherwise be silently ignored.
     # The plain field name is kept as a second alias so direct construction
     # (``Settings(llm_providers_config=...)``, used throughout the test suite)
     # is unaffected.
@@ -161,6 +161,24 @@ class Settings(BaseSettings):
     telegram_bot_token: SecretStr = SecretStr("")
     telegram_webhook_secret: SecretStr = SecretStr("")
     mailgun_signing_key: SecretStr = SecretStr("")
+    # The service's public HTTPS origin (e.g. the Cloudflare Tunnel hostname).
+    # Read only by scripts/telegram_webhook.py, which registers
+    # <public_base_url>/channels/telegram/webhook with Telegram on every
+    # `docker compose up`. Blank = never register (the dev default).
+    public_base_url: str = ""
+    # YouTube refuses transcript requests from most cloud-provider egress IPs,
+    # so a deployed service needs one of these two to capture videos at all
+    # (extractors/youtube.py). Both blank = a direct youtube-transcript-api
+    # request, which works from a laptop.
+    #   youtube_proxy_url    - HTTP(S) proxy for youtube-transcript-api
+    #   youtube_cookies_path - Netscape cookies.txt of a logged-in session;
+    #                          switches the fetch to yt-dlp. Wins when both set.
+    #   youtube_whisper_model - "base"/"small"/...: a video with NO captions is
+    #                          transcribed locally from its audio (llmwiki[whisper]
+    #                          extra + ffmpeg). Blank = such a video fails cleanly.
+    youtube_proxy_url: str = ""
+    youtube_cookies_path: str = ""
+    youtube_whisper_model: str = ""
 
     # --- Observability: stdlib logging ---
     # Consumed by llmwiki.logging_config.configure_logging, called once by each
@@ -272,7 +290,7 @@ class Settings(BaseSettings):
     embedding_backend: Literal["workers_ai", "fake"] = "workers_ai"
     local_storage_path: Path = Field(default=Path("./.data"))
 
-    # --- Deprecated LLM aliases, removed at N4 (plan-v1.4 7.6) ---
+    # --- Deprecated LLM aliases, removed at N4 (plan II §7.6) ---
     # Real fields, not properties, so that both a pre-rename ``.env`` and a
     # pre-rename constructor kwarg keep working.  ``extra="ignore"`` would
     # silently swallow an unknown kwarg, which is exactly how a test fixture
@@ -324,7 +342,8 @@ class Settings(BaseSettings):
         if missing:
             raise RuntimeError(
                 f"missing required configuration: {', '.join(missing)}. "
-                "Copy .env.example to .env and fill these in (see implement-plan.md section 6)."
+                "Copy .env.example to .env and fill these in "
+                "(see implement-plan.md Part I section 6)."
             )
 
 

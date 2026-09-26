@@ -2,7 +2,7 @@
 
 **Audience:** an engineer who needs to support, extend, fix, or test this
 repository, without having read the design doc or implementation plan first.
-**Scope:** the codebase as it exists on disk today (Phase 0, plus plan-v1.4
+**Scope:** the codebase as it exists on disk today (Phase 0, plus plan II
 §19's R1–R5: multi-provider LLM routing and query-agent skill invocation, plus
 Phase 1: capture channels, local-LLM provider entries, and — since 2026-09-16 —
 the LangGraph query graph, external search and the LangSmith evaluation loop,
@@ -15,7 +15,7 @@ from today's code, that is called out explicitly rather than blended in.
 | Document | What it's for |
 |---|---|
 | `docs/llmwiki-KB-design_v1.4.md` | Why the system is shaped this way — architecture rationale, phase plan. Read before making a *design* decision. |
-| `docs/implement-plan-v1.4.md` | The packaging/extraction plan (mostly not yet executed — see §11). |
+| `docs/implement-plan.md` | The implementation plan. Part I: Phase 0 (executed). Part II: the packaging/extraction plan (mostly not yet executed — see §11) plus the Phase 1 behaviour changes (§19–§21). |
 | `docs/HISTORY.md` | Chronological log of every change, bug, and deviation. The ground truth for "why is this line like this". |
 | **This document** | The map: which class calls which, how to extend each seam, and the full API surface. Optimized for "I need to change X" and "what does Y expose". |
 
@@ -279,7 +279,7 @@ other.
   tokens were spent choosing a skill versus generating the answer. This was a
   deliberate scope decision (avoids a new `op=` value and the config/AST-guard
   churn that would come with one) — revisit if per-step cost visibility
-  becomes important; `implement-plan-v1.4.md` §19.9 item 3 flags the related
+  becomes important; `implement-plan.md` Part II §19.9 item 3 flags the related
   open question of LangSmith span granularity.
 - `agent/skills.py` is in the `agent` layer (L2) — same `test_layering.py`
   rules as `agent/query.py` apply to it (may not import `api/mcp/cli/
@@ -1041,8 +1041,8 @@ and rebuild; `docker-compose.yml` carries a commented-out
 
 ### 5.8 R4/R5: SKILL.md prompts and query-agent skill invocation
 
-Landed 2026-09-07 (`HISTORY.md`); design v1.4 §4.8.2, `implement-plan-v1.4.md`
-§19.4/§19.5. See §2.4 for the conceptual picture (agents vs `chains/prompts/`
+Landed 2026-09-07 (`HISTORY.md`); design v1.4 §4.8.2, `implement-plan.md`
+Part II §19.4/§19.5. See §2.4 for the conceptual picture (agents vs `chains/prompts/`
 vs `skills/`) and §3.3 for the annotated call-flow diagram; this section is
 the "how to add one" complement to those.
 
@@ -1197,7 +1197,7 @@ the key in `.env.example`. Nothing in `agent/` changes: `build_tools` sees a
 
 This is the layer other Python code — a notebook, a script, another service
 (design v1.4 names `FUND-financial-Research` as an intended cross-repo
-consumer, see `implement-plan-v1.4.md` §11) — should import directly, rather
+consumer, see `implement-plan.md` Part II §11) — should import directly, rather
 than going through HTTP. `pip install -e ".[dev]"` and:
 
 ```python
@@ -2024,7 +2024,7 @@ Self-critique loops, preference data and prompt optimisation
 
 ## 11. Known Gap Between This Document, the Design Doc, and the Plan
 
-`docs/implement-plan-v1.4.md` describes an aspirational repository layout
+`docs/implement-plan.md` Part II describes an aspirational repository layout
 with `packages/agentkit-storage/` and `packages/agentkit-llm/` as
 independently-installable distributions (milestones N0–N8). **As of this
 document, none of that extraction has happened** — `git status`/the tree

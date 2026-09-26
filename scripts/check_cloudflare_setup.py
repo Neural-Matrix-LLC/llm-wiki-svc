@@ -67,7 +67,7 @@ def check_config(settings: Settings, report: Report) -> bool:
     except RuntimeError as exc:
         report.fail(
             str(exc),
-            "copy .env.example to .env and fill these in (implement-plan.md 6.2-6.4)",
+            "copy .env.example to .env and fill these in (implement-plan.md Part I §6.2-6.4)",
         )
         return False
     report.ok("all required Cloudflare/.env values are present")
@@ -194,7 +194,7 @@ def check_vectorize_structure(settings: Settings, report: Report) -> None:
             else:
                 report.ok(f"{name} exists (dimensions={dims}, metric={config.get('metric')})")
 
-            # Not verified against current Cloudflare docs (implement-plan.md 6's
+            # Not verified against current Cloudflare docs (implement-plan.md Part I §6's
             # accuracy note applies here too) - if the path is wrong this degrades
             # to a SKIP rather than a false FAIL, since only a 200 is trusted.
             metadata_response = client.get(f"/indexes/{name}/metadata_index/list")

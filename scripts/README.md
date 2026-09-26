@@ -6,11 +6,12 @@ bulk maintenance and the end-to-end check. Nothing here is imported by
 
 All of them read `.env` via `llmwiki.config.load_settings()`, so run them from
 an activated venv with a real `.env` (`cp .env.example .env` and fill it in —
-see `implement-plan.md` §6), unless the script has an offline mode noted below.
+see `implement-plan.md` Part I §6), unless the script has an offline mode noted below.
 
 | Script | Purpose | Needs |
 |---|---|---|
 | [`smoke_flow.py`](smoke_flow.py) | End-to-end flow check: ingest → compile → search → answer | `--offline` needs nothing; otherwise real backends |
+| [`verify_capture.py`](verify_capture.py) | Capture a YouTube URL (`POST /ingest`) and/or a PDF (`POST /upload`) through a running service, then prove they landed in `raw/`, `wiki/` and the vector index - via the API and directly against the backends | A running service + the `.env` it runs with |
 | [`bootstrap_indexes.py`](bootstrap_indexes.py) | Create/verify the two Vectorize indexes + their metadata indexes | Cloudflare creds |
 | [`reset_vectorize.py`](reset_vectorize.py) | Wipe both Vectorize indexes and recreate them empty (fresh start) | Cloudflare creds |
 | [`check_cloudflare_setup.py`](check_cloudflare_setup.py) | Diagnose R2 / Vectorize / Workers AI setup before flipping backends on | Cloudflare creds |
@@ -21,6 +22,7 @@ see `implement-plan.md` §6), unless the script has an offline mode noted below.
 | [`probe_domain_routing.py`](probe_domain_routing.py) | Phase 2: print the domain router's raw decision (domain, confidence, suggestion) per captured source without writing anything - the calibration tool for `DOMAIN_ROUTE_MIN_CONFIDENCE` | `--offline` needs nothing (fakes + fixture docs + a two-domain registry); real backends otherwise |
 | [`migrate_phase2.py`](migrate_phase2.py) | Phase 2: the one-time upgrade steps - build the keyword index from `raw/`, move the legacy cost ledger into partitioned keys, create registered domains' vector indexes | `--check` (exit 1 while something is to do) / `--apply`; `--offline` for a local tree |
 | [`probe_query_graph.py`](probe_query_graph.py) | Run one question through the query graph under one or a matrix of bound settings; check the code-enforced invariants; verify the LangSmith trace | `--offline` needs nothing; real backends otherwise; `--verify-trace` needs `LANGSMITH_TRACING=true` |
+| [`sync_wiki.py`](sync_wiki.py) | Set up the `rclone` remote for R2 from `.env` (once) and mirror the bucket — `raw/`, `status/`, `wiki/` — to a local Obsidian vault (plan II §21; `--wiki-only` for `wiki/` alone) | `rclone` on PATH; `R2_*` in `.env` (a read-only token is enough) |
 
 ---
 
@@ -38,6 +40,47 @@ python scripts/smoke_flow.py --url https://karpathy.github.io/2019/04/25/recipe/
 python scripts/smoke_flow.py --question "What is retrieval-augmented generation?"
 python scripts/smoke_flow.py --keep              # don't clean up the ingested source afterward
 ```
+
+## `verify_capture.py`
+
+The front-door counterpart of `smoke_flow.py`: instead of calling the Python
+core, it POSTs to a **running** service — `/ingest` with a YouTube URL,
+`/upload` with a PDF — polls `GET /sources/{id}` to completion, and then reads
+back every place a source must end up, twice: once through the API
+(`/concepts`, `/page/{slug}`, `/search`) and once straight from the backends
+in `.env` (object store, vector store, embedder — the same factories the
+server uses). Any check that does not hold is named and the exit code is 1.
+
+What it proves per source:
+
+- **`raw/`** — `meta.json` (modality, url), `original.*` byte-identical to the
+  uploaded PDF (or a well-formed transcript segment list for YouTube) and
+  hashing to `meta.json`'s sha256, `extracted.md` non-empty.
+- **`wiki/`** — `wiki/sources/{id}.md` exists; `gists.json` lists the source
+  note and at least one concept/entity page citing the source; each such page
+  has the source in its front matter, a gist and a body; `index.md` links
+  them; `GET /concepts` and `GET /page/{slug}` return the same pages.
+- **vectors** — every chunk of the source in the chunks index: count equals
+  the pipeline's `chunk_count`, ids are `{source_id}:0..n-1`, and each stored
+  text is exactly `extracted.md[char_start:char_end]`; plus `GET /search` for
+  the source's own opening text surfaces its chunks or a page citing it.
+
+```bash
+python scripts/verify_capture.py --pdf tests/fixtures/sample.pdf            # against http://localhost:$API_PORT
+python scripts/verify_capture.py --youtube https://www.youtube.com/watch?v=...
+python scripts/verify_capture.py --youtube ... --pdf ... --base-url http://localhost:8010
+python scripts/verify_capture.py --pdf ... --rest-only    # server runs on backends this .env cannot reach
+python scripts/verify_capture.py --pdf ... --cleanup      # delete the sources afterwards (kept by default)
+```
+
+The direct read-back needs the script's `.env` to point at the server's
+backends (same R2 bucket / Vectorize index, or the same `LOCAL_STORAGE_PATH`
+when the server is the bind-mounted `dev` container); the script refuses to
+start when `/healthz` reports different backends than `.env`. With
+`VECTOR_BACKEND=memory` the server's vectors are process-local, so only the
+`GET /search` half of the vector check runs. `tests/unit/
+test_verify_capture_script.py` pins the checks against the app under
+`TestClient`, including the failures they exist to catch.
 
 ## `bootstrap_indexes.py`
 
@@ -227,3 +270,41 @@ Exit 1 when any invariant or trace check fails; `--offline` writes to
 answers `agent_step` with `answer` at once, so `steps` is always 0 there —
 the loop's own logic is `tests/unit/test_agent_graph.py`; this script's
 offline value is the invariant/matrix plumbing (`tests/unit/test_phase1_scripts.py`).
+
+## `sync_wiki.py`
+
+Plan II §21 as one command. The KB lives in R2 and Obsidian only opens a local
+folder, so: (1) make sure an `rclone` remote for the bucket exists — `rclone
+listremotes` — and if not (or with `--setup`) create it with
+`rclone config create r2 s3 provider=Cloudflare ...` from the `R2_*` values in
+`.env` (§21.2; the secret goes to rclone's command line, never to stdout);
+(2) `rclone lsd` the bucket and require a `wiki` prefix; (3) `rclone sync
+r2:$R2_BUCKET ./vault --exclude "wiki/_meta/**"` — the whole bucket, so
+`raw/`, `status/` and `wiki/` sit side by side and a source note's
+`raw/{id}/extracted.md` opens next to the page citing it (`gists.json`/
+`cost.jsonl` left behind; `--wiki-only` for §21.3's `wiki/`-alone form);
+(4) check `wiki/index.md` landed and print the page count per folder plus
+the number of `raw/` sources. The mirror is one-directional, R2 → local
+(§21.4); nothing here writes to the bucket.
+
+```bash
+python scripts/sync_wiki.py                  # remote if needed, then mirror to ./vault
+python scripts/sync_wiki.py ~/vault          # another destination
+python scripts/sync_wiki.py --wiki-only      # wiki/ alone: no raw/ PDFs, no status/
+python scripts/sync_wiki.py --setup          # (re)create the remote from .env, then mirror
+python scripts/sync_wiki.py --copy           # rclone copy: never delete local files (own notes in the vault)
+python scripts/sync_wiki.py --include-meta   # keep wiki/_meta/ too
+python scripts/sync_wiki.py --dry-run        # show what would move
+python scripts/sync_wiki.py --setup-only     # steps 1-2, no mirror
+python scripts/sync_wiki.py ~/vault --quiet  # for cron: no progress bar
+python scripts/sync_wiki.py --env-file .env.prod --remote r2-prod ~/vault-prod   # another environment
+```
+
+Exit 1 at the first failed step, named. With `STORAGE_BACKEND=local` it prints
+where the local vault already is and exits 0. `--env-file` reads the `R2_*`
+values from another file (shell-exported variables still win, as everywhere);
+give each environment its own `--remote` name — an existing remote is only
+accepted when its stored `access_key_id` and `endpoint` (`rclone config dump`)
+match the env file, since the bucket name is in the path but the credentials
+are in the remote, and a dev remote with a prod bucket name is the wrong data. `tests/unit/test_sync_wiki_script.py`
+pins the command lines and the pass/fail decisions with `subprocess.run` faked.

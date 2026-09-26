@@ -942,10 +942,648 @@ and the `run_id` → `POST /feedback` follow-up, which *is* a POST and
 **Tests.** None — documentation only. The examples were written against
 the route signatures and response model at the time of writing; the
 `/answer` route is exercised by `tests/unit/test_routes.py`.
+## 2026-09-22 — Telegram webhook registration as a compose one-shot (production steps 3–5)
+
+**Goal.** `docs/phase1-testing-guide.md` §2 steps 3–5 (tunnel, `setWebhook`,
+`getWebhookInfo`) assumed a laptop: a host-installed `cloudflared` quick tunnel
+and `curl` with the bot token in the shell. The production VPS runs only two
+compose projects — `cloudflared` (own compose, token-managed tunnel) and
+llmwiki — with no repo checkout, no `curl` in the image, and the token only in
+`.env`. Those steps are now controlled by `docker-compose.yml`.
+
+**Root cause of the gap.** `deployment-plan-container-hosting.md` Phase 4
+step 13 routed the tunnel to `http://localhost:8010`. From a cloudflared
+*container* that is its own loopback, so the route could only 502; and a
+separately composed container is on a different Docker network from `api`.
+
+**Implementation detail.**
+
+- `docker-compose.yml`: the default network is named `llmwiki-net` (fixed,
+  not `<dir>_default`) and `api` carries the alias `llmwiki-api`, so the
+  cloudflared project (`docker-compose-cloudflared.yml`, deployed as its own
+  project in its own directory; token from that directory's `.env`, template
+  `.env.cloudflared.example`) joins it as `external` and the tunnel hostname points at
+  `http://llmwiki-api:8000`. Port mapping is now
+  `${API_BIND:-0.0.0.0}:${API_PORT}:8000` — default unchanged for WSL2 dev.
+  `API_BIND=127.0.0.1` would stop publishing plain HTTP to the internet
+  (Docker-published ports bypass `ufw`), but it was tried on the VPS and ended
+  direct `http://<vps-ip>:API_PORT` access (curl timed out), which is still
+  used. So the box keeps `API_BIND=0.0.0.0`, and the runbook lists loopback as
+  optional hardening.
+- New `telegram-webhook` service (no profile, so every `up -d` runs it; same
+  image and `.env` as `api`; `depends_on: api: service_healthy`; `api` does
+  not depend on it, so a Telegram/tunnel outage never blocks startup) running
+  `scripts/telegram_webhook.py sync`.
+- `scripts/telegram_webhook.py`: `sync` = (3) POST the public webhook URL
+  without the secret header and require 401 — proves tunnel → network → api →
+  route mounted → secret enforced, since `setWebhook` never probes the URL;
+  502/530 (retried ~30 s), 302/403 (Cloudflare Access → Bypass app) and 404
+  (token not in api's env) each get a named hint and stop before registering;
+  (4) `setWebhook` with the secret and `allowed_updates=[message,
+  channel_post]`, always resent so a rotated secret takes effect; (5)
+  `getWebhookInfo`: URL must match and no delivery error newer than this
+  registration. `info` and `delete [--drop-pending]` for later checks and
+  teardown. No-op (exit 0) while `TELEGRAM_BOT_TOKEN` or `PUBLIC_BASE_URL` is
+  blank, so a dev `up` never repoints a shared bot. The token is redacted from
+  all output, including httpx errors.
+- `docker-compose-cloudflared.yml` replaces the box's hand-written tunnel
+  compose: it read `env_file: .env` (llmwiki's) and interpolated
+  `TUNNEL_TOKEN=${TUNNEL_TOKEN}` — interpolation that `.env.cloudflared` could
+  never feed — and reached llmwiki through `host.docker.internal`. Hostinger
+  compose projects read only `.env`, so the tunnel lives in its own directory
+  with its own `.env` (`env_file: .env`, `required: true`, supplying
+  `TUNNEL_TOKEN` directly); `host.docker.internal` is gone. The separate
+  directory also keeps the two projects apart (no orphan warnings, `down` never
+  crosses over) and llmwiki's keys out of the tunnel's environment. `.gitignore` un-ignores only
+  `.env.cloudflared.example`; `.dockerignore` gains `.env.*` so a token file is
+  never sent in a build context.
+- `docs/runbook-hostinger.md` (new, 2026-09-23): the whole production procedure
+  in one place — build/smoke/push to GHCR (`DOCKER_USER=ghcr.io/neural-matrix-llc`),
+  `docker login ghcr.io` on the box (a `read:packages` token; its absence is the
+  `pull` → `unauthorized` failure), the two directories and `.env` files,
+  dashboard hostname and Access bypass, first-start order (llmwiki → tunnel →
+  re-run the one-shot), release/rollback, day-to-day operations, and a security
+  checklist. Linked from the deployment plan's Phase 4 and the testing guide.
+  §G "Cloudflare — Telegram Bot" (2026-09-23) is from the first real setup on
+  the box. The tunnel was connected, but the webhook one-shot failed with
+  `unreachable: [Errno -2] Name or service not known` because no public
+  hostname existed yet, so its DNS record didn't either. Adding one under
+  srv-llmwiki → Configure → Public Hostname (subdomain `tgbot`, service
+  `llmwiki-api:8000`) fixed it. §G is those steps: hostname, DNS check,
+  `PUBLIC_BASE_URL`, register, bot test, and renaming the subdomain
+  (`tgbot` → `llmwiki`). C4's failure table now separates the DNS failure and
+  the `[SKIP] PUBLIC_BASE_URL is blank` case.
+  The production tunnel's Cloudflare name, `srv-llmwiki`, is used in every
+  dashboard path (runbook, testing guide, `.env.cloudflared.example`,
+  `docker-compose-cloudflared.yml`); the container stays `cloudflared`.
+- `Settings.public_base_url` / `PUBLIC_BASE_URL` (new; read only by the
+  script), `API_BIND` in `.env.example`.
+- Docs: guide §2 gains "Steps 3–5 in production (docker compose)" (one-time
+  cloudflared snippet + dashboard hostname, report format, failure table);
+  deployment plan Phase 4 step 13 revised, step 14 gains the webhook Bypass
+  Access app, new step 14a.
+
+**Related files.** `docker-compose.yml`, `docker-compose-cloudflared.yml`,
+`.env.cloudflared.example`, `.gitignore`, `.dockerignore`, `scripts/telegram_webhook.py`,
+`src/llmwiki/config.py`, `.env.example`, `docs/phase1-testing-guide.md`,
+`docs/deployment-plan-container-hosting.md`, `docs/runbook-hostinger.md`, `CLAUDE.md`,
+`tests/unit/test_telegram_webhook_script.py`.
+
+**Test coverage.** New `tests/unit/test_telegram_webhook_script.py` (22 tests,
+`httpx.MockTransport`, no network): skip/refuse before any request; probe
+sent without the secret; each failing probe status names its cause and sends
+no `setWebhook`; transient 502s retried; exact `setWebhook` payload (incl.
+trailing-slash base); URL mismatch and fresh vs. stale delivery errors;
+`info`/`delete`; token never printed; compose wiring (`telegram-webhook` has
+no profile, depends on healthy `api`, `api` not on it; `llmwiki-net` name and
+`llmwiki-api` alias; `docker-compose-cloudflared.yml` joins `llmwiki-net` as
+external, reads `.env`, interpolates no token). No tests removed. Full suite: 539 passed; the one
+failure (`test_agent_graph.py::test_run_id_is_a_uuid_only_when_tracing_is_on`)
+fails identically without this change — this checkout's `.env` has
+`LANGSMITH_TRACING=true`.
+
+---
+
+## 2026-09-22 — `scripts/sync_wiki.py`: plan II §21's rclone remote + bucket mirror as one command
+
+**Goal.** §21.2–§21.3 were two shell snippets to copy by hand (`rclone config
+create ...` from four `R2_*` values, then `rclone sync r2:$R2_BUCKET/wiki
+./vault --exclude "_meta/**"`). One script does both, reading the values from
+`.env` the way every other script does, so "update my Obsidian vault from R2"
+is `python scripts/sync_wiki.py`.
+
+**Implementation detail.**
+
+- `scripts/sync_wiki.py [DEST]` (default `./vault`), four named steps, exit 1
+  at the first failure: (1) *Remote* — `rclone listremotes`; if `r2:` (or
+  `--remote NAME`) is missing, or `--setup` is given, run §21.2's
+  `rclone config create <name> s3 provider=Cloudflare access_key_id=...
+  secret_access_key=... endpoint=... acl=private no_check_bucket=true
+  --non-interactive` from `Settings.r2_*`. Placeholder (`changeme`) or empty
+  values are refused by name before rclone is called. The secret is passed on
+  rclone's argv and redacted (`***`) from every printed command line and
+  error. (2) *Bucket* — `rclone lsd <remote>:<bucket>` must list `wiki`
+  (`storage/layout.py` `WIKI_PREFIX`); a failure hints at endpoint/bucket/
+  Object Read. (3) *Mirror* — `rclone sync <remote>:<bucket> DEST --exclude
+  "wiki/_meta/**"`: the **whole bucket**, so `raw/`, `status/` and `wiki/`
+  land side by side. **Deviation from plan §21.3** ("only the `wiki/`
+  prefix"), and why: a `wiki/`-only folder did not open as a usable vault in
+  practice — every source note points at `` `raw/{id}/` ``
+  (`wiki/compiler.py`), and Karpathy's layout keeps `raw/` beside `wiki/` in
+  the one vault so `raw/{id}/extracted.md` opens next to the page that cites
+  it. §21.3 now carries a "revised 2026-09-22" note; its original form is
+  `--wiki-only` (`<remote>:<bucket>/wiki`, `--exclude "_meta/**"`, DEST is
+  then the wiki root) for a light view when `raw/` is too big to carry.
+  `--copy` swaps in `rclone copy` (never deletes, for a vault holding one's
+  own notes), `--include-meta` keeps `wiki/_meta/gists.json`/`cost.jsonl`,
+  `--dry-run` and `--quiet` (cron) pass through, otherwise `-P` progress. R2
+  is always the source and DEST the destination — §21.4's one rule; the
+  script has no code path that writes to the bucket. (4) *Check* —
+  `DEST/wiki/index.md` must exist; page counts per
+  `concepts/`/`entities/`/`sources/` and the number of `raw/` source folders
+  are printed. `--setup-only` stops after (2). With `STORAGE_BACKEND=local` it prints where `LOCAL_STORAGE_PATH/wiki`
+  is and exits 0 — nothing to mirror. Missing `rclone` on PATH is a named
+  failure with the install URL.
+- `--env-file PATH` builds `Settings(_env_file=PATH)` instead of
+  `load_settings()`, so `.env.prod` drives the remote, bucket and mirror
+  (shell-exported variables still win, as everywhere in `llmwiki`). Because the
+  bucket name is in the rclone *path* but the credentials are in the
+  *remote*, an existing remote is now only accepted when its stored
+  `access_key_id` and `endpoint` (`rclone config dump`) equal the env file's;
+  a mismatch fails step 1 by name with the hint `--remote <other-name>` /
+  `--setup`. Found on first use: this machine's `r2:` remote had been created
+  from `.env.prod`'s key, so `.env` (bucket `llmwiki-dev`) was being read
+  through the prod key — the earlier mirror worked only because that key can
+  see both buckets. One remote name per environment (`r2` / `r2-dev`) is the
+  intended shape.
+- `--obscure` is deliberately *not* passed to `rclone config create`: the s3
+  backend's `secret_access_key` is not a password-type field, so rclone stores
+  it plain either way (verified against rclone 1.75.1 in a scratch config).
+- Verified against the real `llmwiki-dev` bucket with `RCLONE_CONFIG` pointed
+  at a scratch config (so the create-remote path ran for real and the
+  machine's own `rclone.conf` was untouched): `lsd` → `raw status wiki`; the
+  mirror landed `raw/{id}/{extracted.md,meta.json,original.bin}`, `status/`
+  and `wiki/{index.md,sources/}` with `wiki/_meta/` excluded; counts printed.
+- `.gitignore` gains `/vault*/` (the default destination `./vault` — and a
+  `./vault-prod` beside it — is inside the checkout and is a view, never
+  committed) and `.env.*` with `!.env.example` re-included: `.env.prod` was
+  sitting untracked and unignored, one `git add -A` away from a commit. `scripts/README.md` gets the table row and
+  a section; plan §21 gets a one-line pointer above §21.2 and §21.5's "no
+  code is added by this section" sentence is corrected; `CLAUDE.md`'s Current
+  State names the script.
+
+**Related files.** `scripts/sync_wiki.py` (new), `scripts/README.md`,
+`.gitignore`, `docs/implement-plan.md` (§21.1/§21.5), `CLAUDE.md`.
+
+**Test coverage.** New `tests/unit/test_sync_wiki_script.py` (20 tests), loading
+the script by path like the other script tests and replacing `subprocess.run`
+with a recorder, so no rclone binary or network is touched: the `config
+create` argv matches §21.2; the mirror argv is `sync <remote>:<bucket>
+DEST --exclude wiki/_meta/**` with R2 as the source (and
+`<remote>:<bucket>/wiki … --exclude _meta/**` under `--wiki-only`), each flag
+mapped (`copy`/`include-meta`/`dry-run`/`quiet`); `redact` hides the secret and not
+the key id; an existing remote is not recreated, a missing one is, `--setup`
+forces it, placeholders refuse before rclone runs, a create failure's message
+is redacted; the bucket check requires `wiki` and names the Object Read hint;
+`vault_report` needs `wiki/index.md` (or `index.md` under `--wiki-only`),
+counts pages per folder and `raw/` source folders (0 when `raw/` is absent,
+not a failure); `main` end to end with the fake (`listremotes → config → lsd
+→ sync` of the bucket root, `1 raw sources` reported, no secret on stdout),
+`--setup-only` stops before the mirror, the `local` backend runs nothing,
+and a missing rclone exits 1; an existing remote whose stored key id (or key
+id and endpoint) differ from the env file is refused before anything is
+created or listed; `--env-file` with a temp `.env.prod` creates `r2-prod`
+from that file's values and lists `r2-prod:llmwiki-prod`, and the same file
+against the dev remote name exits 1; a missing `--env-file` exits 1. No test
+removed. Unit suite: 520 passing (one pre-existing, `.env`-dependent
+failure in `test_agent_graph.py::test_run_id_is_a_uuid_only_when_tracing_is_on`
+when `LANGSMITH_TRACING=true` is set in the real `.env`; unrelated).
+
+---
+
+## 2026-09-21 — The two implementation plans merged into a single `docs/implement-plan.md` (v1.5); §21 documents viewing the R2 wiki in Obsidian
+
+**Goal.** (1) Answer "how do I look at the KB graph now that `wiki/` lives in
+R2 rather than a local folder" in the plan, not in chat. (2) Fold the two
+implementation plans — `docs/implement-plan.md` v1.1 (Phase 0) and
+`docs/implement-plan-v1.4.md` v1.2 (Phase 0.5 packaging + §19/§20 Phase 1
+behaviour) — into one document, since every reader was already having to hold
+both open and the second one's "supersedes: nothing" header was no longer true
+in practice (§19 replaced Part I §11, §14/§19.8 replaced Part I §13).
+
+**Implementation detail.**
+
+- `implement-plan-v1.4.md` first went 1.2 → 1.3 with a new **§21 "Viewing the
+  R2 Wiki in Obsidian"**: the R2 key layout is already an Obsidian vault
+  layout and pages already use `[[slug]]` links, so the only gap is transport.
+  §21.2 is the one-time `rclone config create r2 s3 provider=Cloudflare ...`
+  from the `R2_*` values in `.env` (and why `rclone sync r2://llmwiki`
+  fails — the remote is a config *name*, not a URL scheme); §21.3 is
+  `rclone sync r2:$R2_BUCKET/wiki ./vault --exclude "_meta/**"` — only the
+  `wiki/` prefix, never `raw/`/`status/`, `_meta/` excluded because
+  `cost.jsonl` grows on every compile; §21.4 is the one rule — the mirror is
+  one-directional because the compiler and the scheduled lint own `wiki/`
+  (Remotely Save is fine on a read-only R2 token); §21.5 lists the
+  alternatives (Quartz/Foam/Logseq over the mirror; a `GET /graph` + D3 page
+  in FastAPI as the not-built answer to Part I §15 item 5). No env var, code
+  or test is introduced by the section.
+- Then the merge: `docs/implement-plan.md` (v1.5, keeping the plain filename — the version
+  lives in the header, so there is one plan file and no `-vX.Y` copies) = a new front matter
+  (reference convention, a "how the two Parts relate / status" table that
+  records N0–N8 as **not executed** and §19/§20/§21 as landed, a combined
+  contents table) + **Part I** (the old `implement-plan.md`, body verbatim) +
+  **Part II** (the old `implement-plan-v1.4.md` 1.3, body verbatim). **Each
+  Part keeps its original section numbering** — this is the whole reason for
+  the Part structure: ~40 live references in `src/`, `tests/`, `config/`,
+  `.env.example`, `CLAUDE.md` and the other docs cite section numbers, and
+  renumbering would have broken every one of them plus every historical entry
+  below. Five Part I sections (§3, §4, §11, §13, §15) carry a one-paragraph
+  **Superseded** callout pointing at the Part II section that replaced them;
+  the text underneath is unchanged so the Phase 0 record stays readable.
+- `docs/implement-plan-v1.4.md` is deleted (`git rm`); the old `implement-plan.md`
+  is overwritten by the merged file. The live references were rewritten mechanically:
+  `implement-plan-v1.4.md §X` → `implement-plan.md Part II §X`,
+  `plan-v1.4 §X` → `plan II §X`, `implement-plan.md §6.x` →
+  `implement-plan.md Part I §6.x`, `plan-1.1 D5` → `plan I D5`. Entries
+  below this one in `HISTORY.md` (and the stale copy in `docs/HISTORY.md`)
+  are left as written; the v1.5 front matter states the mapping
+  (`implement-plan.md §X` = Part I §X, `implement-plan-v1.4.md §X` = Part II
+  §X).
+
+**Related files.** `docs/implement-plan.md` (rewritten as the merged v1.5, 3122 lines),
+`docs/implement-plan-v1.4.md` (deleted),
+`CLAUDE.md`, `README.md`, `scripts/README.md`, `.env.example`,
+`config/ops.py`, `config/providers.py`, `src/llmwiki/config.py`,
+`src/llmwiki/factory.py`, `src/llmwiki/llm/{router,langchain_client,routing_config,providers}.py`,
+`src/llmwiki/embedding/workers_ai.py`, `scripts/check_cloudflare_setup.py`,
+`scripts/check_local_llm.py`, `tests/unit/test_{anthropic_client,config,routing_config,factory,router,langchain_client}.py`
+(docstrings/comments only), `docs/llmwiki-KB-design_v1.4.md`,
+`docs/llm-wiki-technical-document.md`, `docs/cloudflare-vectorize-setup-plan.md`,
+`docs/deployment-plan-container-hosting.md`, `docs/phase1-testing-guide.md`.
+
+**Test coverage.** No code path changed: the only edits under `src/`, `config/`,
+`scripts/` and `tests/` are comment, docstring and user-facing-message text
+(the `implement-plan.md section 6` pointer in two error messages now reads
+`implement-plan.md Part I section 6`; no test asserted on it). No tests
+added or removed; the full unit suite, `ruff` and `mypy` were run after the
+rewrite.
+
+---
+
+## 2026-09-20 — `.env`: an empty value with an inline comment is the comment, under Docker Compose
+
+**Root cause.** `scripts/verify_capture.py --youtube ...` against the compose
+`api` service on :8010 (R2 / Vectorize / Workers AI / OpenRouter, Whisper
+configured as the only YouTube route) failed at `POST /ingest` with a 422
+whose detail read `YOUTUBE_COOKIES_PATH=# Netscape-format cookies.txt
+exported from a browser logged in is not a file`. `.env` had the line
+`YOUTUBE_COOKIES_PATH=                        # Netscape-format ...`, copied
+from `.env.example`. python-dotenv - what `pydantic-settings` uses when the
+service runs locally - reads that as an empty value; Docker Compose's
+`env_file` parser reads it as the literal string `# Netscape-format cookies.txt
+exported from a browser logged in` (`docker compose config` shows it quoted).
+Same for `YOUTUBE_PROXY_URL` and `MAILGUN_SIGNING_KEY`. In the container the
+cookies route was therefore "configured" and wins over Whisper by design, so
+every YouTube ingest failed before any fetch - and the email channel mounted
+with a nonsense signing key. A value followed by a comment
+(`YOUTUBE_WHISPER_MODEL=base   # ...`) parses the same in both; only the
+empty case differs. Nothing in the suite could see it: unit tests never go
+through Compose, and locally the same file works.
+
+**Fix.** The eight such lines in `.env.example` (`LLM_BASE_URL`,
+`LANGSMITH_ENDPOINT`, `TELEGRAM_BOT_TOKEN`, `TELEGRAM_WEBHOOK_SECRET`,
+`MAILGUN_SIGNING_KEY`, `YOUTUBE_PROXY_URL`, `YOUTUBE_COOKIES_PATH`,
+`YOUTUBE_WHISPER_MODEL`) and the three in this checkout's `.env` now carry
+their comment block on the lines above a bare `KEY=`. A note at the top of
+`.env.example` states the rule. `docker compose config` now resolves all
+three to `""`.
+
+**Related files.** `.env.example`, `tests/unit/test_config.py`.
+
+**Tests.** No regressions; none removed. New:
+`test_config.py::test_env_example_has_no_empty_value_followed_by_an_inline_comment`
+scans `.env.example` for the `^KEY=\s+#` shape and names each offender.
+
+---
+
+## 2026-09-20 — `scripts/verify_capture.py`: prove a `/ingest` (YouTube) or `/upload` (PDF) capture landed in `raw/`, `wiki/` and the vector index
+
+**Goal.** `smoke_flow.py` exercises the Python core in-process; nothing
+walked a *running* service's front door and then checked all three places a
+source is supposed to end up. After the YouTube cloud-IP work, the question
+"did that capture actually store what it should, where it should?" needed a
+one-command answer.
+
+**Implementation.** A standalone script (`scripts/verify_capture.py`, no
+package imports at module level beyond `httpx`) that:
+
+- captures through REST: `POST /ingest {"url": ...}` for the YouTube URL,
+  `POST /upload` multipart for the PDF, with `INGEST_API_TOKEN` from `.env`
+  (or `--token`), and polls `GET /sources/{id}` until `done`/`failed`. A 4xx
+  is reported with the API's `detail` (so a 422 from a YouTube block names
+  the block); a duplicate is verified rather than rejected.
+- reads `raw/` directly (`factory.object_store`): `meta.json` modality and
+  url; `original.*` byte-equal to the uploaded PDF, or a `text`/`start`/
+  `duration` segment list for YouTube, in both cases hashing to
+  `meta.json`'s sha256 and matching `byte_size`; `extracted.md` non-empty.
+- reads `wiki/`: `wiki/sources/{id}.md`; `gists.json` lists the source note
+  and at least one concept/entity page citing the source (the manifest also
+  carries the note under its own id - the first run tripped on that); each
+  page's front matter carries the source, a gist and a body; `index.md`
+  links them; then the same pages via `GET /concepts` / `GET /page/{slug}`.
+- reads the chunks index (`factory.vector_store` + `factory.embedder`,
+  filtered `where={"source_id": id}`, with a short retry loop for
+  Vectorize's eventual consistency): count equals `chunk_count`, ids are
+  `{id}:0..n-1`, and each stored `text` is exactly
+  `extracted.md[char_start:char_end]` - the chunker's offsets are the
+  contract, so a stale or cross-wired vector is caught, not just a missing
+  one. Then `GET /search` for the source's own opening text must surface its
+  chunks or a page citing it.
+- refuses to start when `/healthz` reports different backends than `.env`
+  (the direct read-back would silently look at the wrong store);
+  `--rest-only` skips the direct half; `VECTOR_BACKEND=memory` degrades the
+  vector check to `GET /search` with a note, since the server's store is
+  process-local. Sources are kept by default (`--cleanup` calls
+  `tools.delete_source`).
+
+Verified live against an offline `uvicorn` on :8765 (local storage, fake
+LLM/embedder) with `tests/fixtures/sample.pdf`, and in-process for the two
+paths that server cannot reach (direct vector read-back, YouTube raw shape).
+
+**Related files.** `scripts/verify_capture.py` (new), `scripts/README.md`
+(row + section), `CLAUDE.md` (pointer, test count 459 → 499),
+`tests/unit/test_verify_capture_script.py` (new).
+
+**Tests.** No regressions (`pytest`: 497 passed, 1 skipped; the one failure,
+`test_agent_graph.py::test_run_id_is_a_uuid_only_when_tracing_is_on`,
+pre-exists this change and fails identically on a clean tree - the shared
+`settings` fixture reads this checkout's real `.env`, where tracing is on).
+No tests removed. New: `tests/unit/test_verify_capture_script.py` (8 tests)
+runs the script's `Api` against the FastAPI app under `TestClient` on the
+offline backends in one process, so the factory cache hands the script the
+same object store and memory vector store the app wrote to and every
+read-back path runs: a clean upload passes all checks; a duplicate is
+verified; a swapped `original.pdf`, a chunk whose text is not its
+`extracted.md` slice, a vector count disagreeing with the pipeline, a
+missing source note, a malformed YouTube segment list and a wrong bearer
+token are each named as failures.
+
+---
+
+## 2026-09-20 — `YOUTUBE_WHISPER_MODEL`: audio transcription for videos with no captions; Telegram capture moves behind the 200
+
+**Goal.** Not every video has a caption track. When neither the transcript
+API nor yt-dlp finds one, download the audio and transcribe it locally with
+Whisper - FUND-financial-Research's final tier, ported this time, but gated.
+
+**Design.**
+
+- **Third tier, opt-in.** `YOUTUBE_WHISPER_MODEL` (blank = off; `base`,
+  `small`, ...) and a `llmwiki[whisper]` extra. openai-whisper pulls torch
+  (~2 GB) and needs ffmpeg, so neither is in `requirements.txt` or the default
+  image; `docker compose build` with `WITH_WHISPER=1` (build arg, Dockerfile)
+  adds both. A set model without the package or without ffmpeg is a one-line
+  `ExtractionError` naming the install, raised *before* any audio download.
+- **Only for "no captions".** A new `NoCaptions(ExtractionError)` is what the
+  two caption routes raise when the video is reachable but has no track
+  (`NoTranscriptFound`/`TranscriptsDisabled` from the transcript API; no json3
+  track from yt-dlp). Only that falls through to Whisper. A block, an expired
+  session, a dead link are still reported - Whisper never papers over a bad
+  proxy or cookie file, and with the model unset a no-captions failure says
+  `YOUTUBE_WHISPER_MODEL` is the fix.
+- **Same raw shape.** `segments_from_whisper` turns `transcribe()`'s segments
+  into the same `text`/`start`/`duration` list (ms precision), so `raw/` and
+  `YouTubeExtractor` are unchanged for the third time.
+- **Audio only, cleaned up.** `bestaudio/best` with `outtmpl` in a
+  `mkdtemp` directory that `finally` removes; the same cookies/proxy as the
+  caption routes via the shared `_yt_dlp_opts` context manager (which also
+  owns the temp-copy-of-the-cookie-file rule from the previous entry). The
+  model is loaded once per process (`lru_cache`), ~1 GB of RAM for `base`.
+- **Telegram: capture behind the response.** Whisper is minutes of CPU per
+  video, and `channels/telegram.py` ran capture inline in the request.
+  Telegram re-delivers any update it has not seen a 2xx for within seconds,
+  so a slow capture would start the same transcription again in parallel.
+  `_handle_update` now only queues `_capture_and_process` as a Starlette
+  background task; the route answers 200 immediately, the task does
+  capture → ack (`Captured. source_id=...` / `Capture failed: ...`) →
+  process, and `ingest_source` runs via `asyncio.to_thread` so `/healthz`
+  (the Docker healthcheck) keeps answering during the fetch. An unexpected
+  exception in the task is logged with its traceback and acked generically -
+  the response is gone by then and silence would be the only alternative.
+  The email channel is unchanged (it still returns `source_ids`, so its
+  capture stays inline); a Whisper-length capture through Mailgun may exceed
+  its webhook timeout - use Telegram or REST for those. Noted in
+  `.env.example`.
+
+**Also.** `requirements.txt` gains `yt-dlp==2026.8.19`: the Docker build
+installs from that file, not `pyproject.toml`, so the previous entry's
+dependency was not in the image. A full `pip freeze` re-pin was *not* done -
+the venv has drifted from the lockfile independently of this work
+(`google-genai`, `ast-serialize`, ...) and re-pinning those belongs to its own
+change.
+
+**Related files.** `src/llmwiki/extractors/youtube.py`,
+`src/llmwiki/channels/telegram.py`, `src/llmwiki/pipeline/ingest.py`,
+`src/llmwiki/config.py`, `pyproject.toml`, `requirements.txt`, `Dockerfile`,
+`docker-compose.yml`, `.env.example`.
+
+**Tests.**
+
+- No regressions: `pytest` - 489 passed, 1 skipped (same pre-existing,
+  unrelated `test_agent_graph` failure). `ruff`/`mypy` clean apart from the
+  pre-existing `scripts/browse_vectors.py` E501;
+  `scripts/smoke_flow.py --offline` passes; `docker compose config` and
+  `docker build --check` validate with `WITH_WHISPER` 0 and 1.
+- Changed, `tests/unit/test_channels.py`:
+  `test_a_failed_fetch_is_acked_to_the_chat_not_raised` now exercises
+  `_capture_and_process` (the task) rather than `_handle_update`.
+  `test_yt_dlp_route_downloads_the_chosen_json3_track_only` additionally
+  asserts no download happened; `test_a_video_without_captions_is_a_one_line_error`
+  asserts the message names `YOUTUBE_WHISPER_MODEL`. The `fetch_transcript`
+  stubs in `test_ingest.py` take `whisper_model`.
+- New, `tests/unit/test_channels.py`:
+  `test_handle_update_queues_the_capture_and_returns` (ingest must not run
+  before the response), `test_handle_update_ignores_an_update_without_a_message`,
+  `test_a_successful_capture_acks_then_processes` (order),
+  `test_a_crash_after_the_200_is_reported_to_the_chat`.
+- New, `tests/unit/test_extractors.py` (`whisper` faked in `sys.modules`,
+  `shutil.which` patched, yt-dlp fake writes the "audio" file for
+  `download=True`; no network, no torch):
+  `test_whisper_runs_only_when_there_are_no_captions`,
+  `test_no_captions_falls_through_to_whisper_on_the_audio` (format, cookie
+  temp copy, temp dir removed, segment shape),
+  `test_transcript_api_no_captions_also_falls_through_to_whisper`,
+  `test_a_block_never_falls_through_to_whisper`,
+  `test_whisper_configured_but_not_installed_is_a_clear_error`,
+  `test_whisper_without_ffmpeg_is_a_clear_error`,
+  `test_whisper_model_is_loaded_once_per_process`,
+  `test_segments_from_whisper_matches_the_transcript_api_shape`.
+- Not covered by a unit test, by design: real Whisper output quality/speed.
+  Verify on the deployment with `WITH_WHISPER=1`, `YOUTUBE_WHISPER_MODEL=base`
+  and a captionless video; expect minutes, and the service log line
+  `youtube <id> has no captions; transcribing audio with whisper base`.
+
+---
+
+## 2026-09-20 — `YOUTUBE_COOKIES_PATH`: yt-dlp captions with a logged-in session as the alternative to the proxy
+
+**Goal.** Give a cloud deployment a second way past YouTube's IP block that
+costs no proxy subscription: the route the FUND-financial-Research agents
+settled on (`fund_models/util.py`, their commit `e857f14`) - yt-dlp with a
+browser-exported `cookies.txt`. Configuration picks the route:
+`YOUTUBE_COOKIES_PATH` set → yt-dlp with that session; otherwise
+`youtube-transcript-api`, through `YOUTUBE_PROXY_URL` when set (previous
+entry). Cookies win when both are set; yt-dlp honours the proxy too.
+
+**What was taken from FUND and what was not.** FUND's final form downloads
+the full audio and transcribes it locally with Whisper. That is deliberately
+*not* ported: it would add ffmpeg + openai-whisper + torch to
+`pip install llmwiki`, spend minutes of CPU per video inside the capture path
+(a webhook request), and produce a different raw format. What is ported is the
+cookie mechanism plus FUND's earlier "Tier 2" (captions via yt-dlp, which it
+still defines as `_yt_dlp_download_vtt` but no longer calls), with
+`skip_download` so the video never crosses the wire. Two FUND details carried
+over verbatim in spirit: the cookie file is copied to a temp file for each
+call because yt-dlp writes refreshed cookies back and the deployed file is a
+read-only mount; and a "Sign in to confirm you're not a bot"/403 from yt-dlp
+means the session was rejected, which the error now says (re-export the
+file). One FUND detail explicitly *not* carried over: its cookie files are
+tracked in git. Here `.gitignore` gets `*cookies*.txt`.
+
+**Implementation.**
+
+- `src/llmwiki/extractors/youtube.py` — `fetch_transcript(url, proxy_url=None,
+  cookies_path=None)` dispatches to `_segments_via_transcript_api` or
+  `_segments_via_yt_dlp`. Both return the same `text`/`start`/`duration`
+  list, so the stored raw object and `YouTubeExtractor` do not know which one
+  ran. Two pure helpers are public for testing: `pick_caption_track(info)`
+  (manual subtitles before automatic captions; `en`, then `en-*`, then
+  anything; json3 format only) and `segments_from_json3(payload)` (YouTube's
+  json3 events → segments; textless window events dropped). yt-dlp is
+  imported inside the function, like every other optional SDK.
+- `src/llmwiki/config.py`, `.env.example` — `youtube_cookies_path` /
+  `YOUTUBE_COOKIES_PATH`, with the account-ban and expiry caveats and the
+  "never commit it" rule. `.env.example`'s `YOUTUBE_PROXY_URL` note now cites
+  the library README's recommendation (rotating residential; datacenter
+  proxies are blocked like cloud IPs).
+- `src/llmwiki/pipeline/ingest.py::_fetch` — passes both settings through.
+- `docker-compose.yml` — commented read-only bind mount for the cookie file
+  next to the existing `config/` override hint.
+- `pyproject.toml`, `uv.lock` — `yt-dlp` as a core dependency (pure Python;
+  no ffmpeg needed for captions).
+- `.gitignore` — `*cookies*.txt`.
+
+**Related files.** `src/llmwiki/extractors/youtube.py`,
+`src/llmwiki/pipeline/ingest.py`, `src/llmwiki/config.py`, `.env.example`,
+`docker-compose.yml`, `pyproject.toml`, `uv.lock`, `.gitignore`.
+
+**Tests.**
+
+- No regressions: `pytest` - 477 passed, 1 skipped (same pre-existing,
+  unrelated `test_agent_graph` failure as the previous entry). `ruff` clean
+  apart from the pre-existing `scripts/browse_vectors.py` E501; `mypy` clean;
+  `scripts/smoke_flow.py --offline` passes.
+- Changed: `test_ingest.py::test_capture_passes_youtube_proxy_url_from_settings`
+  → `test_capture_passes_youtube_proxy_and_cookies_from_settings`, plus
+  `test_capture_passes_none_when_neither_youtube_knob_is_set`; the
+  `fetch_transcript` stub in `test_capture_fills_youtube_title_from_oembed`
+  takes `**kw`.
+- New, `tests/unit/test_extractors.py` (yt-dlp mocked at `yt_dlp.YoutubeDL`,
+  asserting `download=False`; no network):
+  `test_cookies_path_switches_the_fetch_to_yt_dlp` (and transcript-api is not
+  constructed), `test_yt_dlp_gets_a_temp_copy_of_the_cookie_file_and_removes_it`,
+  `test_yt_dlp_also_uses_the_proxy_when_both_are_configured`,
+  `test_yt_dlp_route_downloads_the_chosen_json3_track_only`,
+  `test_a_missing_cookie_file_is_a_clear_error_not_a_yt_dlp_call`,
+  `test_a_video_without_captions_is_a_one_line_error`,
+  `test_a_rejected_session_names_the_cookie_file_as_the_fix`,
+  `test_pick_caption_track_prefers_manual_then_english_then_json3`,
+  `test_segments_from_json3_matches_the_transcript_api_shape`.
+- Not covered by a unit test, by design: whether a given cookie file gets
+  past YouTube today. Verify on the deployment: mount the file, set
+  `YOUTUBE_COOKIES_PATH`, send a link to the bot - the failure ack now says
+  whether the session was rejected.
+
+---
+
+## 2026-09-20 — YouTube capture from a cloud IP: report the block, stop the webhook retry storm, add `YOUTUBE_PROXY_URL`
+
+**Goal.** A YouTube link sent to the Telegram bot from the deployed service
+answered the webhook with a 500 and a 40-line traceback, and the same video
+then hit YouTube again every ~20 s.
+
+**Root cause (two, stacked).**
+
+1. `youtube_transcript_api` raised `RequestBlocked`: YouTube refuses the
+   innertube transcript request from most cloud-provider egress IPs. That is
+   an environmental fact, not a bug, and the library's own answer is a proxy
+   (`GenericProxyConfig`). The service had no way to configure one.
+2. `channels/telegram.py` let `ExtractionError` propagate out of the webhook.
+   Telegram re-delivers any update not acknowledged with a 2xx, so each 500
+   scheduled another delivery - the log shows the identical update at
+   00:20:13, 00:20:30 and 00:21:03, each re-fetching the blocked video. The
+   Mailgun inbound webhook had the same shape (Mailgun retries non-2xx for
+   8 hours; only 406 tells it to stop), and `POST /ingest` 500'd the same way.
+
+**An earlier uncommitted attempt was reverted** rather than kept: it caught
+`RequestBlocked` inside `fetch_transcript` and stored `[]` as the raw
+transcript so capture "succeeded" with a stub page. That breaks two design
+rules at once: `raw/` is immutable and content-addressed by URL
+(`content_hash_for_url`), so the empty placeholder would make every later
+send of the same link a "duplicate, skipping" - the video could never be
+captured once a proxy was configured - and a wiki page saying "transcript
+unavailable" is compiled, embedded and cited as if it were a source. The same
+diff had also moved `__version__` from 0.9.0 *down* to 0.1.2; that is
+reverted too.
+
+**Implementation.**
+
+- `src/llmwiki/extractors/youtube.py` — `fetch_transcript(url, proxy_url=None)`.
+  A set `proxy_url` becomes `GenericProxyConfig(http_url=..., https_url=...)`
+  on the `YouTubeTranscriptApi` constructor. `RequestBlocked`/`IpBlocked`
+  become a one-line `ExtractionError` that names the video id, whether a
+  proxy was in use, and the setting to fix it; every other failure keeps only
+  the first line of the library's message. Nothing is stored on failure, so
+  the URL stays capturable. The pre-1.0 `get_transcript` fallback is gone -
+  `proxy_config=` only exists on the 1.x constructor - and `pyproject.toml`
+  pins `youtube-transcript-api>=1.0` (1.2.4 is installed).
+- `src/llmwiki/config.py`, `.env.example` — `YOUTUBE_PROXY_URL` (blank =
+  direct request). `pipeline/ingest.py::_fetch` passes it through; the
+  extractor stays a pure function of its arguments.
+- `src/llmwiki/tools.py` — re-exports `ExtractionError`. The layering rule
+  (`test_layering.py`) keeps `api/` and `channels/` away from `extractors/`,
+  and `tools` is the one module every transport is allowed to reach.
+- `src/llmwiki/channels/telegram.py` — `_handle_update` catches
+  `tools.ExtractionError | ValueError` from `_capture`, logs a warning, acks
+  the chat with `Capture failed: <reason>` and returns normally, so the route
+  answers 200 and Telegram stops re-delivering. Nothing is queued for
+  processing.
+- `src/llmwiki/channels/email.py` — the same failures become HTTP 406 with
+  the reason in `detail`, the one non-2xx Mailgun does not retry.
+- `src/llmwiki/api/routes.py` — `POST /ingest` maps `ExtractionError` to 422
+  with the reason, instead of a 500.
+
+**Related files.** `src/llmwiki/extractors/youtube.py`,
+`src/llmwiki/pipeline/ingest.py`, `src/llmwiki/config.py`,
+`src/llmwiki/tools.py`, `src/llmwiki/channels/telegram.py`,
+`src/llmwiki/channels/email.py`, `src/llmwiki/api/routes.py`,
+`pyproject.toml`, `.env.example`.
+
+**Tests.**
+
+- No regressions: `pytest` - 467 passed, 1 skipped. (One failure is
+  pre-existing and unrelated:
+  `test_agent_graph.py::test_run_id_is_a_uuid_only_when_tracing_is_on` fails
+  identically on the parent commit because the shared `settings` fixture reads
+  this checkout's real `.env`, which has LangSmith tracing on.) `ruff check`
+  clean apart from a pre-existing E501 in `scripts/browse_vectors.py`; `mypy`
+  clean; `scripts/smoke_flow.py --offline` passes.
+- Changed: `test_ingest.py::test_capture_fills_youtube_title_from_oembed` -
+  the `fetch_transcript` stub now accepts the `proxy_url` kwarg.
+- New, `tests/unit/test_extractors.py` (library mocked at
+  `youtube_transcript_api.YouTubeTranscriptApi`, no network):
+  `test_fetch_transcript_goes_direct_when_no_proxy_is_configured`,
+  `test_fetch_transcript_routes_through_youtube_proxy_url`,
+  `test_a_youtube_ip_block_is_a_one_line_error_that_names_the_fix`,
+  `test_other_transcript_failures_keep_only_the_first_line`.
+- New, `tests/unit/test_ingest.py`:
+  `test_capture_passes_youtube_proxy_url_from_settings`.
+- New, `tests/unit/test_channels.py`:
+  `test_a_failed_fetch_is_acked_to_the_chat_not_raised` (the ack text, no
+  processing queued), `test_webhook_returns_200_when_capture_fails` (through
+  the route - the 2xx is what stops the retries),
+  `test_email_webhook_answers_406_when_capture_fails`.
+- New, `tests/unit/test_routes.py`:
+  `test_ingest_answers_422_when_the_url_cannot_be_fetched`.
+- Not covered by a unit test, by design: whether a given proxy actually gets
+  past YouTube. Verify on the deployment with `YOUTUBE_PROXY_URL` set and a
+  link sent to the bot; the ack now says which of the two (proxy or direct)
+  was tried.
 
 ---
 
 ## 2026-09-18 — Technical document: every `system=` call site in one table (§3.6)
+
 
 **Goal.** Answer two recurring questions from one place: *why* only two
 files under repo-root `skills/` are model-selectable while the other five

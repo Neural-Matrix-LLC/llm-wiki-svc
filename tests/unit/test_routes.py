@@ -415,3 +415,18 @@ def test_synthesize_route_needs_a_token_and_404s_unknown_domains(client) -> None
     body = client.post("/synthesize/general", headers=AUTH).json()
     assert body["written"] is True and body["domain"] == "general"
     assert client.get("/page/overview").status_code == 200
+def test_ingest_answers_422_when_the_url_cannot_be_fetched(client, monkeypatch) -> None:
+    """A blocked or dead URL is a client-visible failure, not a 500 with a traceback."""
+    from llmwiki import tools
+
+    def blocked(**kw):
+        raise tools.ExtractionError("YouTube blocked the transcript request for LJF3frcDgRM")
+
+    monkeypatch.setattr("llmwiki.tools.ingest_source", blocked)
+
+    response = client.post(
+        "/ingest", json={"url": "https://youtu.be/LJF3frcDgRM"}, headers=AUTH
+    )
+
+    assert response.status_code == 422, response.text
+    assert "LJF3frcDgRM" in response.json()["detail"]

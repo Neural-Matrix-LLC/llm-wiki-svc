@@ -53,6 +53,11 @@ def build_router(cfg: Settings) -> APIRouter | None:
             # An unknown "[domain]" prefix: Mailgun retries 5xx, so answer 200
             # with the reason rather than have the same mail bounce for hours.
             return {"ok": False, "error": f"unknown domain {exc.args[0]!r}", "source_ids": []}
+        except (tools.ExtractionError, ValueError) as exc:
+            # 406 is the one non-2xx Mailgun does not retry; anything else is
+            # re-delivered for 8 hours, replaying the fetch that just failed.
+            logger.warning("email capture failed: %s", exc)
+            raise HTTPException(status_code=406, detail=f"capture failed: {exc}") from exc
         for ref in refs:
             if not ref.duplicate:
                 background.add_task(tools.enqueue_source, ref.source_id)

@@ -66,7 +66,7 @@ def test_offline_settings_need_no_credentials() -> None:
     assert cfg.storage_backend == "local"
 
 
-# --- the provider-generic LLM contract (plan-v1.4 7.6) --------------------
+# --- the provider-generic LLM contract (plan II §7.6) --------------------
 #
 # LLM_PROVIDER / LLM_API_KEY / LLM_MODEL / LLM_BASE_URL are the names the
 # shared agentkit-llm layer will own, so both spellings must agree until the
@@ -182,7 +182,7 @@ def test_compile_executor_model_setting_no_longer_exists() -> None:
 
 def test_documented_env_var_names_actually_configure_the_routing_paths(monkeypatch) -> None:
     """Regression: the auto-derived name (LLM_PROVIDERS_CONFIG, no "WIKI") is not
-    what .env.example and implement-plan-v1.4.md §19.8 document - without an
+    what .env.example and implement-plan.md Part II §19.8 document - without an
     explicit validation_alias, LLMWIKI_PROVIDERS_CONFIG/LLMWIKI_OPS_CONFIG were
     silently ignored and the default path was used instead."""
     monkeypatch.setenv("LLMWIKI_PROVIDERS_CONFIG", "/somewhere/providers.py")
@@ -274,3 +274,27 @@ def test_cli_offline_env_disables_the_routing_table_and_tracing() -> None:
         assert not Path(OFFLINE_ENV[key]).exists()
     assert OFFLINE_ENV["LANGSMITH_TRACING"] == "false"
     assert OFFLINE_ENV["RERANKER_BACKEND"] == "fake", "the reranker is a Cloudflare call"
+# --- .env.example must parse the same under Compose and python-dotenv ------
+
+
+def test_env_example_has_no_empty_value_followed_by_an_inline_comment() -> None:
+    """Regression (2026-09-20): ``KEY=      # comment`` is an empty value to
+    python-dotenv (what Settings reads locally) but the literal string
+    ``'# comment'`` to Docker Compose's env_file parser. In the container that
+    made YOUTUBE_COOKIES_PATH, YOUTUBE_PROXY_URL and MAILGUN_SIGNING_KEY all
+    non-empty - the cookies route was selected over Whisper and every YouTube
+    /ingest 422'd with the comment text as the "path". A value followed by a
+    comment (``KEY=base   # ...``) is fine in both; only the empty case bites,
+    so the comment goes on the line above."""
+    import re
+
+    env_example = Path(__file__).resolve().parents[2] / ".env.example"
+    offenders = [
+        f"{n}: {line.rstrip()}"
+        for n, line in enumerate(env_example.read_text().splitlines(), 1)
+        if re.match(r"^[A-Z_0-9]+=\s+#", line)
+    ]
+    assert not offenders, (
+        "empty value with an inline comment - Compose reads the comment as the value; "
+        "move it to the line above:\n" + "\n".join(offenders)
+    )

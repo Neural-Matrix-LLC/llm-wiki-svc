@@ -1,6 +1,6 @@
 """config/providers.py + config/ops.py loading and validation.
 
-design v1.4 §4.8.1, implement-plan-v1.4.md §19.2/§19.7.3. Every fixture writes
+design v1.4 §4.8.1, implement-plan.md Part II §19.2/§19.7.3. Every fixture writes
 its own throwaway ``providers.py``/``ops.py`` under ``tmp_path`` - the real
 repository has no ``config/`` directory, which is exactly what keeps every
 other test in the suite on the single-provider fallback path untouched by any

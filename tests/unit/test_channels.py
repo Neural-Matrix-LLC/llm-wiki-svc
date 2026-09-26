@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import hmac
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from fastapi.testclient import TestClient
@@ -164,6 +164,137 @@ def _fake_ref():
     return SourceRef(source_id="a" * 16, duplicate=False)
 
 
+@pytest.mark.asyncio
+async def test_handle_update_queues_the_capture_and_returns(monkeypatch) -> None:
+    """Regression (2026-09-20): capture ran inline, so a slow fetch held the 200.
+
+    Telegram re-delivers an update it has not seen a 2xx for within seconds;
+    with YOUTUBE_WHISPER_MODEL a capture can take minutes, which would start
+    the same transcription again in parallel. The handler must only queue.
+    """
+    from llmwiki.channels import telegram
+
+    def never(**kw):
+        raise AssertionError("ingest_source must not run before the response")
+
+    monkeypatch.setattr("llmwiki.tools.ingest_source", never)
+    background = MagicMock()  # BackgroundTasks.add_task is sync
+    message = {"chat": {"id": 7}, "text": "https://youtu.be/LJF3frcDgRM"}
+
+    await telegram._handle_update({"message": message}, "t", background)
+
+    background.add_task.assert_called_once_with(telegram._capture_and_process, message, "t")
+
+
+@pytest.mark.asyncio
+async def test_handle_update_ignores_an_update_without_a_message() -> None:
+    from llmwiki.channels import telegram
+
+    background = MagicMock()
+    await telegram._handle_update({"edited_message": {}}, "t", background)
+    background.add_task.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_a_failed_fetch_is_acked_to_the_chat_not_raised(monkeypatch) -> None:
+    """Regression (2026-09-20): a YouTube URL from a cloud IP 500'd the webhook.
+
+    The background task must swallow the capture failure, tell the sender
+    why, and queue nothing for processing.
+    """
+    from llmwiki import tools
+    from llmwiki.channels import telegram
+
+    def blocked(**kw):
+        raise tools.ExtractionError("YouTube blocked the transcript request for LJF3frcDgRM")
+
+    monkeypatch.setattr("llmwiki.tools.ingest_source", blocked)
+    processed = []
+    monkeypatch.setattr("llmwiki.tools.enqueue_source", lambda sid: processed.append(sid))
+    acks = []
+
+    async def fake_ack(client, chat_id, text):
+        acks.append((chat_id, text))
+
+    monkeypatch.setattr(telegram, "_ack", fake_ack)
+
+    message = {"chat": {"id": 7}, "text": "https://www.youtube.com/watch?v=LJF3frcDgRM"}
+    await telegram._capture_and_process(message, "t")  # must not raise
+
+    assert acks == [(7, "Capture failed: YouTube blocked the transcript request for LJF3frcDgRM")]
+    assert processed == []
+
+
+@pytest.mark.asyncio
+async def test_a_successful_capture_acks_then_processes(monkeypatch) -> None:
+    from llmwiki.channels import telegram
+
+    monkeypatch.setattr("llmwiki.tools.ingest_source", lambda **kw: _fake_ref())
+    order = []
+    monkeypatch.setattr("llmwiki.tools.enqueue_source", lambda sid: order.append(("process", sid)))
+
+    async def fake_ack(client, chat_id, text):
+        order.append(("ack", text))
+
+    monkeypatch.setattr(telegram, "_ack", fake_ack)
+
+    await telegram._capture_and_process({"chat": {"id": 7}, "text": "notes"}, "t")
+
+    assert order == [
+        ("ack", f"Captured. source_id={_fake_ref().source_id}"),
+        ("process", _fake_ref().source_id),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_a_crash_after_the_200_is_reported_to_the_chat(monkeypatch) -> None:
+    """The response is gone by then - silence would be the only alternative."""
+    from llmwiki.channels import telegram
+
+    def boom(**kw):
+        raise RuntimeError("storage down")
+
+    monkeypatch.setattr("llmwiki.tools.ingest_source", boom)
+    acks = []
+
+    async def fake_ack(client, chat_id, text):
+        acks.append(text)
+
+    monkeypatch.setattr(telegram, "_ack", fake_ack)
+
+    await telegram._capture_and_process({"chat": {"id": 7}, "text": "notes"}, "t")
+
+    assert acks == ["Capture failed unexpectedly; see the service log."]
+
+
+def test_webhook_returns_200_when_capture_fails(cfg, monkeypatch) -> None:
+    """End to end through the route: the 2xx is what stops Telegram's retries."""
+    from llmwiki import tools
+    from llmwiki.channels import telegram
+
+    _set_telegram(cfg)
+
+    def blocked(**kw):
+        raise tools.ExtractionError("blocked")
+
+    monkeypatch.setattr("llmwiki.tools.ingest_source", blocked)
+    monkeypatch.setattr(telegram, "_ack", AsyncMock())
+
+    from fastapi import FastAPI
+
+    app = FastAPI()
+    app.include_router(telegram.build_router(cfg))
+    client = TestClient(app)
+
+    response = client.post(
+        "/channels/telegram/webhook",
+        json={"message": {"chat": {"id": 1}, "text": "https://youtu.be/LJF3frcDgRM"}},
+        headers={"X-Telegram-Bot-Api-Secret-Token": "shh"},
+    )
+    assert response.status_code == 200
+    assert response.json() == {"ok": True}
+
+
 # --- Email -------------------------------------------------------------
 
 
@@ -257,6 +388,34 @@ def test_email_webhook_ingests_an_attachment_and_the_cover_note(cfg, monkeypatch
 # --- Optional mount into the FastAPI app -----------------------------------
 
 
+def test_email_webhook_answers_406_when_capture_fails(cfg, monkeypatch) -> None:
+    """406 is the one non-2xx Mailgun does not retry for 8 hours."""
+    from fastapi import FastAPI
+
+    from llmwiki import tools
+    from llmwiki.channels.email import build_router
+
+    cfg.mailgun_signing_key = SecretStr("key")
+
+    def blocked(**kw):
+        raise tools.ExtractionError("YouTube blocked the transcript request for LJF3frcDgRM")
+
+    monkeypatch.setattr("llmwiki.tools.ingest_source", blocked)
+
+    app = FastAPI()
+    app.include_router(build_router(cfg))
+    client = TestClient(app)
+
+    form = _mailgun_form(
+        "key", subject="a link", **{"stripped-text": "https://youtu.be/LJF3frcDgRM",
+                                     "attachment-count": "0"},
+    )
+    response = client.post("/channels/email/inbound", data=form)
+
+    assert response.status_code == 406, response.text
+    assert "LJF3frcDgRM" in response.json()["detail"]
+
+
 def test_app_mounts_no_channel_routes_when_unconfigured(tmp_path, monkeypatch) -> None:
     from llmwiki.api.app import create_app
 
@@ -317,7 +476,7 @@ async def test_telegram_hashtag_on_text_is_an_explicit_domain(monkeypatch) -> No
 
     calls = []
     monkeypatch.setattr("llmwiki.tools.ingest_source", lambda **kw: calls.append(kw) or _fake_ref())
-    monkeypatch.setattr("llmwiki.tools.process_source", lambda *a, **k: None)
+    monkeypatch.setattr("llmwiki.tools.enqueue_source", lambda *a, **k: None)
     acks = []
 
     async def ack(client, chat_id, text):
@@ -325,13 +484,8 @@ async def test_telegram_hashtag_on_text_is_an_explicit_domain(monkeypatch) -> No
 
     monkeypatch.setattr(telegram, "_ack", ack)
 
-    class _Bg:
-        def add_task(self, *a, **k):
-            pass
-
-    await telegram._handle_update(
-        {"message": {"chat": {"id": 1}, "text": "#ml-systems KV cache blocks stay on the GPU."}},
-        "t", _Bg())
+    await telegram._capture_and_process(
+        {"chat": {"id": 1}, "text": "#ml-systems KV cache blocks stay on the GPU."}, "t")
 
     assert calls[0]["domain"] == "ml-systems"
     assert calls[0]["text"] == "KV cache blocks stay on the GPU."
@@ -370,11 +524,12 @@ async def test_telegram_unknown_domain_is_acked_not_crashed(monkeypatch) -> None
 
     monkeypatch.setattr(telegram, "_ack", ack)
 
-    class _Bg:
-        def add_task(self, *a, **k):
-            raise AssertionError("nothing to process")
+    def enqueue(*a, **k):
+        raise AssertionError("nothing to process")
 
-    await telegram._handle_update({"message": {"chat": {"id": 1}, "text": "#nope hi"}}, "t", _Bg())
+    monkeypatch.setattr("llmwiki.tools.enqueue_source", enqueue)
+
+    await telegram._capture_and_process({"chat": {"id": 1}, "text": "#nope hi"}, "t")
     assert acks == ["Unknown domain 'nope'; nothing captured."]
 
 

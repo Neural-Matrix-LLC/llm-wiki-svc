@@ -1,4 +1,4 @@
-"""Routes each op to its configured provider - implement-plan-v1.4.md §19.3.
+"""Routes each op to its configured provider - implement-plan.md Part II §19.3.
 
 Built only when ``config/providers.py`` + ``config/ops.py`` are both present
 (``factory._build_routed_llm_client``); the domain layer sees an ordinary

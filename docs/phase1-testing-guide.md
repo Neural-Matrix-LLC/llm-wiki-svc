@@ -56,7 +56,7 @@ both servers expose an OpenAI-compatible route, but each is resolved in
 This supersedes the original 2026-09-11 groundwork, which reused the shared
 `"openai"` row/`OPENAI_BASE_URL` for whichever local server was running — a
 real cloud OpenAI key and a local endpoint could never both be active at the
-same time under that scheme. See `docs/implement-plan-v1.4.md` §7.4's
+same time under that scheme. See `docs/implement-plan.md` Part II §7.4's
 2026-09-14 addendum for the full reasoning.
 
 Not yet flipped on: `config/ops.py`'s local-routing example is still
@@ -174,14 +174,13 @@ Note the printed `https://<random>.trycloudflare.com` URL — this is the
 public HTTPS address Telegram will call into.
 
 This is the ad hoc, no-account quick-tunnel flavor, for local testing only.
-The *production* setup is a named Tunnel routed at the deployed box — see
-`docs/deployment-plan-container-hosting.md`, Phase 4 steps 13–14 — this guide
-doesn't reuse that path.
+On the production box steps 3–5 are done by `docker compose` instead — see
+[Steps 3–5 in production](#steps-35-in-production-docker-compose) below.
 
 ### Step 4 — Register the webhook with Telegram
 
 This is what actually links the bot to the tunneled endpoint. Exact curl
-already in `.env.example:117-119`. `<cloudflared-host>` is the random
+already in `.env.example` (next to `PUBLIC_BASE_URL`). `<cloudflared-host>` is the random
 `https://xxxx.trycloudflare.com` hostname step 3's `cloudflared` command
 printed to stdout — a fresh one each time you start a quick tunnel, since no
 account/DNS is involved — substitute it in directly. Quote each `-d` value as
@@ -208,6 +207,100 @@ curl "https://api.telegram.org/bot$TELEGRAM_BOT_TOKEN/getWebhookInfo"
 ```
 
 Look for `"url"` matching your tunnel host and `"last_error_message"` absent.
+
+### Steps 3–5 in production (docker compose)
+
+The full production setup and start order (image push, both `.env` files,
+dashboard, first start, releases) is [runbook-hostinger.md](runbook-hostinger.md);
+this section covers the Telegram part of it.
+
+On the Hostinger VPS there are only two compose projects, each in its own
+directory with its own `.env` (a Hostinger compose project reads `.env` and
+nothing else) — the tunnel (`docker-compose-cloudflared.yml`, a
+dashboard-managed tunnel) and llmwiki (`docker-compose.yml`). No repo checkout, no
+`curl` in the image, and the bot token lives only in llmwiki's `.env`. Steps
+3–5 are therefore wired into compose:
+
+| Step | Done by |
+|---|---|
+| 3 — tunnel reaches the service | llmwiki's compose names its network `llmwiki-net` and gives `api` the alias `llmwiki-api`; `docker-compose-cloudflared.yml` joins it as an external network; the tunnel's public hostname points at `http://llmwiki-api:8000` |
+| 4 — `setWebhook` | the `telegram-webhook` one-shot (`scripts/telegram_webhook.py sync`), on every `docker compose up -d` |
+| 5 — `getWebhookInfo` | the same one-shot, right after step 4; `run --rm telegram-webhook info` on demand |
+
+`docker compose config` runs nothing — it only renders the YAML. It is `up -d`
+that starts the one-shot.
+
+**One-time setup**
+
+1. Two directories on the box:
+   ```
+   <llmwiki-dir>/docker-compose.yml   + .env   # from .env.example
+   <tunnel-dir>/docker-compose.yml    + .env   # docker-compose-cloudflared.yml, renamed;
+                                                # .env from .env.cloudflared.example
+   ```
+   In the tunnel's `.env`, paste the tunnel token (Zero Trust → Networks →
+   Tunnels → **srv-llmwiki** → Configure; the string after `--token`). Keep it
+   out of llmwiki's `.env`, and never commit either.
+2. Cloudflare Zero Trust → Networks → Tunnels → **srv-llmwiki** → Public
+   Hostname: `llmwiki.<yourdomain>` → Service `HTTP` → `llmwiki-api:8000`.
+   The container port, not `API_PORT`: `localhost:<API_PORT>` there would be
+   cloudflared's own loopback (502).
+3. llmwiki's `.env`: `TELEGRAM_BOT_TOKEN`, `TELEGRAM_WEBHOOK_SECRET`
+   (`openssl rand -hex 20`) and `PUBLIC_BASE_URL=https://llmwiki.<yourdomain>`.
+   `API_BIND` stays `0.0.0.0` (direct `http://<vps-ip>:API_PORT` keeps working);
+   `127.0.0.1` is optional hardening — the tunnel doesn't need the host port,
+   and Docker-published ports bypass `ufw` — at the cost of that direct access.
+4. Start llmwiki first (it creates `llmwiki-net`), then the tunnel, then
+   re-run the one-shot — on this first start its step-3 probe ran before the
+   tunnel existed and failed:
+   ```bash
+   cd <llmwiki-dir> && docker compose pull && docker compose up -d
+   cd <tunnel-dir>  && docker compose up -d
+   docker compose logs cloudflared            # "Registered tunnel connection"
+   cd <llmwiki-dir> && docker compose run --rm telegram-webhook
+   ```
+   From then on the tunnel stays up across llmwiki redeploys. Stop it before
+   any `docker compose down` of llmwiki, which would otherwise try to remove
+   the network it is attached to.
+
+**Every deploy / after editing `.env`**
+
+```bash
+docker compose up -d --force-recreate      # recreates api and re-runs the one-shot
+docker compose logs telegram-webhook       # its report
+```
+
+A good report:
+
+```
+3. Tunnel
+  [OK]   https://llmwiki.<yourdomain>/channels/telegram/webhook -> 401 without the secret
+4. Register
+  [OK]   setWebhook https://llmwiki.<yourdomain>/channels/telegram/webhook
+5. Verify
+  [OK]   https://llmwiki.<yourdomain>/channels/telegram/webhook (pending updates: 0)
+```
+
+Step 3 posts to the public URL *without* the secret header, so the 401 shows
+the whole path works: tunnel → `llmwiki-net` → `api` → route mounted → secret
+enforced. (Telegram's `setWebhook` never tests the URL itself.) What a failure
+means:
+
+| Step 3 answer | Cause |
+|---|---|
+| 502 / 530 | cloudflared can't reach `llmwiki-api:8000` — cloudflared not on `llmwiki-net`, or the dashboard hostname points elsewhere. Retried for ~30 s first, since cloudflared may still be connecting |
+| 302 / 403 | Cloudflare Access is in front of the hostname. Add a second Access application for path `/channels/telegram/webhook` with a **Bypass → Everyone** policy; the route still checks the secret header |
+| 404 | the route isn't mounted — `TELEGRAM_BOT_TOKEN` isn't in the api container's env (`up -d --force-recreate` after editing `.env`) |
+
+`[SKIP]` lines mean `TELEGRAM_BOT_TOKEN` or `PUBLIC_BASE_URL` is blank — nothing
+was registered, and that is not an error. Anytime afterwards:
+
+```bash
+docker compose run --rm telegram-webhook info      # step 5 again
+docker compose run --rm telegram-webhook delete    # step 10 (teardown)
+```
+
+Then continue with step 6 from the real Telegram app.
 
 ### Step 6 — Send test messages from the real Telegram app
 

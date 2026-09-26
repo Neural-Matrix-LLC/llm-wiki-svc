@@ -1,0 +1,48 @@
+# Cloudflare Tunnel in front of llmwiki - the production ingress (deployment-plan-
+# container-hosting.md Phase 4, step 13). On the Hostinger VPS it is a compose
+# project of its own, in its OWN directory, beside (not inside) llmwiki's -
+# because a Hostinger compose project reads exactly one env file, `.env`, and
+# llmwiki's `.env` must not carry the tunnel token (nor this one llmwiki's keys):
+#
+#   <llmwiki-dir>/docker-compose.yml     + .env   (from .env.example)
+#   <tunnel-dir>/docker-compose.yml      + .env   (this file, renamed;
+#                                                  .env from .env.cloudflared.example)
+#
+#   cd <llmwiki-dir> && docker compose up -d   # first: creates llmwiki-net
+#   cd <tunnel-dir>  && docker compose up -d
+#   docker compose logs -f                     # "Registered tunnel connection"
+#
+# The tunnel is dashboard-managed (the token form): ingress rules live in
+# Cloudflare Zero Trust -> Networks -> Tunnels -> srv-llmwiki -> Public Hostname,
+# not here.
+# Point the llmwiki hostname at  HTTP  llmwiki-api:8000  - the api container's
+# alias on llmwiki-net and its container port. NOT localhost:<API_PORT>: inside
+# this container localhost is cloudflared itself, and that route only 502s.
+#
+# First deploy only: llmwiki's telegram-webhook one-shot ran before this tunnel
+# existed, so its step-3 probe failed. Once the tunnel is connected, re-run it:
+#   cd <llmwiki-dir> && docker compose run --rm telegram-webhook
+# Afterwards the tunnel stays up across llmwiki redeploys (`up -d`, even with
+# --force-recreate, keeps llmwiki-net). `docker compose down` on llmwiki would
+# try to remove the network this container is attached to - stop this first.
+
+services:
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    container_name: cloudflared
+    env_file:
+      # TUNNEL_TOKEN - cloudflared reads it from the environment, so env_file
+      # is enough; no ${TUNNEL_TOKEN} interpolation. required:true for the same
+      # reason as llmwiki's api: without it the container starts and loops on
+      # "no token" instead of refusing at `up`.
+      - path: .env
+        required: true
+    command: tunnel --no-autoupdate run
+    networks:
+      - llmwiki-net
+    restart: unless-stopped
+
+networks:
+  llmwiki-net:
+    # Created by llmwiki's docker-compose.yml (its default network, fixed name).
+    external: true

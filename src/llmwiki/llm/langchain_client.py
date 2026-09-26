@@ -1,7 +1,7 @@
 """LangChain adapter: one ``LLMClient`` over any provider LangChain can reach.
 
 This is the "``get_client()`` may be implemented over ``get_llm()``, never the
-reverse" half of implement-plan-v1.4.md 7.5.  The domain layer keeps talking to
+reverse" half of implement-plan.md Part II §7.5.  The domain layer keeps talking to
 :meth:`complete`, so the compiler and the query agent are untouched by which
 provider is configured.
 

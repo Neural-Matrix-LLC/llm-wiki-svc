@@ -25,6 +25,7 @@ from llmwiki.agent.judge import Judge
 from llmwiki.agent.query import QueryAgent
 from llmwiki.config import Settings
 from llmwiki.config import settings as default_settings
+from llmwiki.extractors.base import ExtractionError  # noqa: F401  (re-exported, see below)
 from llmwiki.models.chunk import SearchHit
 from llmwiki.models.page import Domain, LintReport, PageGist, WikiPage
 from llmwiki.models.plan import (
@@ -44,6 +45,13 @@ from llmwiki.wiki import gists as gists_mod
 from llmwiki.wiki import lint as lint_mod
 from llmwiki.wiki.compiler import Compiler
 from llmwiki.wiki.pages import read_page
+
+# ``ExtractionError`` is re-exported here for transports (api/, channels/ -
+# which the layering rule keeps away from extractors/) so a failed URL fetch
+# inside ingest_source can become a clean client-facing failure instead of a
+# 500. Telegram in particular re-delivers any update not acked with a 2xx, so
+# an unhandled fetch error there is a retry storm against the very site that
+# just refused us.
 
 logger = logging.getLogger(__name__)
 

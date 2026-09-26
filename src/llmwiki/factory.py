@@ -256,7 +256,7 @@ def _construct_provider_client(
 
     No logging, no ``os.environ`` reads, no ``Settings`` - shared by the
     single-provider fallback path below and the per-op router
-    (``_build_routed_llm_client``, implement-plan-v1.4.md §19.3).
+    (``_build_routed_llm_client``, implement-plan.md Part II §19.3).
     """
     if provider == "fake":
         from llmwiki.llm.fake import FakeLLM
@@ -267,7 +267,7 @@ def _construct_provider_client(
 
     if provider == "anthropic":
         # Native adapter: prompt caching and measured cost live here, so
-        # Anthropic does not go through LangChain (plan-v1.4 7.5).
+        # Anthropic does not go through LangChain (plan II §7.5).
         from llmwiki.llm.anthropic_client import AnthropicLLM
 
         return AnthropicLLM(

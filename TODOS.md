@@ -4,6 +4,48 @@ Future-planning items that are not yet scheduled into a phase. Each entry
 records what is known so the work can be picked up without re-deriving it.
 Move an item to `HISTORY.md` when it lands.
 
+## Reconcile with `~/branch/llm-wiki-svc` (Phase 1.x) — stashed work (2026-09-25)
+
+This tree (Phase 2, `ef96cca`) and `~/branch/llm-wiki-svc` split after
+`8a1ceb2` "Complete Phase 1". Each has work the other lacks:
+
+- **Stashed here** — `git stash list` →
+  *"phase1-testing-guide §6 production capture setup + cloudflared tunnel
+  profile (2026-09-19)"*. It holds uncommitted changes to four files:
+  - `docs/phase1-testing-guide.md`: a new §6 on production setup of the
+    capture channels (6.0 Tunnel vs. Access, a named tunnel with connector
+    options A/B/C, `healthz` decision table, Telegram, optional Access
+    bypass for `/channels/*`, Mailgun, dev vs. production).
+  - `docker-compose.yml`: an optional `cloudflared` service behind the
+    `tunnel` profile, with origin `http://api:8000`.
+  - `.env.example`: `CLOUDFLARE_TUNNEL_TOKEN`.
+  - `HISTORY.md`: a 2026-09-19 entry describing the above.
+
+  Mostly docs; no Python change. Restore with `git stash apply` (find its
+  index with `git stash list`; `stash@{0}` when stashed).
+- **Only in `~/branch`** (7 commits through `d619816`, "deploy Telegram Bot
+  to production"; no Phase 2):
+  - `scripts/telegram_webhook.py` + the `telegram-webhook` compose
+    one-shot, `docker-compose-cloudflared.yml` (tunnel as its own project,
+    joined over the `llmwiki-net` network at `llmwiki-api:8000`),
+    `.env.cloudflared.example`, `docs/runbook-hostinger.md`.
+  - `scripts/sync_wiki.py` (mirrors the R2 wiki locally for Obsidian) and
+    `scripts/verify_capture.py`.
+  - `YOUTUBE_PROXY_URL` / `YOUTUBE_COOKIES_PATH` / `YOUTUBE_WHISPER_MODEL`,
+    and Telegram now captures after replying 200.
+  - The two implementation plans merged into `docs/implement-plan.md`
+    v1.5.
+  - A fix for empty `.env` values with inline comments.
+
+**To do.** Bring the branch's commits onto this Phase 2 tree (merge or
+cherry-pick). **Pick one production tunnel design** — the branch's
+separate-project + one-shot (what production runs today) or the stash's
+in-compose `tunnel` profile — then either drop the stash or rewrite its §6
+to match. Expect conflicts in `HISTORY.md`, `.env.example`,
+`docker-compose.yml`, `docs/phase1-testing-guide.md` and the
+implementation-plan files (`implement-plan-v1.4.md` vs. the merged
+`implement-plan.md`).
+
 ## Deferred from the Phase 2 design (2026-09-18)
 
 Recorded when design v1.4 §4.10 / plan §21 were locked. None is scheduled;

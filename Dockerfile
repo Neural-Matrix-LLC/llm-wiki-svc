@@ -23,6 +23,10 @@ RUN pip install -r requirements.txt
 COPY pyproject.toml README.md ./
 COPY src/ ./src/
 RUN pip install --no-deps .
+# Optional Whisper tier (YOUTUBE_WHISPER_MODEL): torch is ~2 GB, so only on
+# request. `docker compose build` reads WITH_WHISPER from .env / the shell.
+ARG WITH_WHISPER=0
+RUN if [ "$WITH_WHISPER" = "1" ]; then pip install ".[whisper]"; fi
 
 
 # Development image (docker compose --profile dev up). Same dependency layer as
@@ -78,6 +82,15 @@ ENV PYTHONUNBUFFERED=1 \
 RUN useradd --create-home --uid 10001 llmwiki \
     && mkdir -p /data \
     && chown llmwiki:llmwiki /data
+# ffmpeg only with the Whisper tier (see the build stage): yt-dlp needs it to
+# extract audio and Whisper to decode it. Whisper caches its model weights
+# under ~/.cache/whisper on first use - see docker-compose.yml for the volume.
+ARG WITH_WHISPER=0
+RUN if [ "$WITH_WHISPER" = "1" ]; then \
+        apt-get update \
+        && apt-get install -y --no-install-recommends ffmpeg \
+        && rm -rf /var/lib/apt/lists/*; \
+    fi
 
 COPY --from=build /opt/venv /opt/venv
 

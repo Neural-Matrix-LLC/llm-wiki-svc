@@ -1,6 +1,6 @@
 """Loads the application-specific multi-provider/per-op routing config.
 
-design v1.4 §4.8.1, implement-plan-v1.4.md §19.2. Two plain, committed Python
+design v1.4 §4.8.1, implement-plan.md Part II §19.2. Two plain, committed Python
 files at the repo root - ``config/providers.py`` and ``config/ops.py`` -
 outside ``src/llmwiki`` entirely, not part of the installed package. Neither
 holds a secret: ``providers.py`` names which environment variable carries each
@@ -27,7 +27,7 @@ logger = logging.getLogger(__name__)
 # Duplicated here, deliberately, rather than shared: Settings only knows its
 # own fixed field names, but a provider row's api_key_env/base_url_env names
 # an arbitrary variable not known until config/providers.py itself is read -
-# see implement-plan-v1.4.md §19.9 item on os.environ access in this slice.
+# see implement-plan.md Part II §19.9 item on os.environ access in this slice.
 DOTENV_PATH = Path(".env")
 
 # Every op name the codebase actually calls llm.complete(op=...) with.

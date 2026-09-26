@@ -1,4 +1,4 @@
-"""Per-op routing table - design v1.4 §4.8.1, implement-plan-v1.4.md §19.2.
+"""Per-op routing table - design v1.4 §4.8.1, implement-plan.md Part II §19.2.
 
 Copy this file to ``config/ops.py`` (``cp config/ops.py.example
 config/ops.py``) alongside an active ``config/providers.py`` - both files are
@@ -31,7 +31,7 @@ OPS = [
     {"op": "plan_compile", "provider": "openrouter", "model": "z-ai/glm-5.3-flash",
      "temperature": 1.0, "max_tokens": 2048},
 
-    # Executor stages: escalated to a stronger model (plan-1.1 D5's reasoning,
+    # Executor stages: escalated to a stronger model (plan I D5's reasoning,
     # now a per-op row instead of the old COMPILE_EXECUTOR_MODEL setting).
     {"op": "create_page", "provider": "openrouter", "model": "z-ai/glm-5.3-flash",
      "temperature": 1.0, "max_tokens": 4096},

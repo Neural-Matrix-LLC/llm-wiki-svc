@@ -34,7 +34,8 @@ dependencies = [
     "python-frontmatter",
     "trafilatura",
     "uvicorn",
-    "youtube-transcript-api",
+    "youtube-transcript-api>=1.0",  # proxy_config= on the constructor
+    "yt-dlp",  # YOUTUBE_COOKIES_PATH path: captions via a logged-in session
 ]
 
 [project.optional-dependencies]
@@ -51,6 +52,13 @@ dependencies = [
 # LangChain provider's own instrumentation. Off (LANGSMITH_TRACING=false) costs
 # nothing and imports nothing - see llm/anthropic_client.py and factory.py.
 langsmith = ["langsmith>=0.3"]
+
+# Last-resort YouTube tier (YOUTUBE_WHISPER_MODEL, extractors/youtube.py): a
+# video with no captions has its audio transcribed locally. openai-whisper
+# pulls torch (~2 GB) and needs ffmpeg on PATH, so it is an extra and not in
+# requirements.txt / the default image - `docker compose build` with
+# WITH_WHISPER=1 adds both.
+whisper = ["openai-whisper"]
 
 # langsmith is a dev dependency so the tracing-wrap test can monkeypatch it
 # without requiring LANGSMITH_TRACING=true.

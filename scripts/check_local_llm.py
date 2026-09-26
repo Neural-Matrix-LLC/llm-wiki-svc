@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Diagnose a self-hosted vLLM / llama.cpp endpoint before flipping local routing on.
 
-Phase 1-C (KB design §5, implement-plan-v1.4.md §7.4's 2026-09-14 addendum).
+Phase 1-C (KB design §5, implement-plan.md Part II §7.4's 2026-09-14 addendum).
 ``config/providers.py`` gives ``vllm`` and ``llamacpp`` their own
 ``*_API_KEY``/``*_BASE_URL`` pairs; ``config/ops.py`` decides which ops go
 there. Everything between those two files and a working compile is what this
