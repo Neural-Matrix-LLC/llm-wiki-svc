@@ -5,7 +5,6 @@ model, and the model can never file a source under a domain that is not
 registered - an unknown name or a low confidence becomes ``general`` with the
 pick preserved as ``suggested_domain``.
 """
-"""RoutingLLMClient dispatch - implement-plan.md Part II §19.3/§19.7.3."""
 
 from __future__ import annotations
 

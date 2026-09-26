@@ -87,20 +87,16 @@ def ingest(request: IngestRequest, background: BackgroundTasks) -> SourceRef:
     PDF; ``{"text": ...}`` stores the string itself as the immutable source.
     Files go to ``POST /upload`` instead.
     """
-    
     logger.debug(" /ingest request: %s", request)
     try:
         ref = tools.ingest_source(url=request.url, text=request.text, title=request.title,
                                   domain=request.domain)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=f"no such domain: {exc.args[0]!r}") from exc
-
-    #     ref = tools.ingest_source(url=request.url, text=request.text, title=request.title)
-    # except tools.ExtractionError as exc:
-    #     # The URL could not be fetched (YouTube refusing a cloud IP, a dead
-    #     # link): the request is well-formed, the source is not obtainable.
-    #     raise HTTPException(status_code=422, detail=str(exc)) from exc
-
+    except tools.ExtractionError as exc:
+        # The URL could not be fetched (YouTube refusing a cloud IP, a dead
+        # link): the request is well-formed, the source is not obtainable.
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     if not ref.duplicate:
         background.add_task(tools.enqueue_source, ref.source_id)
     return ref
