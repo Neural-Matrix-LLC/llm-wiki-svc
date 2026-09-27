@@ -215,6 +215,9 @@ llmwiki synthesize --all                                               # per-dom
 # Hybrid retrieval (on by default): build the keyword index once, then it keeps itself.
 llmwiki lexical rebuild
 python scripts/migrate_phase2.py --check    # the one-time upgrade steps, or --apply
+# Optional: file the pre-Phase-2 corpus (all `general`) under registered domains.
+python scripts/migrate_domains.py plan --out domain-plan.json        # one route_domain call per source
+python scripts/migrate_domains.py apply --plan domain-plan.json --yes # re-embed + compile into the domain
 
 # Cost: usage, alerts, the hard cap.
 llmwiki usage --month 2026-09
@@ -258,6 +261,62 @@ docker compose --profile dev build dev            # only after a dependency chan
 It runs as `DEV_UID:DEV_GID` (default `1000:1000`) so files it writes through
 the mounts — `./.data`, caches — stay owned by you rather than by root. Check
 with `id -u` and override in `.env` if your ids differ.
+
+### Running commands in a production container (no source checkout)
+
+The runtime image carries everything the operational commands need, so the box
+needs only `docker-compose.yml` and `.env` - no clone, no venv:
+
+| In the image | So you can run |
+|---|---|
+| `/opt/venv/bin/llmwiki` (on `PATH`) | every `llmwiki …` subcommand |
+| `/app/scripts/` | `python scripts/<name>.py` |
+| `/app/config/`, `/app/skills/` | the same routing table and skills the service uses |
+| `/app/tests/fixtures/` | `scripts/smoke_flow.py --offline` and other offline modes |
+
+There is no `.env` file inside the container; `load_settings()` falls back to
+the environment Compose injects from the box's `.env` (`env_file:`), which is
+the one `api` runs with. From the directory holding `docker-compose.yml`:
+
+```bash
+# Inside the running api container - same env, same uid, nothing new starts
+docker compose exec api llmwiki --help            # which subcommands this image has
+docker compose exec api llmwiki status
+docker compose exec api llmwiki domains list
+docker compose exec api llmwiki ask "what is attention?"
+docker compose exec api python scripts/check_cloudflare_setup.py --quick
+
+# In a throwaway container from the same image, env and /data mount -
+# works while api is stopped, and reads the *current* .env
+docker compose run --rm api python scripts/migrate_phase2.py --check
+docker compose run --rm api python scripts/reset_vectorize.py    # dry run; --yes to act
+docker compose run --rm api llmwiki lexical rebuild
+# /data is ./.data on the host, so the plan file can be reviewed there before apply
+docker compose run --rm api python scripts/migrate_domains.py plan --out /data/domain-plan.json
+docker compose run --rm api python scripts/migrate_domains.py apply --plan /data/domain-plan.json --yes
+```
+
+`run --rm` does not publish `API_PORT`, so it never clashes with a running
+`api`. Things to know:
+
+- **`exec` sees the environment the container was created with.** After
+  editing `.env`, `docker compose up -d --force-recreate` first, or use
+  `run --rm`.
+- **The commands are those of the image, not of your checkout.** A subcommand
+  or script added after the `IMAGE_TAG` you run is not there until you pull a
+  newer tag (`llmwiki --help` / `ls scripts/` tell you).
+- **Host files are not visible.** To ingest a local PDF, `POST /upload` it, or
+  copy it in first: `docker compose cp paper.pdf api:/tmp/` then
+  `docker compose exec api llmwiki ingest --file /tmp/paper.pdf`.
+- **A CLI `ingest` compiles in its own process** (`inline` worker mode), outside
+  the service's per-domain lock. Fine on a quiet box; while captures may be
+  arriving for the same domain, prefer `POST /ingest`.
+- **Never `llmwiki serve`** - `api` already serves port 8000.
+- **Not in the image:** `scripts/sync_wiki.py` needs `rclone` and a local vault,
+  so run it from a checkout on the machine that holds the vault.
+- Scripts that call the service (`verify_capture.py`) default to
+  `localhost:$API_PORT`, which is `8000` inside the container - right for
+  `exec`; pass `--base-url` otherwise.
 
 ## Layout
 

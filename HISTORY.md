@@ -5,6 +5,123 @@ reverse-chronological order. See `CLAUDE.md` for the rule this file follows.
 
 ---
 
+## 2026-09-26 — `scripts/migrate_domains.py`: file pre-Phase-2 sources under domains
+
+**Goal.** A deployment upgraded with `migrate_phase2.py` keeps every existing
+source in `general`, and moves nothing. That is by design: `general` *is* the
+Phase 0/1 layout, with the same R2 keys and the same Vectorize indexes. Once
+domains are registered, the operator wants the existing corpus filed under them
+too: R2 wiki pages under `wiki/domains/{d}/`, and chunks in `{chunks}-{d}`.
+This is the "`domains reassign`" item that `TODOS.md` and the Phase 2
+code-review plan left undesigned.
+
+**Implementation.**
+
+- `IngestPipeline.propose_domain(source_id)` makes one `route_domain` call for
+  a captured source. The call is ledgered like `route()`. Nothing is
+  persisted.
+- `IngestPipeline.reassign(source_id, assignment)` does the move in a
+  deliberate order:
+  1. embed the source into the target domain's chunk index;
+  2. compile it into the target domain (under that domain's lock);
+  3. only if the compile did not abort, rewrite `raw/{id}/routing.json`;
+  4. delete the source's chunks from the old domain's vector and lexical
+     index;
+  5. update `status/{id}.json`'s `domain`.
+
+  A crash midway leaves the source routed to its old domain, and a re-run
+  finishes the move. `raw/` originals are never touched.
+- `wiki/reassign.py:prune_moved_sources` is deterministic and makes no LLM
+  call. It deletes the old domain's pages every source of which moved (source
+  notes, plus concept/entity pages only they produced) and their manifest rows,
+  then re-renders `index.md` and drops their gist vectors through
+  `delete_by_ids` when the store has it. The overview page is never pruned.
+  Pages that also cite a source that stayed are kept and reported; their
+  citations still resolve, because `raw/` never moves.
+- `tools.propose_domain`, `tools.reassign_source` and
+  `tools.prune_moved_sources` wrap these. `prune_moved_sources` also rebuilds
+  that domain's keyword index, because the lexical protocol has no
+  delete-by-id. None of the three is an MCP tool.
+- `MemoryVectorStore.delete_by_ids`, the same optional extra
+  `VectorizeStore` already had.
+- `scripts/migrate_domains.py` has two stages:
+  - `plan` covers every source routed to `general` by default; sources a
+    caller named `general` at capture are left alone. It routes each one, or
+    sends them all to one domain with `--default DOMAIN` and no LLM call, and
+    writes an editable JSON file.
+  - `apply --plan FILE` is a dry run without `--yes`. It skips
+    unregistered targets and sources already moved, then prunes.
+  - `--offline` works as in `migrate_phase2.py`.
+- Docs:
+  - README: a dev block and a production-container block.
+  - `docs/runbook-hostinger.md` §D step 3: a comparison table of
+    `migrate_phase2.py` and `migrate_domains.py`, split into 3a (required)
+    and 3b (optional). Rollback notes what each migration means for an older
+    image.
+  - `scripts/README.md`.
+  - Technical document §12.5.
+  - `CLAUDE.md`.
+  - `TODOS.md`: the mechanism has landed; a single-source CLI/REST surface is
+    still owed.
+  - `docs/domain-migration-code-review-plan.md`.
+
+**Deviation.** `TODOS.md` sketched "a lint pass on the pages that still list
+it". Instead, pages whose sources all moved are pruned, and mixed pages are
+kept unchanged. Their text still reflects the moved source, but no LLM rewrite
+is spent on removing it.
+
+**Related files.** `src/llmwiki/pipeline/ingest.py`, `src/llmwiki/wiki/reassign.py`
+(new), `src/llmwiki/tools.py`, `src/llmwiki/vector/memory.py`,
+`scripts/migrate_domains.py` (new), the docs above.
+
+**Tests.** 5 new; none removed or weakened.
+- `tests/unit/test_reassign.py` (new, 4 tests):
+  - a move changes routing, chunk and lexical indexes, the target manifest
+    and the status;
+  - a same-domain move and an unregistered target are refused;
+  - `propose_domain` persists nothing;
+  - pruning removes only pages whose sources all moved, keeps mixed pages
+    and the overview, and drops the gist vectors and the index lines.
+- `tests/unit/test_phase1_scripts.py::test_migrate_domains_plan_then_apply_offline`
+  runs the script end to end as a subprocess: plan, dry run, apply, then a
+  re-run that is a no-op.
+
+Suite: 802 passed, 1 skipped, with `LANGSMITH_TRACING=false`. With this
+checkout's `.env` setting tracing on, 5 tracing tests fail, as they did before
+this change.
+
+---
+
+## 2026-09-26 — Docs: running `llmwiki` and scripts inside the production container
+
+**Goal.** An operator on the VPS has no source checkout, only
+`docker-compose.yml` and `.env`. They need a documented way to run
+`llmwiki …` subcommands and `scripts/*.py` (release-time steps such as
+`migrate_phase2.py`, resets and diagnostics) inside the deployed image.
+
+**Implementation.** Documentation only; no code changed.
+
+- `README.md` → Docker gains "Running commands in a production container
+  (no source checkout)". It covers what the runtime image carries
+  (`/opt/venv/bin/llmwiki`, `/app/scripts`, `config/`, `skills/`,
+  `tests/fixtures/`), and that there is no `.env` file inside the container:
+  settings come from Compose's `env_file:`. It explains when to use
+  `docker compose exec api …` and when to use `docker compose run --rm api …`,
+  and lists the caveats: `exec` keeps the environment the container was
+  created with; the commands are the image's, not the checkout's; host files
+  must be uploaded or copied in with `docker compose cp`; a CLI `ingest`
+  compiles outside the service's per-domain lock; never run `serve`;
+  `sync_wiki.py` needs `rclone`, which is not in the image.
+- `docs/runbook-hostinger.md` §D (every later release) gains step 3, which
+  runs one-time release steps from the new image. §E gains two rows: run an
+  `llmwiki` command, and run a script.
+
+**Related files.** `README.md`, `docs/runbook-hostinger.md`.
+
+**Tests.** None added or removed; documentation only.
+
+---
+
 ## 2026-09-19 — Phase 2 P2-Z: migration script, smoke coverage, documentation
 
 **Goal.** The last milestone of plan §21.9: make the Phase 2 code

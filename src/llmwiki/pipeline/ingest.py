@@ -21,7 +21,7 @@ from llmwiki.embedding.base import Embedder
 from llmwiki.extractors.base import ExtractionError, detect_modality, get_extractor
 from llmwiki.lexical.base import LexicalIndex
 from llmwiki.llm.base import LLMClient
-from llmwiki.models.plan import CostRecord
+from llmwiki.models.plan import CompileResult, CostRecord
 from llmwiki.models.source import (
     DomainAssignment,
     ExtractedDoc,
@@ -362,6 +362,77 @@ class IngestPipeline:
         except ObjectNotFound:
             return DomainAssignment(domain=GENERAL, reason="pre-Phase-2 source")
         return DomainAssignment.model_validate_json(raw)
+
+    # -- reassignment (moving a captured source to another domain) ---------------------
+
+    def propose_domain(self, source_id: str) -> DomainAssignment:
+        """What the router would decide for an already-captured source; persists nothing.
+
+        One ``route_domain`` call (ledgered like :meth:`route`'s) unless the
+        registry holds only ``general``. Used to plan moving pre-Phase-2
+        sources out of ``general`` (``scripts/migrate_domains.py``).
+        """
+        registry = load_registry(self.store)
+        if registry.is_general_only:
+            return DomainAssignment(domain=GENERAL, reason="no domains registered")
+        from llmwiki.wiki.router import DomainRouter
+
+        meta = self.load_meta(source_id)
+        doc = self.extract(meta)
+        router = DomainRouter(self.llm, registry,
+                              min_confidence=self.settings.domain_route_min_confidence)
+        assignment, usage = router.route_source(doc)
+        if usage:
+            CostLedger(self.store, writer=self.settings.cost_writer).append(
+                usage, kind="ingest", domain=assignment.domain, source_id=source_id,
+            )
+        return assignment
+
+    def reassign(self, source_id: str, assignment: DomainAssignment) -> CompileResult:
+        """File an already-captured source under ``assignment.domain``.
+
+        Order matters for a re-run after a failure: chunks are embedded into the
+        new domain's index and the source is compiled into the new domain's
+        wiki *first*; only then is ``routing.json`` rewritten and the old
+        index's chunks deleted. A crash in between leaves the source routed to
+        its old domain, and running again finishes the move (upserts are
+        idempotent; a source the new manifest already holds is not recompiled).
+
+        The old domain's pages are left alone here - a page can be synthesized
+        from several sources. :func:`llmwiki.wiki.reassign.prune_moved_sources`
+        removes the ones every source of which has moved.
+        """
+        registry = load_registry(self.store)
+        target = require_domain(registry, assignment.domain)
+        old = self.load_routing(source_id).domain
+        if old == target:
+            raise ValueError(f"{source_id} is already in domain {target!r}")
+        meta = self.load_meta(source_id)
+        doc = self.extract(meta)
+        with domain_lock(target):
+            self._embed(doc, target)
+            result = Compiler(
+                self.store, self.vectors, self.embedder, self.llm, self.settings,
+                lexical=self.lexical,
+            ).compile_source(doc, domain=target, prior_costs=self._vision_costs)
+        if result.aborted:
+            return result
+        self.store.put(
+            raw_routing(source_id),
+            assignment.model_copy(update={"domain": target}).model_dump_json(indent=2)
+            .encode("utf-8"),
+            "application/json",
+        )
+        with domain_lock(old):
+            old_index = domain_index_name(self.settings.vectorize_chunks_index, old)
+            self.vectors.delete_by_source(old_index, source_id)
+            if self.lexical is not None:
+                self.lexical.delete_by_source(old_index, source_id)
+        status = self.get_status(source_id)
+        status.domain = target
+        self.set_status(status)
+        logger.info("reassign: source_id=%s %s -> %s", source_id, old, target)
+        return result
 
     def _embed(self, doc: ExtractedDoc, domain: str = GENERAL) -> int:
         chunks = chunk_document(

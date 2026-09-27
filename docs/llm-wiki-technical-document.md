@@ -2226,7 +2226,20 @@ the three one-time steps: build the keyword index from `raw/`
 partitioned keys, and `ensure_index` for any registered domain. Then
 register domains (`llmwiki domains add …`), optionally set thresholds and a
 Telegram chat for alerts, and flip `VISION_MODE=auto` once `describe_image`
-is routed to a vision-capable model. `docs/phase2-testing-guide.md` is the
+is routed to a vision-capable model.
+
+Filing the existing corpus under domains is optional and separate:
+`scripts/migrate_domains.py plan` asks the router for each `general` source
+(`IngestPipeline.propose_domain`; persists nothing) and writes a reviewable
+JSON plan; `apply` calls `tools.reassign_source` per row
+(`IngestPipeline.reassign`: embed into `{chunks}-{d}` and compile into `d`
+first, then rewrite `routing.json` and delete the old domain's chunks, so a
+re-run after a crash finishes the move) and then
+`tools.prune_moved_sources` (`wiki/reassign.py`: delete the old domain's
+pages *every* source of which moved, drop their gist vectors via
+`delete_by_ids`, rebuild that domain's keyword index; pages that also cite a
+source that stayed are kept, and their citations still resolve because
+`raw/` never moves). Neither is an MCP tool. `docs/phase2-testing-guide.md` is the
 manual pass/fail plan.
 
 ---

@@ -368,9 +368,55 @@ mounted → secret enforced.
    ```
    Leave the tunnel running. It keeps its place on `llmwiki-net` while `api`
    is recreated, so the only downtime is the api restart.
+3. If the release notes name a one-time step (for example the Phase 2
+   upgrade), run it from the new image. No source checkout is needed on the
+   box, because the image carries `llmwiki`, `scripts/`, `config/` and
+   `skills/`.
+
+   The Phase 2 upgrade has two scripts. `migrate_phase2.py` is required and
+   moves nothing. `migrate_domains.py` is optional and moves existing sources
+   into domains:
+
+   | | `migrate_phase2.py` | `migrate_domains.py` |
+   |---|---|---|
+   | **Purpose** | Upgrade a deployment so Phase 2 features work | File the old corpus under the domains you register |
+   | **Required?** | Yes, once, after the Phase 2 image is running | No. Without it, old sources stay in `general`, which works fine |
+   | **Moves data?** | No | Yes |
+   | **What it changes** | 1. Builds the SQLite keyword index from `raw/`. Until then, search uses only the vector index.<br>2. Moves the old single-file cost ledger into per-day files.<br>3. Creates the Vectorize indexes of registered domains if they are missing. | For each source that moves:<br>- re-embeds its chunks into `{chunks}-{d}` and removes them from the `general` index<br>- compiles it into `wiki/domains/{d}/`<br>- updates `raw/{id}/routing.json`<br>- deletes the `general` pages whose sources all moved |
+   | **LLM cost** | None | `plan`: one routing call per source, or none with `--default`.<br>`apply`: one normal compile per moved source. |
+   | **Modes** | `--check` (exits 1 while something is left to do) / `--apply` | `plan --out FILE`, then you review the file, then `apply --plan FILE [--yes]` |
+   | **Needs domains registered?** | No | Yes. Run `llmwiki domains add …` first. |
+   | **Safe to re-run?** | Yes. `--check` then reports "nothing to do". | Yes. Sources already moved are skipped. |
+
+   **3a. Required: make the deployment Phase 2 ready.**
+   ```bash
+   docker compose exec api llmwiki --help                          # the new subcommands are there
+   docker compose run --rm api python scripts/migrate_phase2.py --check   # exit 1 = something to do
+   docker compose run --rm api python scripts/migrate_phase2.py --apply
+   ```
+   Nothing moves in this step. Sources captured before Phase 2 stay in
+   `general`, whose R2 keys and Vectorize indexes are unchanged.
+
+   **3b. Optional: move the old sources into domains.** Register the domains,
+   then plan. Review `./.data/domain-plan.json` on the host, then apply. Run
+   this while nothing is being captured:
+   ```bash
+   docker compose exec api llmwiki domains add ml-systems --description "…"
+   docker compose run --rm api python scripts/migrate_domains.py plan --out /data/domain-plan.json
+   docker compose run --rm api python scripts/migrate_domains.py apply --plan /data/domain-plan.json         # dry run
+   docker compose run --rm api python scripts/migrate_domains.py apply --plan /data/domain-plan.json --yes
+   docker compose exec api llmwiki synthesize --all
+   ```
+   For `exec` vs `run --rm`, what is and isn't in the image, and ingesting a
+   host file, see README "Running commands in a production container".
 
 **Rollback:** set `IMAGE_TAG` back to the previous version, then run `pull` and
-`up -d` again.
+`up -d` again. Rolling back past Phase 2 after the migrations has two side
+effects:
+- The older image reads the cost history only from the single-file ledger,
+  which `migrate_phase2.py` moved. `llmwiki cost` there starts from zero.
+- The older image reads only `general`. Sources moved by `migrate_domains.py`
+  are invisible to it until you roll forward again.
 
 ---
 
@@ -383,6 +429,8 @@ mounted → secret enforced.
 | Check the webhook | `docker compose run --rm telegram-webhook info` |
 | Remove the webhook | `docker compose run --rm telegram-webhook delete` (add `--drop-pending` to discard queued updates) |
 | Logs | `docker compose logs -f api` · `cd /docker/cloudflared && docker compose logs -f` |
+| Run an `llmwiki` command | `docker compose exec api llmwiki <cmd>` (e.g. `status`, `domains list`, `usage`) |
+| Run a script | `docker compose run --rm api python scripts/<name>.py` (works while `api` is stopped) |
 | Weekly global lint (host cron) | `cd /docker/llmwiki && docker compose --profile ops run --rm lint` |
 | Rotate the tunnel token | edit `/docker/cloudflared/.env`, then `cd /docker/cloudflared && docker compose up -d --force-recreate` |
 | Full stop | **tunnel first**: `cd /docker/cloudflared && docker compose down`, then `cd /docker/llmwiki && docker compose down`. llmwiki's `down` removes `llmwiki-net`, and it fails while cloudflared is still attached |

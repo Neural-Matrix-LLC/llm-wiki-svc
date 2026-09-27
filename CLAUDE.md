@@ -40,7 +40,10 @@ recovered at startup). **Multimodal** — `VisionLLMClient.describe()` as a
 separate optional protocol (`complete()` untouched), `pipeline/describe.py`
 with the `raw/{id}/vision.json` cache, `extractors/image.py`, PDF
 page-as-image selection; `VISION_MODE=off` by default. `KNOWN_OPS` is 10.
-Upgrading a deployment is `scripts/migrate_phase2.py --check|--apply`.
+Upgrading a deployment is `scripts/migrate_phase2.py --check|--apply`; filing
+the pre-Phase-2 corpus under registered domains is the optional
+`scripts/migrate_domains.py plan|apply` (`IngestPipeline.reassign`,
+`wiki/reassign.py`; 2026-09-26, `tests/unit/test_reassign.py`).
 
 The query agent is a bounded LangGraph loop over the existing `LLMClient`
 (`src/llmwiki/agent/graph.py`): `AGENT_MAX_TOOL_CALLS` (default 4; `0` = the

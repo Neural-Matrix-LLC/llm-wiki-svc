@@ -36,15 +36,17 @@ from llmwiki.models.plan import (
     Verdict,
     WorkerStatus,
 )
-from llmwiki.models.source import SourceRef, SourceStatus
+from llmwiki.models.source import DomainAssignment, SourceRef, SourceStatus
 from llmwiki.pipeline.ingest import IngestPipeline
 from llmwiki.storage.base import ObjectNotFound
 from llmwiki.storage.layout import GENERAL, domain_index_name, is_source_id
 from llmwiki.wiki import domains as domains_mod
 from llmwiki.wiki import gists as gists_mod
 from llmwiki.wiki import lint as lint_mod
+from llmwiki.wiki import reassign as reassign_mod
 from llmwiki.wiki.compiler import Compiler
 from llmwiki.wiki.pages import read_page
+from llmwiki.wiki.reassign import PruneResult
 
 # ``ExtractionError`` is re-exported here for transports (api/, channels/ -
 # which the layering rule keeps away from extractors/) so a failed URL fetch
@@ -229,6 +231,43 @@ def remove_domain(name: str, force: bool = False, cfg: Settings | None = None) -
     """Unregister a domain. Refuses while it still holds pages unless ``force``."""
     store, _, _, _, cfg = _components(cfg)
     return domains_mod.remove_domain(store, name, force=force)
+
+
+def propose_domain(source_id: str, cfg: Settings | None = None) -> DomainAssignment:
+    """The router's pick for an already-captured source. Persists nothing but the ledger line."""
+    return _pipeline(cfg).propose_domain(source_id)
+
+
+def reassign_source(
+    source_id: str,
+    domain: str,
+    *,
+    confidence: float = 1.0,
+    reason: str = "reassigned",
+    cfg: Settings | None = None,
+) -> CompileResult:
+    """Move a captured source to another registered domain (re-embed + compile there).
+
+    Admin/ops only - not an MCP tool. The old domain keeps its pages; run
+    :func:`prune_moved_sources` once a batch of moves is done.
+    """
+    assignment = DomainAssignment(domain=domain, confidence=confidence, reason=reason,
+                                  explicit=True)
+    result = _pipeline(cfg).reassign(source_id, assignment)
+    _evaluate_alerts(result.cost_usd, cfg)
+    return result
+
+
+def prune_moved_sources(
+    domain: str, moved: set[str], dry_run: bool = False, cfg: Settings | None = None,
+) -> PruneResult:
+    """Drop ``domain``'s pages every source of which moved away, then refresh its keyword index."""
+    store, vectors, _, _, cfg = _components(cfg)
+    result = reassign_mod.prune_moved_sources(store, vectors, cfg.vectorize_gists_index,
+                                              domain, moved, dry_run=dry_run)
+    if result.removed and factory.lexical_index(cfg) is not None:
+        rebuild_lexical(domain, cfg=cfg)
+    return result
 
 
 # --- helpers, not exposed over MCP ----------------------------------------

@@ -98,6 +98,15 @@ class MemoryVectorStore:
                 del store[key]
             return len(doomed)
 
+    def delete_by_ids(self, index: str, ids: list[str]) -> int:
+        """Delete specific ids - the same optional extra :class:`VectorizeStore` has."""
+        with self._lock:
+            store = self._index(index)
+            doomed = [key for key in ids if key in store]
+            for key in doomed:
+                del store[key]
+            return len(doomed)
+
 
 def _matches(meta: dict, where: dict | None) -> bool:
     if not where:

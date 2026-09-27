@@ -12,6 +12,7 @@ plus one offline end-to-end run of the probe, the same way smoke_flow.py
 from __future__ import annotations
 
 import importlib.util
+import json
 import os
 import subprocess
 import sys
@@ -308,3 +309,54 @@ def test_migrate_phase2_check_then_apply_offline(tmp_path) -> None:
 
     recheck = run("--check")
     assert recheck.returncode == 0 and "nothing to do" in recheck.stdout
+
+
+# --- scripts/migrate_domains.py ----------------------------------------------------------------
+
+
+def test_migrate_domains_plan_then_apply_offline(tmp_path) -> None:
+    """plan routes each general source; apply moves it, prunes general, and is re-runnable."""
+    from llmwiki import factory, tools
+    from llmwiki.config import Settings
+
+    data = tmp_path / "data"
+    cfg = Settings(_env_file=None, storage_backend="local", vector_backend="memory",
+                   embedding_backend="fake", llm_backend="fake", local_storage_path=data,
+                   embedding_dim=64, worker_mode="inline", lexical_backend="none")
+    factory.reset()
+    try:
+        moving = tools.ingest_now(text="# Robotics\n\nThe robotics arm controller.\n", cfg=cfg)
+        staying = tools.ingest_now(text="# Bread\n\nFlour, water, salt.\n", cfg=cfg)
+        tools.upsert_domain("robotics", "robots and their controllers", cfg=cfg)
+    finally:
+        factory.reset()
+
+    env = {**os.environ, "LOCAL_STORAGE_PATH": str(data), "LANGSMITH_TRACING": "false",
+           "LEXICAL_BACKEND": "sqlite"}
+    plan_file = tmp_path / "plan.json"
+
+    def run(*args: str) -> subprocess.CompletedProcess:
+        return subprocess.run([sys.executable, str(SCRIPTS / "migrate_domains.py"), "--offline",
+                               *args], capture_output=True, text=True, env=env, cwd=REPO,
+                              timeout=120)
+
+    plan = run("plan", "--out", str(plan_file))
+    assert plan.returncode == 0, plan.stdout + plan.stderr
+    rows = {row["source_id"]: row["to"] for row in json.loads(plan_file.read_text())["sources"]}
+    assert rows == {moving.source_id: "robotics", staying.source_id: "general"}
+
+    dry = run("apply", "--plan", str(plan_file))
+    assert dry.returncode == 0 and "Dry run" in dry.stdout
+    assert not (data / "wiki" / "domains" / "robotics" / "sources").exists()
+
+    applied = run("apply", "--plan", str(plan_file), "--yes")
+    assert applied.returncode == 0, applied.stdout + applied.stderr
+    assert "moved 1, failed 0" in applied.stdout
+    routing = json.loads((data / "raw" / moving.source_id / "routing.json").read_text())
+    assert routing["domain"] == "robotics"
+    assert (data / "wiki" / "domains" / "robotics" / "sources" / f"{moving.source_id}.md").exists()
+    assert not (data / "wiki" / "sources" / f"{moving.source_id}.md").exists(), "pruned"
+    assert (data / "wiki" / "sources" / f"{staying.source_id}.md").exists()
+
+    again = run("apply", "--plan", str(plan_file), "--yes")
+    assert again.returncode == 0 and "already in robotics" in again.stdout

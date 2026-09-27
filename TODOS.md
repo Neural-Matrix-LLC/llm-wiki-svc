@@ -77,10 +77,11 @@ each is stated so it can be picked up without re-deriving the decision.
   `Answer` model does not carry per-hit `dense_score`/`rerank_score`, so this
   needs a small additive field (e.g. `Answer.retrieval: list[SearchHit]`
   trimmed) before the script can print them.
-- **`domains reassign`** — moving an already-compiled source to another
-  domain = `delete_by_source` in the old chunk/lexical indexes, re-embed +
-  recompile into the new one, and a lint pass on the pages that still list
-  it. Not needed until a real corpus mis-routes something worth moving.
+- **`domains reassign`** — *mechanism landed 2026-09-26* as
+  `tools.reassign_source` / `tools.prune_moved_sources`, driven in batch by
+  `scripts/migrate_domains.py`. Still owed: a single-source CLI/REST surface
+  (`llmwiki domains reassign <id> <domain>`) and a way to strip a moved
+  source from a kept multi-source page's text.
 - **Rerank-raised wiki confidence** — whether a strong reranker score should
   count as "the wiki answers" when the dense cosine is below
   `WIKI_CONFIDENCE`. Decide from the score distributions
