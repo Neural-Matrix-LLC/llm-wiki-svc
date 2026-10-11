@@ -120,5 +120,5 @@ def test_LOGOUT_08_form_carries_session_csrf(wiki, logged_in):
 
 
 def test_LOGOUT_07_logout_all_from_llm_wiki():
-    pytest.skip("Q-15 (open): design does not offer 'log out everywhere' (SSO /logout-all) in llm-wiki; see "
+    pytest.skip("Q-15 decided (Philip, 2026-10-10): 'log out everywhere' is out of scope for llm-wiki; see "
                 "SESS-31 for the effect of an SSO-side logout-all on an llm-wiki session")

@@ -183,10 +183,8 @@ def test_LOGIN_16_already_signed_in_visit_to_login(wiki, browser_factory, seeded
     b.login("qa_wiki_direct", D.PASSWORD)
     r = b.get("/login?next=//evil.example/x")
     print("Q-08 observed:", r.status_code, r.headers.get("location"))
-    assert r.status_code in (200, 303), r.status_code
-    if r.status_code == 303:
-        loc = r.headers["location"]
-        assert loc.startswith("/") and not loc.startswith("//") and "evil" not in loc, loc
+    # Q-08 confirmed by Philip (2026-10-10): 303 to the sanitised next (off-site -> /dashboard)
+    assert r.status_code == 303 and r.headers["location"] == "/dashboard", (r.status_code, r.headers.get("location"))
 
 
 def test_LOGIN_17_login_page_in_static_mode(cfg):

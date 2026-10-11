@@ -143,6 +143,7 @@ def test_COOKIE_08_session_fixation_new_id_on_login(wiki, browser_factory, seede
     r = b.submit_login_while_signed_in("qa_wiki_direct", D.PASSWORD)   # re-login over an existing session
     assert r.status_code == 303, r.status_code
     assert b.session_value != prev, "a new login must issue a new session id"
+    assert _status_with_cookie(wiki, prev).status_code == 401, "a13bc48: re-login rotates, the old cookie dies"
 
 
 def test_COOKIE_09_failed_relogin_observed(wiki, browser_factory, seeded):
@@ -161,3 +162,5 @@ def test_COOKIE_09_failed_relogin_observed(wiki, browser_factory, seeded):
           f"{'alive' if alive else 'dead'}")
     if b.session_value is None:
         assert not alive, "cookie cleared but the server-side session still works"
+    # Q-10 confirmed by Philip (2026-10-10): a failed re-login keeps the existing session
+    assert b.session_value == prev and alive

@@ -153,3 +153,122 @@ misconfigured"), Q-26 (Max-Age = remaining lifetime), Q-27 (idle 12 h), Q-28 (40
 8. Q-12, Q-19, Q-23: refresh-token `perms`, status/format of failed-login and HTML 403 pages (not pinned).
 9. Design text for the `/mcp` Bearer-only choice and the 60 s `last_seen` granularity (doc only).
 10. PRE-01, PRE-02 and the factory `default_settings` test-isolation issue: ticket them separately (outside SSO scope).
+
+---
+
+# Regression @ 6520890
+
+> **Status: COMPLETE** (2026-10-10, 23:26 PT). Progress log at the end of this section.
+
+## Summary
+
+- **llm-wiki-svc** `feat/sso-login` @ **6520890**, clean apart from QA files; 01f43a8 (our round-1 commit) is an ancestor.
+- **sso-server** `feat/app-permissions` @ **03516ce**, clean; `bae173b..03516ce` = 1 file, `docs/sso-integration-design.md` (+13), docs only.
+- **Doc drift (Info):** the two copies of `sso-integration-design.md` differ in one bullet. The llm-wiki copy (current)
+  has the "successful login rotates the session" note; the sso-server copy lacks it and instead says "only a successful
+  login sets a new session cookie (Q-10)". The behaviour matches the llm-wiki copy.
+- Interpreters checked: every server process (SSO x2, stub, 9 llm-wiki instances) ran on CPython 3.11.14 in the 3.11 run
+  and 3.13.16 in the 3.13 run, including after the restart test (`run/logs/py*/interpreters*.txt`). pytest used the same
+  versions. Ports 8030-8042 only; stopped by recorded PID; all ports free afterwards; throwaway SQLite DBs under `run/state-py*`.
+
+### qa_sso counts (pass / fail / skip; skip includes 1 xfail, JWTV-03)
+
+| Area (file) | py3.11 | py3.13 |
+|---|---|---|
+| 401_403 (SEM) | 16/0/0 | 16/0/0 |
+| auth_matrix | 495/0/135 | 495/0/135 |
+| cookies | 10/0/0 | 10/0/0 |
+| csrf | 58/0/7 | 58/0/7 |
+| fallback (FB) | 29/0/0 | 29/0/0 |
+| jwt_verification | 48/0/1 | 48/0/1 |
+| login | 28/0/0 | 28/0/0 |
+| login_sso_errors | 12/0/0 | 12/0/0 |
+| logout | 10/0/1 | 10/0/1 |
+| mcp_static | 27/0/0 | 27/0/0 |
+| open_redirect | 38/0/0 | 38/0/0 |
+| **r2_fixes (NS/RED/ROT/SID, new)** | **45/6/0** | **45/6/0** |
+| session (incl. 2 restart) | 36/0/1 | 36/0/1 |
+| sso_app_perm_command | 23/0/0 | 23/0/0 |
+| sso_perms (SSO_SUPERUSER_ALL_APPS on and off) | 47/0/0 | 47/0/0 |
+| sso_refresh_perms | 7/0/0 | 7/0/0 |
+| startup | 43/0/0 | 43/0/0 |
+| static_regression (functional + throttle phase) | 100/0/0 + 2 | 100/0/0 + 2 |
+| zy_logs | 6/0/0 | 6/0/0 |
+| zz_throttle (throttle phase) | 20/0/0 | 20/0/0 |
+| **Total** | **1,100 / 6 / 165** | **1,100 / 6 / 165** |
+
+py3.11: the first functional pass (before RED-02/LOG-03 were split and SID-07 added) gave 1076/5/165; the final 3.11 numbers
+come from a full re-run with the final tests (`junit/py3.11-supp.xml`, 1078/6/165 incl. restart) + the throttle phase
+(`junit/py3.11-throttle.xml`). py3.13: `junit/py3.13-{functional,restart,throttle}.xml`.
+
+### The requested checks
+
+| Check | Result |
+|---|---|
+| REG-14b static + `SSO_PROTECT_READS` `/mcp` 401 byte-identical to route 401 | **PASS** (F-02 fixed by 0a41970) |
+| `Cache-Control: no-store`, sso/both (NS-01): GET/POST /login (form, wrong pw, success 303, signed-in 303, `next=//evil`), /dashboard (200, anon 303, bad Bearer 401), /logout (POST 303, GET) | **PASS**, exactly one header each |
+| no-store not spread to API routes (NS-02) | **PASS** |
+| static/static_reads: no Cache-Control on /dashboard (200/401), /login (404), /logout (NS-03); REG-* byte snapshot | **PASS**, byte-identical |
+| Path variants (NS-04) | /dashboard/ and /login/ 307 to the canonical path without no-store, /Dashboard 404 - no content, Info |
+| token= redaction in uvicorn access log (RED-01: `?token=`, `&token=`, `TOKEN=`, `access_token=`, `;token=`, repeated; 200/401/404/405) | **PASS** |
+| Error path: 500 with `?token=` (RED-03) incl. traceback in uvicorn.error | **PASS**, token not logged |
+| Other sinks: all 9 wiki logs, both SSO logs, stub log, whole run (LOG-01..06, LOG-03 strict again) | **PASS** except RED-02 below |
+| Percent-encoded name `?%74oken=<static>` (RED-02) | **FAIL (Low)** - authenticates, logged in clear |
+| Session rotation (ROT-01 same/other user, COOKIE-08) | **PASS**: new id + CSRF, old row deleted, row count unchanged, old cookie JSON 401 / HTML 303 → /login, SSO `/auth/refresh` with old refresh → 401 |
+| Rotation when SSO logout fails (ROT-03: 500 and connection close) | **PASS**: login succeeds, old row deleted, one logout call carrying the old refresh token |
+| Failed re-login keeps the session (ROT-02, COOKIE-09, Q-10) / GET /login signed in 303 → /dashboard (LOGIN-16, Q-08) | **PASS** |
+| GET /sources/<malformed> (SID-01, 6 ids x static/both) | **PASS** 404, no traceback |
+| POST /compile/<malformed> (SID-03), the other HTTP route taking an id | **FAIL (Low)** 500 |
+| MCP compile_update malformed (SID-04) | **PASS** `isError: true`, "not a valid source_id: '...'" |
+| MCP tools taking ids (SID-05) | compile_update is the only one; inventory pinned |
+| CLI `compile`/`source` malformed (SID-06, incl. `""`, `../../etc/passwd`) | **PASS** exit 1, one line on stderr, no traceback |
+| Well-formed unknown id on compile (SID-07, pre-existing PRE-03) | **FAIL (Low, pre-existing)** HTTP 500, CLI traceback |
+
+### Failures
+
+**F-R2-01 (Low) POST /compile/<malformed id> → 500, not 404.** `src/llmwiki/api/routes.py:433-435` calls
+`tools.compile_update` without the `except tools.InvalidSourceId` mapping that `source_status` (routes.py:321-327) got;
+6520890 claims "one InvalidSourceId for HTTP, MCP and CLI". Protected route (token needed), no detail leaked, but the
+uvicorn.error log gets a full traceback per call.
+Repro: `curl -si -X POST -H "Authorization: Bearer $STATIC" http://127.0.0.1:8035/compile/qa-no-such-source` →
+`HTTP/1.1 500 Internal Server Error` / `Internal Server Error`; expected 404 `{"detail":"not a valid source_id"}`.
+Same on both mode (8031). Fix: the same try/except as `source_status`.
+
+**F-R2-02 (Low) token redaction misses a percent-encoded parameter name.** `src/llmwiki/config.py:24` matches the literal
+text `token=`; uvicorn logs the raw query, while Starlette decodes `%74oken` to `token`, so the request authenticates and
+the static token is logged in clear. Repro: `curl -s -o /dev/null "http://127.0.0.1:8035/dashboard?%74oken=$STATIC"`
+→ 200; `wiki-static.log`: `"GET /dashboard?%74oken=qa-static-... HTTP/1.1" 200 OK`. Expected `[redacted]`. Only a client
+that deliberately encodes the name triggers it (browsers and our scripts don't). Fix: redact by parsing the query with
+`urllib.parse.parse_qsl` and comparing decoded names, or percent-decode before matching.
+
+**PRE-03 (Low, pre-existing, not a regression) compile of a well-formed but unknown id.** `tools.py:235`
+`pipeline.load_meta` raises `ObjectNotFound`, not mapped anywhere: `POST /compile/00000000000000aa` → 500 (traceback in
+the log), `llmwiki compile 00000000000000aa` → exit 1 with a traceback. `GET /sources/<same id>` answers 200
+`state: failed, error: unknown source`. Suggest mapping `ObjectNotFound` to 404 / a clean CLI message.
+
+### Q-12 / Q-19 / Q-23 (accepted as is): safety review
+
+- Q-12: refresh tokens carry no `perms` (PERM-14 passes) and a refresh token presented as a Bearer gets 401 (FB-07
+  `refresh_type`, JWTV). Nothing authorises on a refresh token. Safe.
+- Q-19 failed-login page (401 HTML) and Q-23 HTML 403 page: same message for wrong password / unknown user / inactive
+  (LOGIN-06, normalised compare), the no-permission page creates no session (LOGIN-09), and every response on those paths
+  is now `no-store` (NS-01). No token, CSRF value or account-existence signal in them. Nothing unsafe found.
+
+### Existing llm-wiki suite @ 6520890
+
+Clean detached worktree (removed afterwards), `uv sync --frozen --extra dev`, `env -i`:
+py3.11.14 and py3.13.16 both `4 failed, 1047 passed, 1 skipped, 32 deselected` (22e77e5 was 1001 passed). The 4 are the
+known factory-isolation failures (3 in `test_channels`, `test_mcp_is_reachable_at_slash_mcp`), all
+`RuntimeError: missing required configuration: R2_ACCESS_KEY_ID, ...`. The TODOS ticket exists: `TODOS.md:7` "Test isolation: factory/tools hold an import-time copy of `settings`" (cause `factory.py:18`).
+Logs: `run/logs/existing/6520890-py3.{11,13}.txt`, `run/logs/junit/existing-6520890-py3.{11,13}.xml`.
+
+## Progress log
+
+| Time (PT) | Phase | State |
+|---|---|---|
+| 22:40 | llm-wiki `feat/sso-login` @ 6520890, clean, 01f43a8 is an ancestor (9 commits on top). sso-server @ 03516ce, clean; `bae173b..03516ce` touches only `docs/sso-integration-design.md` (+13 lines) | done |
+| 22:45 | Plan/tests updated: new `test_qasso_r2_fixes.py` (NS/RED/ROT/SID, 50 items); LOG-03 strict again; COOKIE-08 (old cookie dies); LOGIN-16/COOKIE-09 pinned to the confirmed Q-08/Q-10 behaviour; LOGOUT-07 skip reason = Q-15 out of scope. 1,248 items collected | done |
+| 22:44 | Existing suite @ 6520890 (clean worktree, removed afterwards): py3.11.14 and py3.13.16 both `4 failed, 1047 passed, 1 skipped, 32 deselected`; the 4 are the known factory-isolation failures (R2_* RuntimeError); TODOS.md "Test isolation: factory/tools hold an import-time copy of settings" exists | done |
+| 22:56 | qa_sso py3.11 functional (+ throttle phase 22/0): 5 failed, 1076 passed, 164 skipped, 1 xfailed; restart 2 passed. Failures: SID-03 x4 (POST /compile/<malformed> = 500), LOG-03 (token logged with a percent-encoded `%74oken=` name, from the RED-02 probe). Tests then adjusted so this finding is counted once (RED-02 strict, LOG-03 skips that probe line); SID-07 added (pre-existing, well-formed unknown id) | done |
+| 23:11 | qa_sso py3.13 (final tests): functional 1076/6/165, restart 2/0, throttle 22/0 | done |
+| 23:24 | qa_sso py3.11 full re-run with final tests: 1078/6/165 (incl. restart); throttle phase 22/0 from the first pass | done |

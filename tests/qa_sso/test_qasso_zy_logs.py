@@ -34,11 +34,11 @@ def test_LOG_02_no_passwords(logs):
 def test_LOG_03_no_static_token(logs, cfg):
     if not cfg.static_token or len(cfg.static_token) < 8:
         pytest.skip("static token unknown/short")
-    # PRE-02 (pre-existing, Phase 0): /dashboard?token=<static> is a bca2bef feature, and uvicorn's access log
-    # prints the query string. The harness itself sends such URLs (matrix static_query_ok), so those request
-    # lines are excluded here and reported separately; any OTHER occurrence is a leak by the SSO work.
-    other = [ln for ln in logs.splitlines() if cfg.static_token in ln and "?token=" not in ln]
-    assert not other, other[:3]
+    # PRE-02 fixed in d8b1e89 (token= redacted in uvicorn's access log): strict again - the harness sends
+    # /dashboard?token=<static> many times (matrix static_query_ok, RED-*), none of it may reach any log.
+    # the RED-02 probe line (percent-encoded parameter name) is reported by RED-02 itself, not double-counted here
+    leaks = [ln for ln in logs.splitlines() if cfg.static_token in ln and "?%74oken=" not in ln]
+    assert not leaks, leaks[:3]
     if cfg.dotted_token:
         assert cfg.dotted_token not in logs, "the JWT-shaped static token (D-09 instance) was logged"
 

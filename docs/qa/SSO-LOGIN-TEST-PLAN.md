@@ -1,4 +1,4 @@
-# llm-wiki-svc SSO login and `application.app1`: QA test plan (v1.2)
+# llm-wiki-svc SSO login and `application.app1`: QA test plan (v1.2 + regression @ 6520890)
 
 | | |
 |---|---|
@@ -8,6 +8,19 @@
 | Automation | `tests/qa_sso/` (black-box plus a few marked grey-box session-store cases, opt-in with `QA_SSO=1`). See `tests/qa_sso/README.md` |
 | Previous version | v1.0 of this plan (same IDs where a case survived; changed cases are marked **v1.1**) |
 | Author / date | QA, 2026-10-10 |
+
+## 0b. Regression round @ 6520890 (Philip's decisions, 2026-10-10)
+
+- Fixes under test: REG-14b compact MCP 401 (0a41970), `Cache-Control: no-store` in sso/both (4be5a1f), `token=`
+  redaction in uvicorn's access/error loggers (d8b1e89), `GET /sources/<malformed>` 404 (e336dcb), session rotation
+  on re-login (a13bc48), one `InvalidSourceId` for HTTP/MCP/CLI (6520890).
+- Decisions: Q-08 and Q-10 current behaviour confirmed (LOGIN-16 and COOKIE-09 now assert it exactly); Q-15 out of
+  scope (LOGOUT-07 skipped with that reason); Q-20 no-store in sso/both only, static byte-identical (NS-01..04);
+  Q-21 no local `/login` rate limit (nothing to test beyond THR); Q-32 data-dir default (START-11); Q-12/19/23
+  current behaviour accepted. Developer's `/mcp` Bearer-only (MCP-10, CSRF-21) and 60 s `last_seen` (SESS-22/23)
+  accepted. `SSO_SUPERUSER_ALL_APPS` still pending Thomas: both values stay under test (PERM-17..20).
+- New file `tests/qa_sso/test_qasso_r2_fixes.py` (section 3.19). LOG-03 is strict again (no `?token=` exclusion);
+  COOKIE-08 now also asserts the pre-login cookie dies on re-login.
 
 ## 0a. What changed in v1.2 (summary)
 
@@ -553,7 +566,32 @@ its own source address, so buckets never collide and no 61 s waits are needed.
 | M-10 **v1.1** | Docs say: multiple uvicorn workers share the SQLite file, the DB transaction is the real guard; session DB should be on local disk (not a network share) |
 | M-11 **v1.1** | Registering llm-wiki's ServiceClient at the SSO (`create_service_client` or admin) is documented with the secret handling |
 
+### 3.19 Regression round @ 6520890 (NS, RED, ROT, SID) - `test_qasso_r2_fixes.py`
+
+| ID | Precondition | Steps | Expected |
+|---|---|---|---|
+| NS-01 (x2: sso, both) | real SSO, `qa_wiki_direct` | GET /login; POST wrong pw; POST ok; GET /login signed in; GET /dashboard; POST /logout; anon / bad-Bearer /dashboard; GET /logout; /login?next=//evil | every response has exactly one `Cache-Control: no-store` |
+| NS-02 | sso | /healthz, /usage, /domains with a valid Bearer | no `no-store` (only the three pages) |
+| NS-03 (x2: static, static_reads) | static | /dashboard ?token / Bearer / none / bad; /login; POST /logout | no `Cache-Control` header at all (Q-20 sso/both only) |
+| NS-04 (x3) | sso | /dashboard/, /login/, /Dashboard | redirect/404 without content, or no-store if 200 |
+| RED-01 (x2: static, both) | instance log file | `?token=`, `&token=`, `TOKEN=`, `access_token=`, `;token=`, repeated, on 200/401/404/405 routes | `[redacted]` present; neither the static token nor the probe secret in any new log line |
+| RED-02 | static | `/dashboard?%74oken=<static>` | token not logged (it authenticates, Starlette decodes the name) |
+| RED-03 (x2) | static, both | POST /compile/<malformed>?token= (server-error path) | no token in the log, traceback included |
+| ROT-01 (x2: same user, other user) | sso, session DB (grey) | log in, record cookie/CSRF/refresh; log in again in the same browser | 303, new id and CSRF; old row deleted; row count unchanged; old cookie: JSON 401, HTML 303 → /login; new cookie works; SSO `/auth/refresh` with the old refresh token → 401 |
+| ROT-02 | sso | wrong password while signed in | no rotation, same cookie still works (Q-10) |
+| ROT-03 | stub, logout mode `server_error` then `close` | re-login | login still succeeds, old row deleted, old refresh token sent to SSO logout once (best effort) |
+| ROT-04 | sso | planted unknown cookie, then log in | replaced; the planted id stays dead |
+| SID-01 (x12) | static, both | GET /sources/<bad> for 6 malformed ids | 404, no traceback |
+| SID-02 | static | GET /sources/<well-formed unknown> | < 500 (recorded) |
+| SID-03 (x6) | static, both | POST /compile/<bad> (static token) | 404, same as GET /sources |
+| SID-04 (x6) | static, both | MCP `tools/call compile_update` with a bad id | `isError: true`, "not a valid source_id", no traceback |
+| SID-05 | static | MCP `tools/list` | the seven tools; only `compile_update` takes a source id |
+| SID-06 (x6) | CLI, offline backends | `llmwiki compile|source <bad>` (incl. `""`, `../../etc/passwd`) | exit ≠ 0, message on stderr, no traceback |
+| SID-07 | static + CLI | POST /compile and `llmwiki compile` with a well-formed unknown id | < 500 and no traceback (pre-existing, PRE-03) |
+
 ## 4. Case counts (v1.2)
+
+Regression @ 6520890: +51 items in `test_qasso_r2_fixes.py` (NS 8, RED 5, ROT 5, SID 33); the suite now collects **1,249** items.
 
 | Area (file) | Test functions | pytest items |
 |---|---|---|
@@ -674,18 +712,19 @@ on `/mcp`). C-13 answered (unsafe methods). C-14 answered (503). C-15 closed (do
 Resolved by v1.1: Q-01..07, Q-11, Q-13, Q-14 part 1, Q-16, Q-17 (pending Thomas), Q-18, Q-22. Resolved by v1.2:
 Q-14 (missing kid → reject), Q-25, Q-26, Q-27, Q-28, Q-29 (= D-16), Q-30, Q-31.
 
-Still open (need a decision; the tests pin the current behaviour or a safety invariant only):
+Decided at the regression round @ 6520890 (Philip, 2026-10-10): Q-08, Q-10, Q-12, Q-15, Q-19, Q-20, Q-21, Q-23, Q-32
+(rows below kept for traceability). Still pending: Q-33 `SSO_SUPERUSER_ALL_APPS` default (Thomas).
 
 | Q | Question | What the tests do now |
 |---|---|---|
-| Q-08 | `GET /login` while signed in | Observed: 303 to the sanitised `next` (`/dashboard`); LOGIN-16 asserts only 200/303-local |
-| Q-10 | Failed re-login while signed in | Observed: existing session kept; COOKIE-09 asserts no new id and no orphaned live row |
-| Q-12 | Refresh token carries `perms`? | Recorded (PERM-14 xfail if it does) |
-| Q-15 | "Log out everywhere" in llm-wiki | Skipped (LOGOUT-07) |
-| Q-19 / Q-23 | Status codes / format of failed-login and HTML 403 pages | Not pinned (observed 401/403 HTML) |
-| Q-20 | `Cache-Control: no-store` on `/login`, `/dashboard` | Not asserted (recommended) |
-| Q-21 | llm-wiki's own `/login` rate limit | Not asserted (relies on the SSO throttle) |
-| Q-32 | Session DB default path for non-local storage backends | START-11 pins `{LOCAL_STORAGE_PATH}/sessions.sqlite3` |
+| Q-08 | `GET /login` while signed in | **Decided (current behaviour confirmed)**: 303 to the sanitised `next`; LOGIN-16 asserts 303 → `/dashboard` for an off-site next |
+| Q-10 | Failed re-login while signed in | **Decided (current behaviour confirmed)**: session kept; COOKIE-09/ROT-02 assert same cookie, still valid |
+| Q-12 | Refresh token carries `perms`? | **Accepted as is**: it does not (PERM-14 passes), and a refresh token is rejected as a Bearer (FB-07 `refresh_type`) |
+| Q-15 | "Log out everywhere" in llm-wiki | **Decided: out of scope** (LOGOUT-07 skipped with that reason) |
+| Q-19 / Q-23 | Status codes / format of failed-login and HTML 403 pages | **Accepted as is** (401/403 HTML, no-store, no account enumeration: LOGIN-06/09, NS-01) |
+| Q-20 | `Cache-Control: no-store` on `/login`, `/dashboard` | **Decided: yes in sso/both, not in static** (NS-01..04) |
+| Q-21 | llm-wiki's own `/login` rate limit | **Decided: none**; relies on the SSO throttle (THR) |
+| Q-32 | Session DB default path for non-local storage backends | **Decided: data-dir default, documented**; START-11 |
 | Q-33 (new) | Superuser-gets-all default (`SSO_SUPERUSER_ALL_APPS`) | Pending Thomas; PERM-17..20 run both settings |
 
 ## 8. Entry and exit criteria
