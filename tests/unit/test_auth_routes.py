@@ -737,3 +737,40 @@ def test_static_mode_dashboard_has_no_session_markup(build) -> None:
     assert page.status_code == 200
     assert "csrf-token" not in page.text and "Signed in as" not in page.text
     assert "</style></head><body>\n<h1>" in page.text
+
+
+# ---------------------------------------------------------------- Cache-Control (QA Q-20)
+@pytest.mark.parametrize("mode", ["sso", "both"])
+def test_login_and_dashboard_responses_are_no_store(build, sso, key, mode) -> None:
+    client = build(auth_mode=mode)
+    good = bearer(key.sign(access_claims()))
+    responses = {
+        "GET /login": client.get("/login"),
+        "GET /dashboard (redirect)": client.get("/dashboard"),
+        "POST /login csrf error": client.post("/login", data={"csrf_token": "x"}),
+        "POST /login empty": login(client, "", ""),
+        "POST /login wrong password": login(client, "alice", "wrong"),
+        "POST /login no permission": login(client, "bob", "bob-pw"),
+        "POST /login success (redirect)": login(client),
+        "GET /login signed in (redirect)": client.get("/login?next=/concepts"),
+        "GET /dashboard": client.get("/dashboard"),
+        "GET /dashboard bearer": client.get("/dashboard", headers=good),
+        "GET /dashboard bad bearer": client.get("/dashboard", headers=bearer("nope")),
+    }
+    csrf = csrf_meta(client)
+    responses["POST /logout"] = client.post("/logout", data={"csrf_token": csrf})
+    sso.down = True
+    responses["POST /login SSO down"] = login(client)
+    for name, r in responses.items():
+        assert r.headers.get_list("cache-control") == ["no-store"], (name, r.status_code)
+
+
+def test_static_mode_dashboard_headers_are_unchanged(build) -> None:
+    """Static /dashboard keeps its Phase 0 headers: no Cache-Control added (byte-for-byte rule)."""
+    client = build(auth_mode="static")
+    for r in (client.get("/dashboard", params={"token": STATIC}), client.get("/dashboard")):
+        assert "cache-control" not in r.headers
+
+
+def test_other_routes_are_not_forced_to_no_store(build) -> None:
+    assert "cache-control" not in build(auth_mode="sso").get("/concepts").headers

@@ -44,6 +44,9 @@ from llmwiki.config import Settings
 logger = logging.getLogger(__name__)
 
 SKIP_PREFIXES = ("/mcp", "/channels/", "/healthz")
+#: Pages that show or set session state: never cached (QA Q-20). Only in sso/both (this
+#: middleware is not installed in static mode, whose /dashboard stays byte-for-byte unchanged).
+NO_STORE_PATHS = frozenset({"/login", "/logout", "/dashboard"})
 
 
 def read_cookie(scope: Mapping[str, Any], name: str) -> str | None:
@@ -139,22 +142,27 @@ class SessionAuthMiddleware:
             async with self._lock(hashlib.sha256(raw.encode()).hexdigest()):
                 clear = await anyio.to_thread.run_sync(self._resolve, service, raw, state,
                                                        client_ip_of(scope, self.cfg))
-        if not clear:
+        no_store = scope.get("path", "") in NO_STORE_PATHS
+        if not clear and not no_store:
             await self.app(scope, receive, send)
             return
         header = clear_cookie_header(self.cfg, service.session_cookie).encode("latin-1")
         prefix = f"{service.session_cookie}=".encode()
 
-        async def send_with_cookie(message: dict) -> None:
+        async def send_wrapped(message: dict) -> None:
             if message["type"] == "http.response.start":
                 headers = list(message.get("headers", []))
                 # a route that set the session cookie itself (POST /login) wins
-                if not any(k == b"set-cookie" and v.startswith(prefix) for k, v in headers):
+                if clear and not any(k == b"set-cookie" and v.startswith(prefix)
+                                     for k, v in headers):
                     headers.append((b"set-cookie", header))
+                if no_store:  # every response: pages, redirects, errors
+                    headers = [(k, v) for k, v in headers if k.lower() != b"cache-control"]
+                    headers.append((b"cache-control", b"no-store"))
                 message = {**message, "headers": headers}
             await send(message)
 
-        await self.app(scope, receive, send_with_cookie)
+        await self.app(scope, receive, send_wrapped)
 
     def _resolve(self, service: Any, raw: str, state: dict, client_ip: str | None) -> bool:
         """Fill ``state``; return True when the browser's cookie must be cleared."""
