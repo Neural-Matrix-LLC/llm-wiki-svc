@@ -22,7 +22,7 @@ Pre-existing (fails identically at bca2bef; QA SSO-LOGIN-RESULTS.md, open questi
   `factory.py:36` (`_cached` -> `build()`). `tools.py` has the same `default_settings` pattern.
 - Fix options: resolve lazily (`cfg = cfg or config.settings` via the module, not a copied name),
   or have the tests also patch `llmwiki.factory.default_settings` / `llmwiki.tools.default_settings`
-  (as `test_tools_and_mcp.py::test_tools_sources_...` at line 147 already does). The first is the
+  (as `test_tools_and_mcp.py::test_list_domains_is_read_only_and_general_first` already does). The first is the
   real fix; check that nothing relies on the snapshot.
 
 ## Reconcile with `~/branch/llm-wiki-svc` (Phase 1.x) — stashed work (2026-09-25)
