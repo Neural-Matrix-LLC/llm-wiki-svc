@@ -23,6 +23,14 @@ from datetime import UTC, datetime
 from llmwiki import factory
 from llmwiki.agent.judge import Judge
 from llmwiki.agent.query import QueryAgent
+from llmwiki.auth import (  # noqa: F401  (re-exported for api/, see below)
+    AuthError,
+    PermissionDenied,
+    Principal,
+    SSOLoginError,
+    SSOUnavailable,
+)
+from llmwiki.auth.service import AuthService
 from llmwiki.config import Settings
 from llmwiki.config import settings as default_settings
 from llmwiki.extractors.base import ExtractionError  # noqa: F401  (re-exported, see below)
@@ -55,7 +63,32 @@ from llmwiki.wiki.reassign import PruneResult
 # an unhandled fetch error there is a retry storm against the very site that
 # just refused us.
 
+#
+# The auth types (``AuthError``, ``PermissionDenied``, ``Principal``,
+# ``SSOLoginError``, ``SSOUnavailable``) are re-exported for the same reason:
+# api/ may not import llmwiki.auth directly, it reaches it through
+# :func:`auth_service` here (docs/sso-integration-design.md Part B).
+
 logger = logging.getLogger(__name__)
+
+_auth: tuple[Settings, AuthService] | None = None
+#: Tests replace this with an ``httpx.MockTransport``; None = real network.
+auth_transport = None
+
+
+def auth_service(cfg: Settings | None = None) -> AuthService:
+    """The :class:`AuthService` for ``cfg`` (one per Settings, so the JWKS cache persists)."""
+    global _auth
+    cfg = cfg or default_settings
+    if _auth is None or _auth[0] is not cfg:
+        _auth = (cfg, AuthService(cfg, transport=auth_transport))
+    return _auth[1]
+
+
+def reset_auth() -> None:
+    """Drop the cached :class:`AuthService` (tests, or after changing ``auth_transport``)."""
+    global _auth
+    _auth = None
 
 
 class PageNotFound(KeyError):
@@ -640,6 +673,13 @@ def _config_state(cfg: Settings) -> dict:
             "path": str(skills_dir),
             "present": skills_dir.is_dir(),
             "skill_files": skill_files,
+        },
+        # SSO integration: which auth mode the running process enforces (no secrets).
+        "auth": {
+            "mode": cfg.auth_mode,
+            "sso_issuer": cfg.sso_issuer if cfg.auth_mode != "static" else "",
+            "required_permission": cfg.sso_required_permission if cfg.auth_mode != "static" else "",
+            "protect_reads": cfg.sso_protect_reads,
         },
         # Phase 1-D: the query graph's bounds, echoed for the same reason as
         # log_level above - what the running process actually has.

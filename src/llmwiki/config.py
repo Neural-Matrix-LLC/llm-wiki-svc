@@ -154,6 +154,25 @@ class Settings(BaseSettings):
     api_host: str = "0.0.0.0"
     api_port: int = 8000
 
+    # --- Authentication (docs/sso-integration-design.md B1) ---
+    # "static": only INGEST_API_TOKEN (the Phase 0 behaviour, the default).
+    # "sso": SSO access tokens (Bearer) and the browser session from /login.
+    # "both": SSO or the static token - what keeps MCP clients and scripts
+    # working while browsers move to /login. create_app() refuses to start
+    # in sso/both without SSO_BASE_URL, SSO_ISSUER and SESSION_SECRET.
+    auth_mode: Literal["static", "sso", "both"] = "static"
+    sso_base_url: str = ""  # e.g. https://sso.example.com (server-to-server)
+    sso_issuer: str = ""  # must equal the SSO's "iss" exactly
+    sso_jwks_url: str = ""  # blank = {SSO_BASE_URL}/.well-known/jwks.json
+    sso_audience: str = "myfin-services"
+    sso_required_permission: str = "application.app1"
+    # Signs the llmwiki_session cookie (signed, not encrypted). >= 32 chars.
+    session_secret: SecretStr = SecretStr("")
+    session_cookie_secure: bool = True  # false only for local http dev
+    # true: read routes (/search, /answer, /concepts, /page, GET /domains,
+    # /worker, /sources) need auth too. /healthz and /login stay public.
+    sso_protect_reads: bool = False
+
     # --- Capture channels (Phase 1, KB design §5): each is optional and
     # independently disabled by leaving its secret unset - api/app.py mounts
     # a channel's router only when llmwiki.channels.<name>.build_router(cfg)
@@ -325,6 +344,33 @@ class Settings(BaseSettings):
     def lexical_root(self) -> Path:
         """Where the FTS5 files live: ``LEXICAL_DB_PATH`` or ``{LOCAL_STORAGE_PATH}/lexical``."""
         return self.lexical_db_path or (self.local_storage_path / "lexical")
+
+    @property
+    def effective_sso_jwks_url(self) -> str:
+        """``SSO_JWKS_URL``, or ``{SSO_BASE_URL}/.well-known/jwks.json`` when that is blank."""
+        return self.sso_jwks_url or f"{self.sso_base_url.rstrip('/')}/.well-known/jwks.json"
+
+    def require_auth_config(self) -> None:
+        """Fail fast (design B1): AUTH_MODE=sso|both needs the SSO and session settings."""
+        if self.auth_mode == "static":
+            return
+        missing = [name for name, value in (
+            ("SSO_BASE_URL", self.sso_base_url),
+            ("SSO_ISSUER", self.sso_issuer),
+            ("SESSION_SECRET", self.session_secret.get_secret_value()),
+        ) if not value.strip()]
+        if missing:
+            raise RuntimeError(
+                f"AUTH_MODE={self.auth_mode} needs {', '.join(missing)} "
+                "(see .env.example, 'Authentication')."
+            )
+        if len(self.session_secret.get_secret_value()) < 32:
+            raise RuntimeError(
+                "SESSION_SECRET must be at least 32 characters, e.g. "
+                "python -c 'import secrets; print(secrets.token_urlsafe(48))'"
+            )
+        if not self.sso_required_permission.strip():
+            raise RuntimeError(f"AUTH_MODE={self.auth_mode} needs SSO_REQUIRED_PERMISSION")
 
     def require(self, *fields: str) -> None:
         """Fail loudly, and by name, when a backend's credentials are absent.
