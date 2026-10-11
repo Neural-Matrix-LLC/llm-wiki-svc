@@ -417,3 +417,22 @@ def test_static_mode_default_mcp_stays_open_and_unwrapped(build) -> None:
         assert mcp(client).status_code == 200
         mounts = [r for r in client.app.routes if getattr(r, "path", "") == "/mcp"]
         assert mounts and not isinstance(mounts[0].app, MCPAuthMiddleware)
+
+
+def test_static_mcp_401_is_byte_identical_to_the_static_401(build) -> None:
+    """QA REG-14b: same bytes, Content-Type and Content-Length as a static route's 401."""
+    with build(auth_mode="static", sso_protect_reads=True) as client:
+        mcp_401 = mcp(client)
+        route_401 = client.post("/ingest", json={"text": "x"})
+    assert mcp_401.status_code == route_401.status_code == 401
+    assert mcp_401.content == route_401.content == b'{"detail":"invalid or missing bearer token"}'
+    for header in ("content-type", "content-length"):
+        assert mcp_401.headers[header] == route_401.headers[header]
+    assert "www-authenticate" not in mcp_401.headers and "www-authenticate" not in route_401.headers
+
+
+def test_sso_mcp_bodies_are_compact_json(build, key) -> None:
+    with build(auth_mode="sso") as client:
+        assert mcp(client).content == b'{"detail":"invalid or missing credentials"}'
+        r = mcp(client, bearer(key.sign(access_claims(perms=[]))))
+        assert r.content == b'{"detail":"forbidden","error":"permission_denied"}'

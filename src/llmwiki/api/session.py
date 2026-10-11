@@ -219,7 +219,9 @@ class MCPAuthMiddleware:
             else:
                 await self.app(scope, receive, send)
                 return
-        payload = json.dumps(body).encode()
+        # compact, exactly like FastAPI's JSONResponse: the static-mode 401 must be byte-identical
+        # to every other static route's 401 (v1.2 C-12, QA REG-14b)
+        payload = json.dumps(body, separators=(",", ":")).encode()
         await send({"type": "http.response.start", "status": status,
                     "headers": [(b"content-type", b"application/json"),
                                 (b"content-length", str(len(payload)).encode()), *headers]})
