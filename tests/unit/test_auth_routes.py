@@ -774,3 +774,35 @@ def test_static_mode_dashboard_headers_are_unchanged(build) -> None:
 
 def test_other_routes_are_not_forced_to_no_store(build) -> None:
     assert "cache-control" not in build(auth_mode="sso").get("/concepts").headers
+
+
+# ---------------------------------------------------------------- re-login (QA Q-08, Q-10)
+@pytest.mark.parametrize("next_url,expected", [("/concepts", "/concepts"), (None, "/dashboard"),
+                                               ("https://evil.example/", "/dashboard")])
+def test_login_page_while_signed_in_redirects_to_next(build, next_url, expected) -> None:
+    client = build(auth_mode="sso")
+    login(client)
+    r = client.get("/login" + (f"?next={next_url}" if next_url else ""))
+    assert r.status_code == 303 and r.headers["location"] == expected
+    assert "<form" not in r.text
+
+
+@pytest.mark.parametrize("user,password,status", [("alice", "wrong", 401), ("bob", "bob-pw", 403),
+                                                  ("nobody", "x", 401)])
+def test_failed_re_login_keeps_the_existing_session(build, sso, tmp_path, user, password,
+                                                    status) -> None:
+    client = build(auth_mode="sso")
+    login(client)
+    cookie = client.cookies.get("llmwiki_session")
+    rows = store_rows(tmp_path)
+    # a re-login form posted from another tab: fresh login CSRF double-submit pair
+    token = "t" * 43
+    client.cookies.set("llmwiki_login_csrf", token, domain="testserver.local")
+    r = client.post("/login", data={"username": user, "password": password,
+                                    "csrf_token": token, "next": "/dashboard"},
+                    headers={"Cookie": f"llmwiki_session={cookie}; llmwiki_login_csrf={token}"})
+    assert r.status_code == status
+    assert not any(h.startswith("llmwiki_session=") for h in set_cookie_headers(r))
+    assert store_rows(tmp_path) == rows  # the existing session row is untouched
+    page = client.get("/dashboard")
+    assert page.status_code == 200 and "Signed in as <strong>alice</strong>" in page.text

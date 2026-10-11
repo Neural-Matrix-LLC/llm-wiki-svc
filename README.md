@@ -273,6 +273,12 @@ email subject starting with `[ml-systems]`, files the source there.
   dashboard's `<meta name="csrf-token">`), else 403 `{"error":"csrf_failed"}`; Bearer requests
   are exempt. `/logout` takes it as a form field. An explicit but invalid Bearer is a 401 even
   when a valid session cookie is present.
+* `/mcp` takes a Bearer token only, never the session cookie, so it cannot be hit by CSRF.
+* `GET /login` while signed in redirects (303) to `next` (sanitised; default `/dashboard`). A failed
+  re-login (wrong password, no permission, SSO error) keeps the existing session. `/login`,
+  `/logout` and `/dashboard` responses carry `Cache-Control: no-store` in sso/both.
+* `last_seen` is written at most once a minute, so the idle timeout can be off by up to 60 s.
+* `?token=` values (e.g. `/dashboard?token=...` in static/both) are redacted in uvicorn's access log.
 * SSO unreachable: 503 everywhere (login page included; for a session only once its access token
   has expired - the session is kept). Revoking the permission takes effect at the next refresh, i.e. within the
   access-token lifetime (15 min).
