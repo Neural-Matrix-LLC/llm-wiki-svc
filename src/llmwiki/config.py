@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import ipaddress
 import logging
+import re
 from pathlib import Path
 from typing import Literal
 
@@ -17,6 +18,49 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 _LOG_FORMAT = "%(asctime)s %(levelname)-7s %(name)s:%(lineno)d  %(message)s"
 _LOG_DATEFMT = "%H:%M:%S"
 _logging_configured = False
+
+# PRE-02: ``/dashboard?token=<INGEST_API_TOKEN>`` (and any ``*_token=``) must not reach the logs.
+# Matches the parameter anywhere in a query string, not only as the last one.
+_TOKEN_PARAM = re.compile(r"(?i)([?&;](?:[a-z0-9_]*_)?token=)[^&;\s\"'#]*")
+REDACTED = "[redacted]"
+
+
+def redact_tokens(text: str) -> str:
+    """``...?token=secret&month=x`` -> ``...?token=[redacted]&month=x``."""
+    return _TOKEN_PARAM.sub(lambda m: m.group(1) + REDACTED, text)
+
+
+class TokenRedactingFilter(logging.Filter):
+    """Redacts ``token=`` query parameters in a log record (uvicorn's access log puts the
+    full path, query string included, in ``record.args``). Never drops a record."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if isinstance(record.msg, str) and "token=" in record.msg.lower():
+            record.msg = redact_tokens(record.msg)
+        if isinstance(record.args, tuple):
+            record.args = tuple(redact_tokens(a) if isinstance(a, str) else a
+                                for a in record.args)
+        elif isinstance(record.args, dict):
+            record.args = {k: redact_tokens(v) if isinstance(v, str) else v
+                           for k, v in record.args.items()}
+        return True
+
+
+#: Loggers that print request URLs: uvicorn's access log (and its error log, for safety).
+_REDACTED_LOGGERS = ("uvicorn.access", "uvicorn.error")
+
+
+def install_token_redaction() -> None:
+    """Attach :class:`TokenRedactingFilter` to uvicorn's loggers once (idempotent).
+
+    uvicorn configures its own loggers before it imports the app; ``api/app.py`` calls
+    :func:`configure_logging` at import, which calls this, so the filter is in place before the
+    first request whichever way uvicorn was started (CLI, ``llmwiki serve``, Docker CMD).
+    """
+    for name in _REDACTED_LOGGERS:
+        target = logging.getLogger(name)
+        if not any(isinstance(f, TokenRedactingFilter) for f in target.filters):
+            target.addFilter(TokenRedactingFilter())
 
 
 def configure_logging(level: str = "INFO") -> None:
@@ -36,6 +80,7 @@ def configure_logging(level: str = "INFO") -> None:
     if not isinstance(resolved, int):
         raise ValueError(f"LOG_LEVEL={level!r} is not a recognized logging level")
 
+    install_token_redaction()
     root = logging.getLogger()
     root.setLevel(resolved)
     if not _logging_configured:

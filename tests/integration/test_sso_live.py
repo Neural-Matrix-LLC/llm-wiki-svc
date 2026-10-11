@@ -429,6 +429,17 @@ def test_csrf_failure_body(wiki) -> None:
         assert r.status_code == 403 and r.json() == {"error": "csrf_failed"}
 
 
+def test_token_query_parameter_is_redacted_in_the_uvicorn_access_log(wiki) -> None:
+    """PRE-02: the real uvicorn access log never shows ?token= values."""
+    marker = "pre02-" + secrets.token_urlsafe(16)
+    httpx.get(f"{wiki['base']}/dashboard?token={marker}&month=2026-10")
+    httpx.get(f"{wiki['base']}/concepts?token={marker}")
+    time.sleep(0.3)
+    text = Path(wiki["log"]).read_text()
+    assert marker not in text
+    assert "/dashboard?token=[redacted]&month=2026-10" in text
+
+
 def test_no_tokens_in_the_service_log(wiki) -> None:
     text = Path(wiki["log"]).read_text()
     assert "login ok: wiki_direct" in text  # the service does log logins
