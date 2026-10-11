@@ -22,15 +22,41 @@ _logging_configured = False
 
 # PRE-02 / F-R2-02: ``/dashboard?token=<INGEST_API_TOKEN>`` (and any ``*_token=``) must not reach
 # the logs. Parameters are matched by their percent-decoded name (``%74oken`` is ``token`` to
-# Starlette, so it must be to us too), case-insensitively, anywhere in the query string.
+# Starlette, so it must be to us too), case-insensitively, anywhere in the query string. Names are
+# decoded repeatedly (``%2574oken`` -> ``%74oken`` -> ``token``) so a proxy or client that decodes
+# twice cannot slip a token past us; see _decoded_name for the cap.
 _QUERY = re.compile(r"\?([^\s\"'#]*)")  # a query string inside a log line
 _PARAM_SPLIT = re.compile(r"([&;])")
 REDACTED = "[redacted]"
 
 
+#: Decoding rounds for a parameter name. Real clients encode at most once or twice.
+MAX_NAME_DECODE_ROUNDS = 5
+
+
+def _decoded_name(raw_name: str) -> tuple[str, bool]:
+    """``(name, capped)``: ``raw_name`` run through ``unquote_plus`` until it stops changing,
+    at most :data:`MAX_NAME_DECODE_ROUNDS` times. ``capped`` is True when it was still changing
+    after the last round (nested deeper than the cap)."""
+    name = raw_name
+    for _ in range(MAX_NAME_DECODE_ROUNDS):
+        decoded = urllib.parse.unquote_plus(name)
+        if decoded == name:
+            return name, False
+        name = decoded
+    return name, urllib.parse.unquote_plus(name) != name
+
+
 def _is_token_name(raw_name: str) -> bool:
-    # decoded like Starlette's parse_qsl; .strip() errs on the side of redacting
-    name = urllib.parse.unquote_plus(raw_name).strip().lower()
+    """token / *_token after decoding (case-insensitive; .strip() errs on the side of redacting).
+
+    Fail safe at the cap: a name still encoded after MAX_NAME_DECODE_ROUNDS rounds (still
+    contains '%' and would decode further) is treated as a token name and its value redacted.
+    """
+    name, capped = _decoded_name(raw_name)
+    if capped and "%" in name:
+        return True
+    name = name.strip().lower()
     return name == "token" or name.endswith("_token")
 
 

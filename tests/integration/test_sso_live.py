@@ -460,11 +460,13 @@ def test_token_query_parameter_is_redacted_in_the_uvicorn_access_log(wiki) -> No
     httpx.get(f"{wiki['base']}/dashboard?token={marker}&month=2026-10")
     httpx.get(f"{wiki['base']}/concepts?token={marker}")
     httpx.get(f"{wiki['base']}/concepts?m=1&%74oken={marker}2&Access_Token={marker}3")
+    httpx.get(f"{wiki['base']}/concepts?%2574oken={marker}4")
     time.sleep(0.3)
     text = Path(wiki["log"]).read_text()
     assert marker not in text
     assert "/dashboard?token=[redacted]&month=2026-10" in text
     assert "/concepts?m=1&%74oken=[redacted]&Access_Token=[redacted]" in text  # QA F-R2-02
+    assert "/concepts?%2574oken=[redacted]" in text  # double-encoded name
 
 
 def test_no_tokens_in_the_service_log(wiki) -> None:

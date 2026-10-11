@@ -94,8 +94,6 @@ def test_importing_the_app_installs_the_filter() -> None:
     ("/x?+token=abc", "/x?+token=[redacted]"),  # ' token': over-redacted on purpose (harmless)
     # look-alikes untouched; no '=' means no value to redact
     ("/x?tokens=1&tok%65nizer=2&token", "/x?tokens=1&tok%65nizer=2&token"),
-    # double-encoded: Starlette decodes once -> '%74oken', not 'token'
-    ("/x?%2574oken=1", "/x?%2574oken=1"),
 ])
 def test_redact_tokens_by_decoded_name(path, expected) -> None:
     assert redact_tokens(path) == expected
@@ -114,3 +112,62 @@ def test_format_string_messages_keep_their_placeholders() -> None:
                             (SECRET,), None)
     TokenRedactingFilter().filter(rec)
     assert rec.msg == "GET /x?token=%s"  # no format/arg mismatch
+
+
+# ---------------------------------------------------------------- repeated decoding of names
+def _nest(name: str, levels: int) -> str:
+    """Percent-encode the first character of ``name``, then re-encode the '%' ``levels``-1 times:
+    _nest("token", 2) == "%2574oken"."""
+    encoded = f"%{ord(name[0]):02X}{name[1:]}"
+    for _ in range(levels - 1):
+        encoded = encoded.replace("%", "%25", 1)
+    return encoded
+
+
+@pytest.mark.parametrize("raw_name", [
+    "%2574oken",                 # double
+    "%252574oken",               # triple
+    "%25%37%34oken",             # double, the inner '74' itself encoded
+    "%2574%256F%256B%2565%256E",  # double, every letter
+    "%2554OKEN",                 # mixed case: upper-case name
+    "%2574OkEn", "%2574oken".upper(),  # mixed-case letters and hex digits (%2574 / %2574)
+    "access%255Ftoken",          # *_token, double-encoded underscore
+    _nest("token", 4), _nest("token", 5),  # within the cap (5 rounds)
+])
+def test_multiply_encoded_token_names_are_redacted(raw_name) -> None:
+    assert redact_tokens(f"/x?m=1&{raw_name}={SECRET}&n=2") == f"/x?m=1&{raw_name}=[redacted]&n=2"
+
+
+@pytest.mark.parametrize("levels", [6, 7, 12, 40])
+def test_names_nested_beyond_the_cap_are_redacted_fail_safe(levels) -> None:
+    """Still encoded after MAX_NAME_DECODE_ROUNDS: treated as a token name (documented choice)."""
+    from llmwiki.config import MAX_NAME_DECODE_ROUNDS
+
+    assert MAX_NAME_DECODE_ROUNDS == 5
+    raw = _nest("token", levels)
+    assert redact_tokens(f"/x?{raw}={SECRET}") == f"/x?{raw}=[redacted]"
+    other = _nest("month", levels)  # same depth, any name: also redacted at the cap
+    assert redact_tokens(f"/x?{other}=2026") == f"/x?{other}=[redacted]"
+
+
+def test_deep_nesting_does_not_crash_or_hang() -> None:
+    raw = _nest("token", 300)  # 300 levels: capped after 5 rounds, redacted
+    assert redact_tokens(f"/x?{raw}=v") == f"/x?{raw}=[redacted]"
+    # not real nesting: one round turns 5000 '%25' into '%%%...%74oken' -> '%%%...%token', which
+    # is stable (no longer decodable) and is not 'token': untouched, and fast
+    junk = "%25" * 5000 + "74oken"
+    assert redact_tokens(f"/x?{junk}=v") == f"/x?{junk}=v"
+
+
+@pytest.mark.parametrize("raw_name", [
+    "%256Donth",          # month, double-encoded
+    "%2574okens",         # tokens
+    "%2574okenizer",
+    "100%",               # a stable '%' (not decodable): not capped, untouched
+    "a%2Bb", "q%25",      # decode to 'a+b' / 'q%': stable after 1-2 rounds
+    "%2574%256F%256B%2565",  # 'toke'
+    "my%2520token",       # 'my token' with the space nested: not '_token'
+])
+def test_non_token_names_stay_untouched(raw_name) -> None:
+    line = f"/x?{raw_name}=keep&b=2"
+    assert redact_tokens(line) == line

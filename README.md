@@ -281,6 +281,8 @@ email subject starting with `[ml-systems]`, files the source there.
   `Cache-Control: no-store` in sso/both.
 * `last_seen` is written at most once a minute, so the idle timeout can be off by up to 60 s.
 * `?token=` values (e.g. `/dashboard?token=...` in static/both) are redacted in uvicorn's access log.
+  Parameter names are percent-decoded repeatedly (up to 5 rounds) before matching `token` /
+  `*_token` (any case); a name still encoded after 5 rounds is redacted to be safe.
 * SSO unreachable: 503 everywhere (login page included; for a session only once its access token
   has expired - the session is kept). Revoking the permission takes effect at the next refresh, i.e. within the
   access-token lifetime (15 min).
