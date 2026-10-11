@@ -3,8 +3,9 @@
 Starts SSO-server (branch feat/app-permissions) under gunicorn on SQLite and llm-wiki-svc under
 uvicorn (offline backends, AUTH_MODE=sso) on dedicated free ports, seeds users with and without
 ``application.app1`` (direct and via a group) and llm-wiki's ServiceClient, then drives the browser
-flow, the Bearer flow and /mcp over real HTTP. uvicorn runs with --proxy-headers, so each test
-"browser" gets its own X-Forwarded-For IP and the SSO's per-IP throttle (design v1.1 item 4) can be
+flow, the Bearer flow and /mcp over real HTTP. uvicorn runs with --no-proxy-headers and the wiki
+with CLIENT_IP_HEADER=x-forwarded-for, TRUSTED_PROXY_IPS=127.0.0.1/32 (design v1.2 C-11), so each
+test "browser" gets its own X-Forwarded-For IP and the SSO's per-IP throttle (v1.1 item 4) can be
 observed per end user. Local only: no cloud keys, nothing costs money.
 
     SSO_SERVER_DIR=../sso-server pytest -m integration tests/integration/test_sso_live.py
@@ -151,9 +152,7 @@ def manage(sso: dict, code: str) -> None:
                    env=sso["env"], check=True, capture_output=True)
 
 
-@pytest.fixture(scope="module")
-def wiki(sso, tmp_path_factory):
-    tmp = tmp_path_factory.mktemp("wiki")
+def _start_wiki(sso: dict, tmp: Path, **over: str):  # type: ignore[no-untyped-def]
     port = _free_port()
     env = {
         "PATH": os.environ["PATH"], "HOME": str(tmp),
@@ -167,12 +166,21 @@ def wiki(sso, tmp_path_factory):
         "AUTH_MODE": "sso", "SSO_BASE_URL": sso["base"], "SSO_ISSUER": sso["base"],
         "SSO_CLIENT_ID": CLIENT_ID, "SSO_CLIENT_SECRET": CLIENT_SECRET,
         "SESSION_COOKIE_SECURE": "false",
+        "CLIENT_IP_HEADER": "x-forwarded-for", "TRUSTED_PROXY_IPS": "127.0.0.1/32",
+        **over,
     }
     log = open(tmp / "uvicorn.log", "w")  # noqa: SIM115
     proc = subprocess.Popen([sys.executable, "-m", "uvicorn", "llmwiki.api.app:app",
                              "--host", "127.0.0.1", "--port", str(port),
-                             "--proxy-headers", "--forwarded-allow-ips", "127.0.0.1"],
+                             "--no-proxy-headers"],
                             cwd=tmp, env=env, stdout=log, stderr=subprocess.STDOUT)
+    return proc, log, port, env
+
+
+@pytest.fixture(scope="module")
+def wiki(sso, tmp_path_factory):
+    tmp = tmp_path_factory.mktemp("wiki")
+    proc, log, port, env = _start_wiki(sso, tmp)
     try:
         _wait(f"http://127.0.0.1:{port}/healthz", proc)
         yield {"base": f"http://127.0.0.1:{port}", "log": tmp / "uvicorn.log",
@@ -382,6 +390,43 @@ def test_logout_blacklists_the_refresh_token_at_the_sso(wiki, sso) -> None:
         assert c.get("/dashboard").status_code == 303
     r = httpx.post(f"{sso['base']}/api/v1/auth/refresh", json={"refresh_token": refresh_token})
     assert r.status_code == 401  # blacklisted by the SSO
+
+
+def test_wrong_service_secret_is_a_503_misconfigured(sso, tmp_path) -> None:
+    """v1.2 C-19: the real SSO answers 401 invalid_client; the wiki logs an error and shows 503."""
+    proc, log, port, _ = _start_wiki(sso, tmp_path, SSO_CLIENT_SECRET="wrong-" + "x" * 30)
+    try:
+        _wait(f"http://127.0.0.1:{port}/healthz", proc)
+        with browser({"base": f"http://127.0.0.1:{port}"}) as c:
+            r = form_login(c, "wiki_direct")
+        assert r.status_code == 503 and "Login service misconfigured" in r.text
+    finally:
+        proc.terminate()
+        proc.wait(10)
+        log.close()
+    text = (tmp_path / "uvicorn.log").read_text()
+    assert "ERROR" in text and "invalid_client" in text
+
+
+def test_real_sso_bad_client_ip_with_valid_credentials_is_400(sso) -> None:
+    r = httpx.post(f"{sso['base']}/api/v1/auth/login", auth=(CLIENT_ID, CLIENT_SECRET),
+                   json={"username": "wiki_direct", "password": PASSWORD, "client": "native",
+                         "client_ip": "not-an-ip"})
+    assert r.status_code == 400 and r.json()["error"] == "invalid_request"
+    r = httpx.post(f"{sso['base']}/api/v1/auth/login", auth=(CLIENT_ID, "wrong"),
+                   json={"username": "wiki_direct", "password": PASSWORD, "client": "native"})
+    assert r.status_code == 401 and r.json()["error"] == "invalid_client"
+
+
+def test_session_db_is_0600(wiki) -> None:
+    assert Path(wiki["db"]).stat().st_mode & 0o777 == 0o600
+
+
+def test_csrf_failure_body(wiki) -> None:
+    with browser(wiki) as c:
+        assert form_login(c, "wiki_group").status_code == 303
+        r = c.post("/lint")
+        assert r.status_code == 403 and r.json() == {"error": "csrf_failed"}
 
 
 def test_no_tokens_in_the_service_log(wiki) -> None:
