@@ -361,3 +361,55 @@ failures (3 `test_channels`, `test_mcp_is_reachable_at_slash_mcp`); TODOS.md:7 t
 | 23:37 | Existing suite @ ba2097f, py3.11.14 (clean worktree, removed): `4 failed, 1074 passed, 1 skipped, 32 deselected`; the 4 known R2_* factory-isolation failures | done |
 | 00:01 | qa_sso full functional + restart: py3.11 (23:48) and py3.13 (00:01) each 1117/13/165 + restart 2/0; identical failures. 4 of the 13 were a QA bug (Starlette query names are case-sensitive, so `%54OKEN`/`T%6fKeN` never authenticated); RED-02 fixed, LOG-03 skips RED-02's double-encoded probe lines (reported once by RED-02). Throttle phase didn't start (typo in the QA wrapper script), so it was run in the supplemental pass | done |
 | 00:06 | Supplemental on a fresh stack per Python: r2_fixes + zy_logs 97/8 (py3.13 00:03, py3.11 00:06), throttle phase 22/0 each | done |
+
+---
+
+# Recheck @ 2be7913
+
+> **Status: COMPLETE** (2026-10-11, 00:35 PT)
+
+- llm-wiki-svc `feat/sso-login` @ **2be7913**, clean; febedf7 is an ancestor and is on `origin/feat/sso-login`. sso-server
+  @ b46bc94, clean, on `origin/feat/app-permissions`. `febedf7..2be7913` changes `src/llmwiki/config.py` (the redactor
+  only), README, and the Developer's unit tests; no auth or route code changed.
+- Decision recorded in the plan: `GET /sources/<well-formed unknown>` stays 200 "failed / unknown source" (static
+  compatibility); SID-02 / SID-07d pin it.
+- Interpreters: all 11 server processes on CPython 3.11.14 / 3.13.16 respectively (functional and throttle stacks);
+  pytest on the same version. Ports 8030-8042, PID stop, ports free afterwards, throwaway DBs.
+
+## What ran (each Python)
+
+`pytest -k "test_qasso_r3_recheck or RED_ or test_qasso_zy_logs or test_qasso_static_regression"` on a fresh stack,
+then the static regression again on the throttle-phase stack (its 2 throttle-only REG cases). `RED_` also matched 45
+unrelated items whose names contain "RED_" (EXPIRED_, REQUIRED_...); they ran and passed too.
+
+| Group | py3.11 | py3.13 |
+|---|---|---|
+| RED-10..13 (new, `test_qasso_r3_recheck.py`) | 69 / 0 / 0 | 69 / 0 / 0 |
+| RED-01..03 (incl. the 24 RED-02 encoded-name cases) | 28 / 0 / 0 | 28 / 0 / 0 |
+| LOG-01..06 (LOG-03 strict) | 6 / 0 / 0 | 6 / 0 / 0 |
+| Static regression REG (100 + 2 throttle phase, route snapshot, exact 401s, REG-14b) | 102 / 0 / 0 | 102 / 0 / 0 |
+| Incidental `RED_` matches | 45 / 0 / 6 | 45 / 0 / 6 |
+| **Total** | **250 / 0 / 6** | **250 / 0 / 6** |
+
+The 6 skips are not failures: 5 matrix cells for a `both_reads` instance the harness doesn't start, and 1 throttle-only test.
+
+## Results
+
+- **Double encoding and the cap (RED-10, 48 cases):** 'token' encoded 1-8 times with three encoders (first char nested,
+  `o` nested, every char), static and both. Every value was redacted and the token appeared in no log file. 1x-5x decode
+  to `token`; 6x-8x are still encoded after 5 rounds and are redacted by the fail-safe.
+- **Status unchanged from ba2097f:** for every probe, 200 only when Starlette's single decode gives exactly `token`
+  (1x encodings), otherwise 401 static / 303 both. Same rule as at ba2097f (RED-02), and 2be7913 touches only the
+  logging filter.
+- **Over-cap redaction of harmless names (RED-11):** `month` encoded 1, 2 or 5 times is kept; 6 or 7 times it is
+  **redacted** (status 401 either way). This is the documented fail-safe and acceptable. Noted: a legitimate parameter
+  encoded more than 5 times loses its value in the access log. No real client does that.
+- **Pathological input (RED-12, RED-13):** `%25` nesting 2,000 and 3,500 levels deep, a 4,000-char `%25` run, 300
+  six-times-encoded parameters, and `%` garbage, all 3.6-7 KB request lines. Each answered in 9-32 ms with an
+  unchanged status, and `/healthz` answered 200 right after. Grey box: `redact_tokens` on 1 MB strings stays well under
+  1 s per call. No hang. Nested token names were redacted.
+- First-pass note (QA test bug, fixed): RED-12 first used the real token as the value of two names that never decode to
+  `token` (`%25…%25token` decodes once to `%%…%token` and then stays put; and `%` garbage). Those values were logged,
+  which is correct behaviour: redaction is keyed on the parameter name, like `?foo=<x>`. Those probes now use a non-secret
+  value and check timing and status only. First-pass logs: `run/logs/first-pass/`.
+- **No issues found.**

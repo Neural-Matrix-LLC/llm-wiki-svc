@@ -1,4 +1,4 @@
-# llm-wiki-svc SSO login and `application.app1`: QA test plan (v1.2 + regression @ 6520890 + quick check @ ba2097f)
+# llm-wiki-svc SSO login and `application.app1`: QA test plan (v1.2 + regression @ 6520890 + rechecks @ ba2097f, 2be7913)
 
 | | |
 |---|---|
@@ -21,6 +21,21 @@
   accepted. `SSO_SUPERUSER_ALL_APPS` still pending Thomas: both values stay under test (PERM-17..20).
 - New file `tests/qa_sso/test_qasso_r2_fixes.py` (section 3.19). LOG-03 is strict again (no `?token=` exclusion);
   COOKIE-08 now also asserts the pre-login cookie dies on re-login.
+
+## 0c. Recheck @ 2be7913 (2026-10-11)
+
+- **Decision (Philip, 2026-10-11):** `GET /sources/<well-formed unknown id>` keeps returning 200
+  `{"state":"failed","error":"unknown source",...}` for static compatibility (not 404). Pinned by SID-02 and, for the
+  CLI, SID-07d. POST /compile and MCP compile_update with the same id stay 404 / tool error (SID-07, SID-07b).
+- Redaction now decodes parameter names until stable, at most 5 rounds, and redacts anything still encoded past the
+  cap. New file `tests/qa_sso/test_qasso_r3_recheck.py`:
+
+| ID | Steps | Expected |
+|---|---|---|
+| RED-10 (x48) | `/dashboard?month=..&<'token' encoded 1..8 times, 3 encoders>=<static>` on static and both | status as at ba2097f (only a name that Starlette's single decode turns into `token` authenticates: 200; else 401 static / 303 both); `[redacted]` in the access line; token in no log |
+| RED-11 (x10) | harmless name `month` encoded 1, 2, 5, 6, 7 times (2 encoders), static | 401 as before; value kept up to 5 rounds, redacted past the cap (acceptable over-redaction, recorded) |
+| RED-12 (x10) | long `%25` nesting (2,000 / 3,500 levels), 4,000-char `%25` run, 300 six-times-encoded params, `%` garbage; static and both | response < 2 s, `/healthz` 200 right after, status unchanged (or a 400/414/431 from the HTTP layer), token in no log |
+| RED-13 | grey box: `redact_tokens` on 1 MB pathological strings | each call < 1 s; nested token names redacted; a bare `%` run (never decodes) is not a token name |
 
 ## 0a. What changed in v1.2 (summary)
 
@@ -583,7 +598,7 @@ its own source address, so buckets never collide and no 61 s waits are needed.
 | ROT-03 | stub, logout mode `server_error` then `close` | re-login | login still succeeds, old row deleted, old refresh token sent to SSO logout once (best effort) |
 | ROT-04 | sso | planted unknown cookie, then log in | replaced; the planted id stays dead |
 | SID-01 (x12) | static, both | GET /sources/<bad> for 6 malformed ids | 404, no traceback |
-| SID-02 (x2) | static, both | GET /sources/<well-formed unknown> | 200 `state: failed, error: unknown source`, same as bca2bef (static unchanged) |
+| SID-02 (x2) | static, both | GET /sources/<well-formed unknown> | 200 `state: failed, error: unknown source`, same as bca2bef (static unchanged); **decided by Philip 2026-10-11: stays 200 for static compatibility** |
 | SID-03 (x6) | static, both | POST /compile/<bad> (static token) | 404, same as GET /sources |
 | SID-04 (x6) | static, both | MCP `tools/call compile_update` with a bad id | `isError: true`, "not a valid source_id", no traceback |
 | SID-05 | static | MCP `tools/list` | the seven tools; only `compile_update` takes a source id |
