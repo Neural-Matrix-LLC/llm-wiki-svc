@@ -1,6 +1,9 @@
 """Server-to-server calls to the SSO (design B4): login (native client), refresh, logout.
 
-Tokens never reach browser JavaScript: this service holds them in its signed session cookie.
+Tokens never reach the browser: this service keeps them in its server-side session store.
+Login and refresh authenticate as this app's ServiceClient (HTTP Basic ``SSO_CLIENT_ID`` /
+``SSO_CLIENT_SECRET``) and pass the browser's IP as ``client_ip``, so the SSO's per-IP throttle
+applies to the end user, not to this server (design v1.1 item 4).
 """
 
 from __future__ import annotations
@@ -15,12 +18,20 @@ LOGOUT_PATH = "/api/v1/auth/logout"
 
 
 class SSOClient:
-    def __init__(self, base_url: str, client: httpx.Client) -> None:
+    def __init__(self, base_url: str, client: httpx.Client, client_id: str = "",
+                 client_secret: str = "") -> None:
         self.base_url = base_url.rstrip("/")
         self.http = client
+        self.auth: httpx.BasicAuth | None = (
+            httpx.BasicAuth(client_id, client_secret) if client_id and client_secret else None)
 
-    def _post(self, path: str, body: dict) -> httpx.Response:
+    def _post(self, path: str, body: dict, client_ip: str | None = None) -> httpx.Response:
+        if client_ip and self.auth:
+            body = {**body, "client_ip": client_ip}
         try:
+            if self.auth is not None:
+                return self.http.post(self.base_url + path, json=body, auth=self.auth,
+                                      headers={"Accept": "application/json"})
             return self.http.post(self.base_url + path, json=body,
                                   headers={"Accept": "application/json"})
         except httpx.HTTPError as exc:
@@ -54,14 +65,14 @@ class SSOClient:
             raise SSOUnavailable("SSO answered without an access token")
         return body
 
-    def login(self, username: str, password: str) -> dict:
+    def login(self, username: str, password: str, client_ip: str | None = None) -> dict:
         """``POST /api/v1/auth/login`` with ``client: native`` -> access + refresh token."""
         return self._json(self._post(LOGIN_PATH, {"username": username, "password": password,
-                                                  "client": "native"}))
+                                                  "client": "native"}, client_ip))
 
-    def refresh(self, refresh_token: str) -> dict:
+    def refresh(self, refresh_token: str, client_ip: str | None = None) -> dict:
         """``POST /api/v1/auth/refresh`` -> a rotated token pair."""
-        return self._json(self._post(REFRESH_PATH, {"refresh_token": refresh_token}))
+        return self._json(self._post(REFRESH_PATH, {"refresh_token": refresh_token}, client_ip))
 
     def logout(self, refresh_token: str) -> None:
         """``POST /api/v1/auth/logout``: blacklists the refresh token. Best effort."""

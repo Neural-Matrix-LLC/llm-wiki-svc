@@ -49,7 +49,7 @@ def create_app() -> FastAPI:
     if mcp_app is not None:
         from llmwiki.mcp.server import mount
 
-        mount(app, mcp_app)
+        mount(app, _protect_mcp(mcp_app))
 
     _mount_channels(app)
     return app
@@ -82,23 +82,43 @@ def _lifespan(inner):  # type: ignore[no-untyped-def]
 
 
 def _mount_auth(app: FastAPI) -> None:
-    """AUTH_MODE=sso|both (docs/sso-integration-design.md B1/B4): fail fast, then /login + sessions.
+    """AUTH_MODE=sso|both (docs/sso-integration-design.md B1/B4, v1.1): fail fast, then /login,
+    the server-side session store (pruned now and hourly) and the session middleware.
 
-    ``static`` (the default) mounts nothing: the service behaves exactly as before.
+    ``static`` (the default) mounts nothing - no /login, same responses as before (v1.1 item 5) -
+    and only logs warnings: /mcp is open, and a weak INGEST_API_TOKEN.
     """
+    from llmwiki import tools
     from llmwiki.config import settings as current_settings
 
     current_settings.require_auth_config()
     if current_settings.auth_mode == "static":
+        logger.warning("MCP is unauthenticated in AUTH_MODE=static")
+        weak = current_settings.static_token_weakness()
+        if weak:
+            logger.warning("INGEST_API_TOKEN %s; AUTH_MODE=sso|both would refuse to start", weak)
         return
     from llmwiki.api.login import router as login_router
     from llmwiki.api.session import SessionAuthMiddleware
 
+    pruned = tools.auth_service(current_settings).init_sessions()
     app.include_router(login_router)
     app.add_middleware(SessionAuthMiddleware, cfg=current_settings)
+    logger.info("auth: session store ready, %d expired session(s) pruned", pruned)
     logger.info("auth: AUTH_MODE=%s, issuer %s, permission %s, protect reads %s",
                 current_settings.auth_mode, current_settings.sso_issuer,
                 current_settings.sso_required_permission, current_settings.sso_protect_reads)
+
+
+def _protect_mcp(mcp_app):  # type: ignore[no-untyped-def]
+    """Wrap /mcp in the Bearer check in AUTH_MODE=sso|both (v1.1 item 1); static: unchanged."""
+    from llmwiki.config import settings as current_settings
+
+    if current_settings.auth_mode == "static":
+        return mcp_app
+    from llmwiki.api.session import MCPAuthMiddleware
+
+    return MCPAuthMiddleware(mcp_app, current_settings)
 
 
 async def _forbidden(request: Request, exc: Exception) -> JSONResponse:

@@ -17,7 +17,7 @@ from tests.sso_fake import (
 )
 
 from llmwiki.auth import AuthError, PermissionDenied, Principal
-from llmwiki.auth.session import Session, SessionCodec, csrf_ok
+from llmwiki.auth.session import csrf_ok
 from llmwiki.auth.sso import (
     JWKSCache,
     SSOVerifier,
@@ -205,21 +205,7 @@ def test_looks_like_jwt() -> None:
     assert not looks_like_jwt("a.b.c.d")
 
 
-# ---------------------------------------------------------------- session cookie codec
-def test_session_codec_round_trip_and_tamper() -> None:
-    codec = SessionCodec("s" * 40)
-    now = time.time()
-    s = Session("a.b.c", "d.e.f", int(now) + 900, int(now) + 3600, "alice")
-    value = codec.dumps(s)
-    assert codec.loads(value) == s
-    assert codec.loads(value[:-2] + ("AA" if value[-2:] != "AA" else "BB")) is None
-    assert SessionCodec("t" * 40).loads(value) is None  # another secret
-    assert codec.loads("") is None and codec.loads("garbage") is None
-    assert codec.loads(codec.dumps(Session("a", "b", 0, int(now) - 1, "x"))) is None  # expired
-    with pytest.raises(ValueError):
-        SessionCodec("")
-
-
+# ---------------------------------------------------------------- CSRF helper
 def test_csrf_ok() -> None:
     token = "x" * 43
     assert csrf_ok(token, token)

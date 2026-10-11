@@ -65,6 +65,10 @@ Provider = Literal[
 ]
 
 
+#: Minimum INGEST_API_TOKEN length in AUTH_MODE=sso|both (design v1.1 item 6); static only warns.
+MIN_STATIC_TOKEN_CHARS = 24
+
+
 class Settings(BaseSettings):
     """Runtime configuration, loaded from the environment and ``.env``."""
 
@@ -159,15 +163,23 @@ class Settings(BaseSettings):
     # "sso": SSO access tokens (Bearer) and the browser session from /login.
     # "both": SSO or the static token - what keeps MCP clients and scripts
     # working while browsers move to /login. create_app() refuses to start
-    # in sso/both without SSO_BASE_URL, SSO_ISSUER and SESSION_SECRET.
+    # in sso/both without SSO_BASE_URL, SSO_ISSUER, SSO_CLIENT_ID/SECRET, or
+    # with a weak INGEST_API_TOKEN (see require_auth_config). /mcp is
+    # protected in sso/both (v1.1 item 1); in static it stays open.
     auth_mode: Literal["static", "sso", "both"] = "static"
     sso_base_url: str = ""  # e.g. https://sso.example.com (server-to-server)
     sso_issuer: str = ""  # must equal the SSO's "iss" exactly
     sso_jwks_url: str = ""  # blank = {SSO_BASE_URL}/.well-known/jwks.json
     sso_audience: str = "myfin-services"
     sso_required_permission: str = "application.app1"
-    # Signs the llmwiki_session cookie (signed, not encrypted). >= 32 chars.
-    session_secret: SecretStr = SecretStr("")
+    # This app's ServiceClient at the SSO (HTTP Basic on login/refresh, so the SSO
+    # throttles per end-user IP: design v1.1 item 4). Required in sso/both.
+    sso_client_id: str = ""
+    sso_client_secret: SecretStr = SecretStr("")
+    # Server-side sessions (design v1.1 item 2): SQLite file holding the SSO tokens;
+    # blank = {LOCAL_STORAGE_PATH}/sessions.sqlite3. Absolute lifetime in hours.
+    session_db_path: Path | None = None
+    session_max_age_hours: float = 168.0
     session_cookie_secure: bool = True  # false only for local http dev
     # true: read routes (/search, /answer, /concepts, /page, GET /domains,
     # /worker, /sources) need auth too. /healthz and /login stay public.
@@ -350,27 +362,46 @@ class Settings(BaseSettings):
         """``SSO_JWKS_URL``, or ``{SSO_BASE_URL}/.well-known/jwks.json`` when that is blank."""
         return self.sso_jwks_url or f"{self.sso_base_url.rstrip('/')}/.well-known/jwks.json"
 
+    @property
+    def effective_session_db_path(self) -> Path:
+        """``SESSION_DB_PATH``, or ``{LOCAL_STORAGE_PATH}/sessions.sqlite3`` when unset."""
+        return self.session_db_path or (self.local_storage_path / "sessions.sqlite3")
+
+    def static_token_weakness(self) -> str | None:
+        """Why INGEST_API_TOKEN is weak, or None. Weak = ``changeme`` or shorter than
+        ``MIN_STATIC_TOKEN_CHARS`` (24) characters (design v1.1 item 6)."""
+        token = self.ingest_api_token.get_secret_value()
+        if token.strip() == "changeme":
+            return "is the placeholder 'changeme'"
+        if len(token) < MIN_STATIC_TOKEN_CHARS:
+            return f"is shorter than {MIN_STATIC_TOKEN_CHARS} characters ({len(token)})"
+        return None
+
     def require_auth_config(self) -> None:
-        """Fail fast (design B1): AUTH_MODE=sso|both needs the SSO and session settings."""
+        """Fail fast (design B1, v1.1): AUTH_MODE=sso|both needs the SSO settings, this app's
+        ServiceClient credentials and a strong INGEST_API_TOKEN. static: nothing is required."""
         if self.auth_mode == "static":
             return
         missing = [name for name, value in (
             ("SSO_BASE_URL", self.sso_base_url),
             ("SSO_ISSUER", self.sso_issuer),
-            ("SESSION_SECRET", self.session_secret.get_secret_value()),
+            ("SSO_CLIENT_ID", self.sso_client_id),
+            ("SSO_CLIENT_SECRET", self.sso_client_secret.get_secret_value()),
+            ("SSO_REQUIRED_PERMISSION", self.sso_required_permission),
         ) if not value.strip()]
         if missing:
             raise RuntimeError(
                 f"AUTH_MODE={self.auth_mode} needs {', '.join(missing)} "
                 "(see .env.example, 'Authentication')."
             )
-        if len(self.session_secret.get_secret_value()) < 32:
+        weak = self.static_token_weakness()
+        if weak:
             raise RuntimeError(
-                "SESSION_SECRET must be at least 32 characters, e.g. "
-                "python -c 'import secrets; print(secrets.token_urlsafe(48))'"
+                f"AUTH_MODE={self.auth_mode} refuses a weak INGEST_API_TOKEN: it {weak}. Use e.g. "
+                "python -c 'import secrets; print(secrets.token_urlsafe(32))'"
             )
-        if not self.sso_required_permission.strip():
-            raise RuntimeError(f"AUTH_MODE={self.auth_mode} needs SSO_REQUIRED_PERMISSION")
+        if self.session_max_age_hours <= 0:
+            raise RuntimeError("SESSION_MAX_AGE_HOURS must be positive")
 
     def require(self, *fields: str) -> None:
         """Fail loudly, and by name, when a backend's credentials are absent.

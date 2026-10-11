@@ -58,18 +58,27 @@ def _bars(by_day: dict[str, float]) -> str:
             f"{''.join(bars)}{labels}</svg>")
 
 
+def _session_head(csrf: str | None) -> str:
+    """The session's CSRF value for scripts sending X-CSRF-Token (design v1.1 item 3)."""
+    return f'<meta name="csrf-token" content="{escape(csrf)}">\n' if csrf else ""
+
+
 def _signed_in_bar(username: str | None, csrf: str | None) -> str:
-    """'Signed in as <username> · Log out' (AUTH_MODE=sso|both, design B4); empty otherwise."""
+    """'Signed in as <username> · Log out' (AUTH_MODE=sso|both, design B4).
+
+    Empty without a session, so the static-mode page is byte-for-byte unchanged (v1.1 item 5).
+    """
     if not username:
         return ""
     return (f"<p class='muted'>Signed in as <strong>{escape(username)}</strong> · "
             "<form method='post' action='/logout' style='display:inline'>"
             f"<input type='hidden' name='csrf_token' value='{escape(csrf or '')}'>"
-            "<button type='submit' class='linkish'>Log out</button></form></p>")
+            "<button type='submit' style='background:none;border:0;padding:0;color:var(--bar);"
+            "cursor:pointer;font:inherit;text-decoration:underline'>Log out</button></form></p>\n")
 
 
 def render(month: str | None = None, signed_in_as: str | None = None,
-           logout_csrf: str | None = None) -> str:
+           csrf: str | None = None) -> str:
     summary: CostSummary = tools.usage_summary(month=month)
     budget = tools.budget_status()
     worker = tools.worker_status()
@@ -109,7 +118,7 @@ def render(month: str | None = None, signed_in_as: str | None = None,
     return f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><title>llmwiki usage - {escape(window)}</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<style>
+{_session_head(csrf)}<style>
 :root {{ --fg:#1b1b1b; --muted:#6b6b6b; --bg:#fff; --line:#e4e4e4; --bar:#3b6ea5; --ok:#1e7d3a; --bad:#b3261e; }}
 @media (prefers-color-scheme: dark) {{ :root {{ --fg:#eaeaea; --muted:#9a9a9a; --bg:#151515; --line:#2e2e2e; --bar:#7aa7d8; --ok:#5fd07f; --bad:#ff6b5e; }} }}
 body {{ font: 15px/1.45 system-ui, sans-serif; color: var(--fg); background: var(--bg); margin: 0; padding: 24px 16px; max-width: 980px; margin-inline: auto; }}
@@ -122,10 +131,8 @@ table {{ border-collapse: collapse; width: 100%; }} th, td {{ text-align: left; 
 th {{ font-weight: 600; color: var(--muted); }} td.num, th.num {{ text-align: right; font-variant-numeric: tabular-nums; }}
 .bars rect {{ fill: var(--bar); }} .bars text {{ font-size: 9px; fill: var(--muted); }}
 code {{ font-size: 13px; }} nav a {{ margin-right: 12px; }}
-button.linkish {{ background: none; border: 0; padding: 0; color: var(--bar); cursor: pointer; font: inherit; text-decoration: underline; }}
 </style></head><body>
-{_signed_in_bar(signed_in_as, logout_csrf)}
-<h1>llmwiki usage <span class="muted">{escape(window)}</span></h1>
+{_signed_in_bar(signed_in_as, csrf)}<h1>llmwiki usage <span class="muted">{escape(window)}</span></h1>
 <p class="muted">llmwiki {escape(str(health['version']))} · llm {escape(str(health['backends']['llm']))}
  · lexical {escape(str(health['backends']['lexical']))} · reranker {escape(str(health['backends']['reranker']))}
  · {cap_state}</p>

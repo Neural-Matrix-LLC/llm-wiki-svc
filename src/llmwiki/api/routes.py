@@ -67,6 +67,18 @@ class Forbidden(Exception):
     BODY = {"detail": "forbidden", "error": "permission_denied"}
 
 
+#: Safe methods; any other cookie-authenticated request needs X-CSRF-Token (v1.1 item 3).
+SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
+
+
+def _csrf_failed() -> HTTPException:
+    return HTTPException(status_code=403, detail="missing or invalid X-CSRF-Token")
+
+
+def _sso_unavailable() -> HTTPException:
+    return HTTPException(status_code=503, detail="Login service unavailable")
+
+
 def _unauthorized() -> HTTPException:
     return HTTPException(status_code=401, detail="invalid or missing credentials",
                          headers=WWW_AUTHENTICATE)
@@ -109,9 +121,16 @@ def require_auth(
             raise _unauthorized() from exc
     principal = getattr(request.state, "auth_principal", None)
     if principal is not None:
+        if request.method not in SAFE_METHODS:
+            session = request.state.auth_session
+            if not service.csrf_ok(session.csrf, request.headers.get(service.csrf_header)):
+                raise _csrf_failed()
         return principal
-    if getattr(request.state, "auth_problem", None) == "forbidden":
+    problem = getattr(request.state, "auth_problem", None)
+    if problem == "forbidden":
         raise Forbidden()
+    if problem == "unavailable":
+        raise _sso_unavailable()
     raise _unauthorized()
 
 
@@ -119,13 +138,17 @@ def require_auth(
 require_token = require_auth
 
 
-def require_read_auth(
-    request: Request,
-    credentials: HTTPAuthorizationCredentials | None = Depends(_bearer),
-) -> tools.Principal | None:
-    """Read routes: open unless SSO_PROTECT_READS=true, then the same as :func:`require_auth`."""
+def require_read_auth(request: Request) -> tools.Principal | None:
+    """Read routes: open unless SSO_PROTECT_READS=true, then the same as :func:`require_auth`.
+
+    Reads the Authorization header itself instead of depending on ``HTTPBearer``, so the
+    read routes' OpenAPI schema stays exactly as before (design v1.1 item 5).
+    """
     if not settings.sso_protect_reads:
         return None
+    scheme, _, value = request.headers.get("authorization", "").partition(" ")
+    credentials = (HTTPAuthorizationCredentials(scheme=scheme, credentials=value.strip())
+                   if scheme.lower() == "bearer" and value.strip() else None)
     return require_auth(request, credentials)
 
 
@@ -226,15 +249,16 @@ def dashboard(
 ) -> Response:
     """The usage dashboard (Phase 2). Bearer header, or ``?token=`` for a browser.
 
-    AUTH_MODE=static: the same static token as every other protected route; the
-    query-parameter form exists only because a browser cannot send the header.
-    Keep it behind TLS, as the deployment already is.
-
-    sso/both (design B4): the browser session from ``/login`` (unauthenticated
-    browsers get a 303 to ``/login?next=/dashboard``), or a Bearer header. The
-    ``?token=`` form works in ``both`` only (static token); ``sso`` ignores it so
-    tokens stay out of URLs.
+    The same static token as every other protected route; the query-parameter
+    form exists only because a browser cannot send the header. Keep it behind
+    TLS, as the deployment already is.
     """
+    # (Docstring unchanged on purpose: it is the OpenAPI description, which stays
+    # byte-for-byte the same in AUTH_MODE=static - design v1.1 item 5.)
+    # sso/both (design B4): the browser session from /login (unauthenticated
+    # browsers get a 303 to /login?next=/dashboard), or a Bearer header. The
+    # ?token= form works in "both" only (static token); "sso" ignores it so
+    # tokens stay out of URLs.
     from llmwiki.api.dashboard import render
 
     signed_in_as: str | None = None
@@ -247,14 +271,17 @@ def dashboard(
         if not tools.auth_service(settings).static_matches(token):
             raise HTTPException(status_code=401, detail="invalid or missing token")
     elif credentials:
-        require_auth(request, credentials)
+        require_auth(request, credentials)  # an invalid explicit Bearer is a 401 (v1.1 Q-07)
     else:
         principal = getattr(request.state, "auth_principal", None)
         if principal is None:
-            if getattr(request.state, "auth_problem", None) == "forbidden":
-                from llmwiki.api.login import no_access_page
+            from llmwiki.api import login as login_pages
 
-                return no_access_page(request)
+            problem = getattr(request.state, "auth_problem", None)
+            if problem == "forbidden":
+                return login_pages.no_access_page(request)
+            if problem == "unavailable":
+                return login_pages.unavailable_page()
             target = "/dashboard" + (f"?month={month}" if month else "")
             return RedirectResponse(f"/login?{urlencode({'next': target})}", status_code=303)
         signed_in_as = principal.username or principal.sub
@@ -262,11 +289,9 @@ def dashboard(
     try:
         if signed_in_as is None:
             return HTMLResponse(render(month=month))
-        from llmwiki.api.login import csrf_for
-
-        csrf, set_csrf = csrf_for(request)
-        response = HTMLResponse(render(month=month, signed_in_as=signed_in_as, logout_csrf=csrf))
-        set_csrf(response)
+        csrf = request.state.auth_session.csrf
+        response = HTMLResponse(render(month=month, signed_in_as=signed_in_as, csrf=csrf))
+        response.headers["Cache-Control"] = "no-store"
         return response
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=f"month must be YYYY-MM: {exc}") from exc

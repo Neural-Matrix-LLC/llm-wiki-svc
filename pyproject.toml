@@ -16,9 +16,8 @@ dependencies = [
     "fastmcp",
     "httpx",
     # SSO integration (docs/sso-integration-design.md B6): RS256 verification of SSO access
-    # tokens (llmwiki/auth/sso.py) and the signed llmwiki_session cookie (auth/session.py).
-    # Starlette no longer pulls itsdangerous, so both are explicit.
-    "itsdangerous>=2.1",
+    # tokens (llmwiki/auth/sso.py). Sessions are server-side SQLite since design v1.1, so
+    # itsdangerous (v1.0's signed cookie) is not needed.
     "pyjwt[crypto]>=2.8",
     "langchain-core>=0.3",
     "langchain-openai",

@@ -660,7 +660,7 @@ def _config_state(cfg: Settings) -> dict:
     # HEALTHCHECK every 30s, and discover_skills() would re-read and re-validate
     # every file on each poll, logging a warning per malformed file each time.
     skill_files = len(list(skills_dir.glob("*.md"))) if skills_dir.is_dir() else 0
-    return {
+    state = {
         "llm_routing": "per-op table" if routed else "single-provider fallback",
         # op -> "provider/model" when the table is in force; {} otherwise. Read
         # by scripts/eval_answer.py so an experiment records which model
@@ -674,13 +674,6 @@ def _config_state(cfg: Settings) -> dict:
             "present": skills_dir.is_dir(),
             "skill_files": skill_files,
         },
-        # SSO integration: which auth mode the running process enforces (no secrets).
-        "auth": {
-            "mode": cfg.auth_mode,
-            "sso_issuer": cfg.sso_issuer if cfg.auth_mode != "static" else "",
-            "required_permission": cfg.sso_required_permission if cfg.auth_mode != "static" else "",
-            "protect_reads": cfg.sso_protect_reads,
-        },
         # Phase 1-D: the query graph's bounds, echoed for the same reason as
         # log_level above - what the running process actually has.
         "query_graph": {
@@ -690,6 +683,17 @@ def _config_state(cfg: Settings) -> dict:
             "langsmith_tracing": cfg.langsmith_tracing,
         },
     }
+    # SSO integration: the auth mode in force (no secrets). Only outside static mode, so a
+    # static-mode /healthz stays byte-for-byte what it was (design v1.1 item 5).
+    if cfg.auth_mode != "static":
+        state["auth"] = {
+            "mode": cfg.auth_mode,
+            "sso_issuer": cfg.sso_issuer,
+            "required_permission": cfg.sso_required_permission,
+            "protect_reads": cfg.sso_protect_reads,
+            "mcp_protected": True,
+        }
+    return state
 
 
 def _routes_in_force(cfg: Settings) -> dict[str, str]:

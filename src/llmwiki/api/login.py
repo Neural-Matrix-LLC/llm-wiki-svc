@@ -1,9 +1,14 @@
 """``/login`` and ``/logout``: the server-rendered SSO login (docs/sso-integration-design.md B4).
 
-Mounted only when AUTH_MODE is ``sso`` or ``both``. The browser never sees an SSO token: this
-service calls the SSO's native-client login server-side and keeps the tokens in the signed,
-HttpOnly ``llmwiki_session`` cookie. Forms carry a double-submit CSRF token (random value in a
-SameSite=Strict cookie plus a hidden field).
+Mounted only when AUTH_MODE is ``sso`` or ``both`` (static mode: 404, design v1.1 item 5). The
+browser never sees an SSO token: this service calls the SSO's native-client login server-side (as
+its ServiceClient, with the browser's IP) and keeps the tokens in the server-side session store;
+the ``llmwiki_session`` cookie is only an opaque session id (v1.1 item 2).
+
+CSRF: the login form (no session yet) uses a double-submit token (random value in a SameSite=Strict
+cookie plus a hidden field). Once signed in, the session's own csrf value is required: as the hidden
+field of the logout form, or as ``X-CSRF-Token`` on any other cookie-authenticated write (v1.1 item
+3).
 """
 
 from __future__ import annotations
@@ -17,7 +22,7 @@ from fastapi import APIRouter, Form, Request
 from fastapi.responses import HTMLResponse, RedirectResponse, Response
 
 from llmwiki import tools
-from llmwiki.api.session import clear_cookie_header, read_cookie, session_cookie_header
+from llmwiki.api.session import clear_cookie_header, client_ip_of, cookie_header, read_cookie
 from llmwiki.config import Settings
 
 logger = logging.getLogger(__name__)
@@ -50,17 +55,17 @@ def safe_next(target: str | None) -> str:
     return target
 
 
-def csrf_for(request: Request) -> tuple[str, Callable[[Response], None]]:
-    """The CSRF value to put in a form, and a function that sets its cookie on the response."""
+def login_csrf_for(request: Request) -> tuple[str, Callable[[Response], None]]:
+    """The login form's CSRF value and a function that sets its double-submit cookie."""
     service = tools.auth_service(_cfg())
-    current = request.cookies.get(service.csrf_cookie)
+    current = request.cookies.get(service.login_csrf_cookie)
     if current and len(current) >= 32:
         return current, lambda response: None
     token = service.new_csrf_token()
 
     def set_cookie(response: Response) -> None:
-        response.headers.append("set-cookie", session_cookie_header(
-            _cfg(), service.csrf_cookie, token, CSRF_MAX_AGE, samesite="strict"))
+        response.headers.append("set-cookie", cookie_header(
+            _cfg(), service.login_csrf_cookie, token, CSRF_MAX_AGE, samesite="strict"))
 
     return token, set_cookie
 
@@ -89,7 +94,7 @@ def _page(title: str, body: str) -> str:
 
 def login_page(request: Request, *, next_url: str, error: str = "", username: str = "",
                status: int = 200, headers: dict | None = None) -> HTMLResponse:
-    csrf, set_csrf = csrf_for(request)
+    csrf, set_csrf = login_csrf_for(request)
     error_html = f"<p class='bad' role='alert'>{escape(error)}</p>" if error else ""
     body = (
         "<h1>llmwiki <span class='muted'>sign in</span></h1>"
@@ -118,10 +123,16 @@ def no_access_message() -> str:
 
 
 def no_access_page(request: Request) -> HTMLResponse:
-    response = login_page(request, next_url=DEFAULT_NEXT, error=no_access_message(), status=403)
-    response.headers.append("set-cookie", clear_cookie_header(
-        _cfg(), tools.auth_service(_cfg()).session_cookie))
-    return response
+    """403 after a refresh dropped the permission (the middleware already deleted the session)."""
+    return login_page(request, next_url=DEFAULT_NEXT, error=no_access_message(), status=403)
+
+
+def unavailable_page() -> HTMLResponse:
+    """503: the SSO is unreachable and the access token has expired; the session is kept (Q-05)."""
+    body = ("<h1>llmwiki</h1><p class='bad'>Login service unavailable. "
+            "Please try again in a moment.</p>")
+    return HTMLResponse(_page("llmwiki", body),
+                        status_code=503, headers={"Retry-After": "30", "Cache-Control": "no-store"})
 
 
 @router.get("/login", response_class=HTMLResponse)
@@ -145,7 +156,7 @@ def login_submit(
     service = tools.auth_service(cfg)
     target = safe_next(next)
     username = username.strip()
-    if not service.csrf_ok(request.cookies.get(service.csrf_cookie), csrf_token):
+    if not service.csrf_ok(request.cookies.get(service.login_csrf_cookie), csrf_token):
         logger.info("login form rejected: CSRF token missing or mismatched")
         return login_page(request, next_url=target, username=username, status=403,
                           error="Your login form expired. Please try again.")
@@ -153,7 +164,7 @@ def login_submit(
         return login_page(request, next_url=target, username=username, status=400,
                           error="Enter your username or email and your password.")
     try:
-        session, principal = service.login(username, password)
+        session_id, rec, principal = service.login(username, password, client_ip_of(request.scope))
     except tools.PermissionDenied:
         logger.info("login without %s: %s", service.required_permission, username)
         return login_page(request, next_url=target, username=username, status=403,
@@ -171,11 +182,10 @@ def login_submit(
                           error="Login service unavailable. Please try again later.")
     logger.info("login ok: %s (sub %s)", principal.username, principal.sub)
     response = RedirectResponse(target, status_code=303)
-    response.headers.append("set-cookie", session_cookie_header(
-        cfg, service.session_cookie, service.dump_session(session), session.max_age()))
-    # a fresh CSRF value after login (no fixation of a pre-login value)
-    response.headers.append("set-cookie", session_cookie_header(
-        cfg, service.csrf_cookie, service.new_csrf_token(), CSRF_MAX_AGE, samesite="strict"))
+    response.headers.append("set-cookie", cookie_header(
+        cfg, service.session_cookie, session_id, service.session_max_age(rec)))
+    # the login double-submit cookie has done its job; the session carries its own csrf value
+    response.headers.append("set-cookie", clear_cookie_header(cfg, service.login_csrf_cookie))
     response.headers["Cache-Control"] = "no-store"
     return response
 
@@ -203,14 +213,24 @@ def _login_error(request: Request, target: str, username: str, exc: Exception) -
 
 @router.post("/logout")
 def logout(request: Request, csrf_token: str = Form("")) -> Response:
-    """Discard the SSO refresh token, clear the cookie, back to ``/login``. CSRF-protected."""
+    """Delete the session, discard the SSO refresh token, clear the cookie, back to ``/login``.
+
+    CSRF: the session's csrf value as the form field or the X-CSRF-Token header.
+    """
     cfg = _cfg()
     service = tools.auth_service(cfg)
-    if not service.csrf_ok(request.cookies.get(service.csrf_cookie), csrf_token):
-        return HTMLResponse(_page("llmwiki", "<p class='bad'>Invalid logout form. Go back and "
-                                             "try again.</p>"), status_code=403)
-    raw = read_cookie(request.scope, service.session_cookie)
-    service.logout(service.load_session(raw))
+    session = getattr(request.state, "auth_session", None)
+    if session is None:  # no live session: just clear whatever cookie there is
+        raw = read_cookie(request.scope, service.session_cookie)
+        rec = service.get_session(raw)
+    else:
+        rec = session
+    if rec is not None:
+        supplied = csrf_token or request.headers.get(service.csrf_header, "")
+        if not service.csrf_ok(rec.csrf, supplied):
+            return HTMLResponse(_page("llmwiki", "<p class='bad'>Invalid logout form. Go back "
+                                                 "and try again.</p>"), status_code=403)
+        service.logout(rec)
     response = RedirectResponse("/login", status_code=303)
     response.headers.append("set-cookie", clear_cookie_header(cfg, service.session_cookie))
     return response

@@ -110,8 +110,10 @@ class FakeSSO:
         self.refresh_ttl = 7 * 24 * 3600
         self.live_refresh: dict[str, str] = {}  # refresh token -> username
         self.calls: list[tuple[str, dict]] = []
+        self.auth_headers: list[str] = []  # Authorization header of each call ("" if none)
         self.down = False
         self.rate_limited: int | None = None
+        self.refresh_delay = 0.0  # seconds; widens the window for concurrency tests
         self.jwks_fetches = 0
         self.issuer = ISSUER
 
@@ -143,6 +145,7 @@ class FakeSSO:
         path = request.url.path
         body = json.loads(request.content or b"{}") if request.method == "POST" else {}
         self.calls.append((path, body))
+        self.auth_headers.append(request.headers.get("authorization", ""))
         if path == "/.well-known/jwks.json":
             self.jwks_fetches += 1
             return httpx.Response(200, json={"keys": [self.key.jwk()]})
@@ -160,6 +163,8 @@ class FakeSSO:
                 return self._err(403, "account_inactive", "Please activate your account.")
             return httpx.Response(200, json=self._pair(name))
         if path == "/api/v1/auth/refresh":
+            if self.refresh_delay:
+                time.sleep(self.refresh_delay)
             name = self.live_refresh.pop(body.get("refresh_token", ""), None)
             if name is None or not self.users[name].active:
                 return self._err(401, "token_invalid", "Token is invalid or expired")
