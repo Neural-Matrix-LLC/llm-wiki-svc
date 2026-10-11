@@ -272,3 +272,92 @@ Logs: `run/logs/existing/6520890-py3.{11,13}.txt`, `run/logs/junit/existing-6520
 | 22:56 | qa_sso py3.11 functional (+ throttle phase 22/0): 5 failed, 1076 passed, 164 skipped, 1 xfailed; restart 2 passed. Failures: SID-03 x4 (POST /compile/<malformed> = 500), LOG-03 (token logged with a percent-encoded `%74oken=` name, from the RED-02 probe). Tests then adjusted so this finding is counted once (RED-02 strict, LOG-03 skips that probe line); SID-07 added (pre-existing, well-formed unknown id) | done |
 | 23:11 | qa_sso py3.13 (final tests): functional 1076/6/165, restart 2/0, throttle 22/0 | done |
 | 23:24 | qa_sso py3.11 full re-run with final tests: 1078/6/165 (incl. restart); throttle phase 22/0 from the first pass | done |
+
+---
+
+# Quick check @ ba2097f
+
+> **Status: COMPLETE** (2026-10-11, 00:12 PT). Progress log at the end of this section.
+
+## Summary
+
+- llm-wiki-svc `feat/sso-login` @ **ba2097f**, clean; cf7130e is an ancestor.
+- **sso-server is at b46bc94, not 03516ce.** That is one more docs-only commit by Philip (23:27 PT, "docs: sync
+  integration design (session rotation note)", `docs/sso-integration-design.md` +4/-1). 03516ce is its parent and the
+  tree is clean. The two design-doc copies are now identical, so the round-2 drift note is resolved. No code change.
+- Server interpreters: all 11 processes (SSO x2, stub, 9 llm-wiki) on CPython 3.11.14 / 3.13.16, also after the
+  restart test; pytest on the same version. Ports 8030-8042, PID stop, all ports free at the end, throwaway DBs.
+
+### Counts (pass / fail / skip; skips include 1 xfail JWTV-03 and the 20 throttle tests skipped in the functional phase)
+
+Every area except r2_fixes is identical on both Pythons and fully green: SEM 16, auth matrix 495 (135 skip), cookies 10,
+CSRF 58 (7 skip), fallback 29, JWT verification 48 (1 skip), login 28, login SSO errors 12, logout 10 (1 skip),
+MCP 27, open redirect 38, session 36 (1 skip, incl. 2 restart), app-perm command 23, perms 47 (SSO_SUPERUSER_ALL_APPS on
+and off), refresh perms 7, startup 43, static regression 102 (100 + 2 throttle phase), logs 6, throttle 20.
+
+| | py3.11 | py3.13 |
+|---|---|---|
+| r2_fixes (NS/RED/ROT/SID) | 91 / 8 / 0 | 91 / 8 / 0 |
+| **Total** | **1,146 / 8 / 165** | **1,146 / 8 / 165** |
+
+How the numbers were assembled: full functional + restart run on each Python (`junit/py3.x-{functional,restart}.xml`),
+then, because RED-02's case-variant expectations were a QA test bug fixed after that run (see below), `r2_fixes` and
+`zy_logs` were re-run on a fresh stack (`junit/py3.x-supp.xml`) and the throttle phase run (`junit/py3.x-throttle.xml`).
+The table uses the supp results for those two files and the full run for everything else. The first run's 13 failures
+per Python were: the same 8 below, 4 QA-bug cases (`%54OKEN`, `T%6fKeN` expected 200), and LOG-03 for the same leak.
+
+### Requested repros
+
+| Check | Result |
+|---|---|
+| F-R2-01: POST /compile/<malformed> (3 ids) → 404 `{"detail":"not a valid source_id"}`, static and both (SID-03) | **PASS** |
+| F-R2-02: `%74oken`, `t%6Fken`, `%74%6F%6B%65%6E` authenticate as before (200) and are redacted; `%54OKEN`, `T%6fKeN`, `access%5Ftoken`, `Access_%54oken`, `+token` keep their previous status (401 static / 303 both) and are redacted; checked in every log file (9 wiki, 2 SSO, stub), static and both (RED-02) | **PASS** |
+| F-R2-02 double-encoded: `%2574oken`, `t%256Fken`, `%25%37%34oken`, `%2574%256Fken` | status unchanged (401/303) but **value logged in clear: FAIL (Low)**, F-R3-01 |
+| Plain `token=` spellings, 500 path, all sinks (RED-01, RED-03, LOG-01..06 incl. strict LOG-03) | **PASS** |
+| PRE-03: POST /compile/<well-formed unknown> → 404 `{"detail":"no such source: '00000000000000aa'"}`, static and both (SID-07) | **PASS** |
+| PRE-03: MCP compile_update unknown → `isError`, "no such source", no traceback (SID-07b) | **PASS** |
+| PRE-03: `llmwiki compile <unknown>` → exit 1, one error line (stderr otherwise only the usual INFO backend lines), empty stdout, no traceback (SID-07c); malformed ids one line (SID-06) | **PASS** |
+| GET /sources/<well-formed unknown> | **200** `state: failed, error: unknown source` (SID-02), **not 404**: see "Static byte identity" |
+| 307 trailing-slash redirects (NS-04, was the round-2 Info note): GET /dashboard/, /login/, /logout/, POST /logout/, /dashboard/?month= → 307 to the slash-less path (query kept), exactly one `no-store` in sso and both; static and static_reads: /dashboard/ 307 with no Cache-Control, /login/ and /logout/ 404 with none; /Dashboard 404 (NS-05) | **PASS** |
+| Session rotation, Q-08/Q-10, no-store pages (ROT-*, NS-01..03) | **PASS** (unchanged) |
+
+### Static byte identity
+
+- REG suite (102 incl. the route snapshot `snapshots/static_routes_bca2bef.json`, exact 401 bodies/headers, REG-14b) and
+  NS-03/NS-04: **PASS** on both Pythons. No Cache-Control anywhere in static mode, 307 included.
+- In-process comparison bca2bef worktree vs ba2097f (static mode, offline backends; `logs/probe-ba2097f/`):
+  identical for `GET /sources/<well-formed unknown>` (200, same body apart from timestamps), `/dashboard`, `/dashboard/`.
+  Three answers differ, all 500 → 404: `GET /sources/qa-no-such-source` (malformed), `POST /compile/qa-no-such-source`,
+  `POST /compile/00000000000000aa`. At bca2bef these were bare `500 Internal Server Error` crashes (PRE-01/PRE-03);
+  **intended fixes, not regressions**.
+- The well-formed unknown id on `GET /sources` was **not** changed to 404 (still 200 "failed / unknown source", as at
+  bca2bef, and `llmwiki source <id>` still prints that status with exit 0). That keeps static mode identical, but it is
+  not "404 for /sources". **Decision needed (Philip):** keep it (static unchanged) or make it 404 (a visible static-mode
+  change). The tests pin the current behaviour (SID-02, SID-07d).
+
+### New failure
+
+**F-R3-01 (Low) double-encoded token parameter names are logged in clear.** `src/llmwiki/config.py:31-33`
+(`_is_token_name`) decodes the name once, like Starlette. A name such as `%2574oken` is `%74oken` to Starlette, so it is
+not a credential (status unchanged, 401 static / 303 both) and the redactor leaves its value alone.
+Repro: `curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:8035/dashboard?month=2026-10&%2574oken=$STATIC"` → 401;
+`wiki-static.log`: `"GET /dashboard?month=2026-10&%2574oken=qa-static-... HTTP/1.1" 401`. Same for `t%256Fken`,
+`%25%37%34oken`, `%2574%256Fken`, and on both mode (8031). Only a client with a double-encoding bug triggers it, and the
+value is a real token then. Fix: decode repeatedly (until stable, bounded) before comparing, which errs towards redacting.
+
+### Existing suite @ ba2097f (py3.11.14)
+
+Clean detached worktree (removed): `4 failed, 1074 passed, 1 skipped, 32 deselected`. The 4 known R2_* factory-isolation
+failures (3 `test_channels`, `test_mcp_is_reachable_at_slash_mcp`); TODOS.md:7 ticket still there.
+
+## Progress log
+
+
+| Time (PT) | Phase | State |
+|---|---|---|
+| 23:34 | llm-wiki `feat/sso-login` @ ba2097f, clean, cf7130e is an ancestor (4 commits: 554bb18, 27017fd, f5c6230, ba2097f). **sso-server is at b46bc94, not 03516ce**: one more docs-only commit by Philip (23:27 PT, "sync integration design (session rotation note)", +4/-1 in `docs/sso-integration-design.md`), 03516ce is its parent, tree clean. Both design-doc copies are now identical (the round-2 drift note is resolved) | done |
+| 23:35 | Static byte check in-process (FastAPI TestClient, static mode, offline backends) bca2bef worktree vs ba2097f: `logs/probe-ba2097f/` | done |
+| 23:36 | Tests updated: NS-04 strict (307 trailing slash, 5 paths x 4 instances), NS-05, RED-02 (12 encoded/double-encoded/mixed names x static/both, all log files), SID-02 (unchanged unknown-id status), SID-06 one line, SID-07/07b/07c/07d; LOG-03 strict. 1,297 items | done |
+| 23:37 | Existing suite @ ba2097f, py3.11.14 (clean worktree, removed): `4 failed, 1074 passed, 1 skipped, 32 deselected`; the 4 known R2_* factory-isolation failures | done |
+| 00:01 | qa_sso full functional + restart: py3.11 (23:48) and py3.13 (00:01) each 1117/13/165 + restart 2/0; identical failures. 4 of the 13 were a QA bug (Starlette query names are case-sensitive, so `%54OKEN`/`T%6fKeN` never authenticated); RED-02 fixed, LOG-03 skips RED-02's double-encoded probe lines (reported once by RED-02). Throttle phase didn't start (typo in the QA wrapper script), so it was run in the supplemental pass | done |
+| 00:06 | Supplemental on a fresh stack per Python: r2_fixes + zy_logs 97/8 (py3.13 00:03, py3.11 00:06), throttle phase 22/0 each | done |

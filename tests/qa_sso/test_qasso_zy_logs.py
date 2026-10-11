@@ -36,8 +36,10 @@ def test_LOG_03_no_static_token(logs, cfg):
         pytest.skip("static token unknown/short")
     # PRE-02 fixed in d8b1e89 (token= redacted in uvicorn's access log): strict again - the harness sends
     # /dashboard?token=<static> many times (matrix static_query_ok, RED-*), none of it may reach any log.
-    # the RED-02 probe line (percent-encoded parameter name) is reported by RED-02 itself, not double-counted here
-    leaks = [ln for ln in logs.splitlines() if cfg.static_token in ln and "?%74oken=" not in ln]
+    # F-R2-02 fixed in f5c6230: strict, including RED-02's encoded / double-encoded probes
+    # lines from RED-02's double-encoded probes (`month=2026-10&<name with %25>=`) are reported by RED-02 itself
+    leaks = [ln for ln in logs.splitlines() if cfg.static_token in ln
+             and not re.search(r"month=2026-10&[^=\s]*%25", ln)]
     assert not leaks, leaks[:3]
     if cfg.dotted_token:
         assert cfg.dotted_token not in logs, "the JWT-shaped static token (D-09 instance) was logged"

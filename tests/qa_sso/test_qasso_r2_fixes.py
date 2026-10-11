@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -90,16 +91,35 @@ def test_NS_03_static_mode_has_no_cache_control(cfg, static_token, inst_name):
 
 
 @pytest.mark.needs_wiki
-@pytest.mark.parametrize("trail", ["/dashboard/", "/login/", "/Dashboard"])
-def test_NS_04_path_variants(cfg, trail):
-    """Path variants are not the pages themselves; they must not serve page content without no-store."""
-    inst = instance_or_skip(cfg, "sso")
+@pytest.mark.parametrize("inst_name", ["sso", "both", "static", "static_reads"])
+@pytest.mark.parametrize("method,path", [("GET", "/dashboard/"), ("GET", "/login/"), ("POST", "/logout/"),
+                                         ("GET", "/logout/"), ("GET", "/dashboard/?month=2026-10")])
+def test_NS_04_trailing_slash_307(cfg, inst_name, method, path):
+    """ba2097f (was the round-2 'Info' note): Starlette's 307 trailing-slash redirects to /login, /logout,
+    /dashboard carry exactly one Cache-Control: no-store in sso/both, and no Cache-Control in static (where
+    /login and /logout do not exist, so only /dashboard/ redirects; the others stay 404)."""
+    inst = instance_or_skip(cfg, inst_name)
     with _c(inst) as c:
-        r = c.get(trail, headers={"Accept": "text/html"})
-    print("NS-04", trail, r.status_code, _cc(r), r.headers.get("location"))
-    assert r.status_code in (301, 302, 303, 307, 308, 401, 404, 405) or _cc(r) == [NO_STORE], (r.status_code, _cc(r))
-    if r.status_code == 200:
-        assert _cc(r) == [NO_STORE]
+        r = c.request(method, path, headers={"Accept": "text/html"})
+    static = inst.mode == "static"
+    if static and not path.startswith("/dashboard"):
+        assert r.status_code == 404 and "cache-control" not in r.headers, (r.status_code, _cc(r))
+        return
+    assert r.status_code == 307, (r.status_code, r.headers.get("location"))
+    loc = r.headers["location"]
+    assert httpx.URL(loc).path == path.split("?")[0].rstrip("/"), loc
+    if "?" in path:
+        assert httpx.URL(loc).query.decode() == path.split("?", 1)[1], loc
+    assert _cc(r) == ([] if static else [NO_STORE]), _cc(r)
+
+
+@pytest.mark.needs_wiki
+@pytest.mark.parametrize("inst_name", ["sso", "static"])
+def test_NS_05_case_variant_is_404_no_content(cfg, inst_name):
+    inst = instance_or_skip(cfg, inst_name)
+    with _c(inst) as c:
+        r = c.get("/Dashboard", headers={"Accept": "text/html"})
+    assert r.status_code == 404
 
 
 # ================================================================ RED: token= redaction (PRE-02)
@@ -140,20 +160,40 @@ def test_RED_01_access_log_redacts_token_params(cfg, inst_name):
     assert not leaks, (codes, leaks[:5])
 
 
+# (raw name, decodes-to-token-for-Starlette). Starlette decodes a query name once (parse_qsl).
+# Starlette's query names are case-sensitive: %54OKEN -> 'TOKEN' is not the credential parameter (401 as before),
+# but the redaction is case-insensitive, so its value must still be redacted.
+ENCODED_NAMES = [("%74oken", True), ("%54OKEN", False), ("t%6Fken", True), ("T%6fKeN", False), ("%74%6F%6B%65%6E", True),
+                 ("access%5Ftoken", True), ("Access_%54oken", True), ("+token", False),
+                 ("%2574oken", False), ("t%256Fken", False), ("%25%37%34oken", False), ("%2574%256Fken", False)]
+
+
 @pytest.mark.needs_wiki
-def test_RED_02_percent_encoded_param_name_observed(cfg, static_token):
-    """'?%74oken=' is decoded to 'token' by Starlette (so it authenticates) but the access log prints the raw
-    query, which the redaction regex (literal 'token=') does not match. Low: needs a client that encodes the name."""
-    inst = instance_or_skip(cfg, "static")
-    log = _log_of(cfg, "static")
-    start = log.stat().st_size
+@pytest.mark.parametrize("inst_name", ["static", "both"])
+@pytest.mark.parametrize("raw,decodes", ENCODED_NAMES, ids=[n for n, _ in ENCODED_NAMES])
+def test_RED_02_encoded_param_names_redacted_everywhere(cfg, static_token, inst_name, raw, decodes):
+    """F-R2-02 (f5c6230): percent-encoded / double-encoded / mixed spellings of a token parameter carrying the
+    real static token: the request behaves as before (single-encoded 'token' authenticates on /dashboard; the
+    double-encoded name is not 'token' to Starlette, so it is not a credential: 401) and the value reaches no
+    log file at all (all instance, SSO and stub logs)."""
+    inst = instance_or_skip(cfg, inst_name)
+    sizes = {f: Path(f).stat().st_size for f in cfg.log_files}
     with _c(inst) as c:
-        r = c.get(f"/dashboard?%74oken={static_token}")
-    text = _new_text(log, start)
-    leaked = static_token in text
-    print(f"RED-02 observed: status {r.status_code}, raw-encoded name {'LEAKS' if leaked else 'redacted'}")
-    # the parameter authenticates (Starlette decodes the name), so its value is the static token: must not leak
-    assert not leaked, "token value logged in clear when the parameter name is percent-encoded (config.py:24)"
+        r = c.get(f"/dashboard?month=2026-10&{raw}={static_token}")
+    if raw == "access%5Ftoken" or raw == "Access_%54oken" or raw == "+token":
+        expected = 401  # only the exact name 'token' is a credential on /dashboard (bca2bef behaviour)
+    else:
+        expected = 200 if decodes else 401
+    if inst.mode != "static" and expected == 401:
+        expected = 303  # both mode: an HTML page without credentials redirects to /login
+    assert r.status_code == expected, (raw, r.status_code)
+    time.sleep(0.6)
+    leaks = []
+    for f, start in sizes.items():
+        with open(f, "rb") as fh:
+            fh.seek(start)
+            leaks += [ln for ln in fh.read().decode(errors="replace").splitlines() if static_token in ln]
+    assert not leaks, leaks[:3]
 
 
 @pytest.mark.needs_wiki
@@ -272,13 +312,19 @@ def test_SID_01_get_sources_malformed_is_404(cfg, inst_name, bad):
 
 
 @pytest.mark.needs_wiki
-def test_SID_02_get_sources_wellformed_unknown(cfg):
-    """Control: a well-formed unknown id is not a 500 (status recorded)."""
-    inst = instance_or_skip(cfg, "static")
+@pytest.mark.parametrize("inst_name", ["static", "both"])
+def test_SID_02_get_sources_wellformed_unknown_unchanged(cfg, inst_name):
+    """GET /sources/<well-formed unknown id> keeps the bca2bef answer: 200 {"state":"failed","error":"unknown
+    source",...} (compared in-process against a bca2bef worktree, see results @ ba2097f). Not 404: changing it
+    would change static mode; a 404 here needs a decision (results doc, quick check @ ba2097f)."""
+    inst = instance_or_skip(cfg, inst_name)
     with _c(inst) as c:
-        r = c.get("/sources/00000000000000aa")
-    print("SID-02", r.status_code, r.text[:120])
-    assert r.status_code < 500
+        r = c.get("/sources/00000000000000aa", headers={"Authorization": f"Bearer {cfg.static_token}"})
+    assert r.status_code == 200, r.status_code
+    body = r.json()
+    assert body["state"] == "failed" and body["error"] == "unknown source", body
+    assert list(body) == ["source_id", "state", "error", "chunk_count", "pages_touched", "elapsed_s",
+                          "updated_at"] or set(body) >= {"source_id", "state", "error"}, list(body)
 
 
 @pytest.mark.needs_wiki
@@ -353,16 +399,47 @@ def test_SID_06_cli_malformed_id_clean_error(tmp_path, cmd, bad):
     out = p.stdout + p.stderr
     assert p.returncode != 0, out[-500:]
     assert "Traceback" not in out, out[-1500:]
-    assert "not a valid source_id" in p.stderr, out[-500:]
+    assert p.stderr.strip().count("\n") == 0 and "not a valid source_id" in p.stderr, p.stderr[-500:]
+    assert p.stdout == "", p.stdout[-200:]
+
+
+WELL_FORMED_UNKNOWN = "00000000000000aa"
 
 
 @pytest.mark.needs_wiki
-def test_SID_07_compile_wellformed_unknown_id(cfg, static_token, tmp_path):
-    """PRE-03 (pre-existing, outside PRE-01): a well-formed id with no captured source. HTTP should not be a 500
-    and the CLI should not print a traceback. Not part of 6520890's scope - reported Low."""
-    inst = instance_or_skip(cfg, "static")
+@pytest.mark.parametrize("inst_name", ["static", "both"])
+def test_SID_07_compile_wellformed_unknown_http_404(cfg, static_token, inst_name):
+    """PRE-03 (27017fd): POST /compile/<well-formed unknown id> -> 404 {"detail":"no such source: '<id>'"}."""
+    inst = instance_or_skip(cfg, inst_name)
     with _c(inst) as c:
-        r = c.post("/compile/00000000000000aa", headers={"Authorization": f"Bearer {static_token}"})
-    p = _cli(tmp_path, "compile", "00000000000000aa")
-    print("SID-07 http", r.status_code, "cli rc", p.returncode, "traceback" if "Traceback" in p.stderr else "clean")
-    assert r.status_code < 500 and "Traceback" not in p.stderr, (r.status_code, p.stderr[-300:])
+        r = c.post(f"/compile/{WELL_FORMED_UNKNOWN}", headers={"Authorization": f"Bearer {static_token}"})
+    assert r.status_code == 404, (r.status_code, r.text[:200])
+    assert r.json() == {"detail": f"no such source: '{WELL_FORMED_UNKNOWN}'"}, r.text
+
+
+@pytest.mark.needs_wiki
+@pytest.mark.parametrize("inst_name", ["static", "both"])
+def test_SID_07b_mcp_compile_update_unknown_is_tool_error(cfg, static_token, inst_name):
+    inst = instance_or_skip(cfg, inst_name)
+    auth = {} if inst.mode == "static" and not inst.protect_reads else {"Authorization": f"Bearer {static_token}"}
+    out = _mcp_call(inst.url, auth, "compile_update", {"source_id": WELL_FORMED_UNKNOWN})
+    text = json.dumps(out)
+    assert (out.get("result") or {}).get("isError") is True, text[:400]
+    assert "no such source" in text and "Traceback" not in text and "ObjectNotFound" not in text, text[:400]
+
+
+def test_SID_07c_cli_compile_unknown_one_line(tmp_path):
+    p = _cli(tmp_path, "compile", WELL_FORMED_UNKNOWN)
+    assert p.returncode != 0 and "Traceback" not in p.stderr + p.stdout, p.stderr[-800:]
+    # stderr also carries the normal INFO lines of backend construction (logging); the error itself is one line
+    err = [ln for ln in p.stderr.splitlines() if ln.strip() and not re.match(r"\d\d:\d\d:\d\d (INFO|DEBUG) ", ln)]
+    assert err == [f"no such source: '{WELL_FORMED_UNKNOWN}'"], p.stderr[-600:]
+    assert p.stdout == "", p.stdout[-200:]
+
+
+def test_SID_07d_cli_source_unknown_unchanged(tmp_path):
+    """`llmwiki source <well-formed unknown>` keeps printing the 'failed / unknown source' status (exit 0), the
+    CLI twin of SID-02."""
+    p = _cli(tmp_path, "source", WELL_FORMED_UNKNOWN)
+    assert p.returncode == 0 and "Traceback" not in p.stderr, p.stderr[-300:]
+    assert json.loads(p.stdout)["error"] == "unknown source"

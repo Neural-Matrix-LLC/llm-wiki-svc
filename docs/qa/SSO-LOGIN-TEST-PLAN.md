@@ -1,4 +1,4 @@
-# llm-wiki-svc SSO login and `application.app1`: QA test plan (v1.2 + regression @ 6520890)
+# llm-wiki-svc SSO login and `application.app1`: QA test plan (v1.2 + regression @ 6520890 + quick check @ ba2097f)
 
 | | |
 |---|---|
@@ -573,25 +573,27 @@ its own source address, so buckets never collide and no 61 s waits are needed.
 | NS-01 (x2: sso, both) | real SSO, `qa_wiki_direct` | GET /login; POST wrong pw; POST ok; GET /login signed in; GET /dashboard; POST /logout; anon / bad-Bearer /dashboard; GET /logout; /login?next=//evil | every response has exactly one `Cache-Control: no-store` |
 | NS-02 | sso | /healthz, /usage, /domains with a valid Bearer | no `no-store` (only the three pages) |
 | NS-03 (x2: static, static_reads) | static | /dashboard ?token / Bearer / none / bad; /login; POST /logout | no `Cache-Control` header at all (Q-20 sso/both only) |
-| NS-04 (x3) | sso | /dashboard/, /login/, /Dashboard | redirect/404 without content, or no-store if 200 |
+| NS-04 (x20) | sso, both, static, static_reads | GET /dashboard/, GET /login/, POST /logout/, GET /logout/, GET /dashboard/?month= | sso/both: 307 to the slash-less path (query kept) with exactly one `Cache-Control: no-store`; static: /dashboard/ 307 with no Cache-Control, /login/ and /logout/ 404 with none (ba2097f) |
+| NS-05 (x2) | sso, static | GET /Dashboard | 404 |
 | RED-01 (x2: static, both) | instance log file | `?token=`, `&token=`, `TOKEN=`, `access_token=`, `;token=`, repeated, on 200/401/404/405 routes | `[redacted]` present; neither the static token nor the probe secret in any new log line |
-| RED-02 | static | `/dashboard?%74oken=<static>` | token not logged (it authenticates, Starlette decodes the name) |
+| RED-02 (x24) | static, both | `/dashboard?month=..&<name>=<static>` for 12 names: `%74oken`, `%54OKEN`, `t%6Fken`, `T%6fKeN`, `%74%6F%6B%65%6E`, `access%5Ftoken`, `Access_%54oken`, `+token`, and double-encoded `%2574oken`, `t%256Fken`, `%25%37%34oken`, `%2574%256Fken` | status unchanged (only a name decoding to exactly `token` authenticates: 200; others 401 static / 303 both); the token is in no log file |
 | RED-03 (x2) | static, both | POST /compile/<malformed>?token= (server-error path) | no token in the log, traceback included |
 | ROT-01 (x2: same user, other user) | sso, session DB (grey) | log in, record cookie/CSRF/refresh; log in again in the same browser | 303, new id and CSRF; old row deleted; row count unchanged; old cookie: JSON 401, HTML 303 → /login; new cookie works; SSO `/auth/refresh` with the old refresh token → 401 |
 | ROT-02 | sso | wrong password while signed in | no rotation, same cookie still works (Q-10) |
 | ROT-03 | stub, logout mode `server_error` then `close` | re-login | login still succeeds, old row deleted, old refresh token sent to SSO logout once (best effort) |
 | ROT-04 | sso | planted unknown cookie, then log in | replaced; the planted id stays dead |
 | SID-01 (x12) | static, both | GET /sources/<bad> for 6 malformed ids | 404, no traceback |
-| SID-02 | static | GET /sources/<well-formed unknown> | < 500 (recorded) |
+| SID-02 (x2) | static, both | GET /sources/<well-formed unknown> | 200 `state: failed, error: unknown source`, same as bca2bef (static unchanged) |
 | SID-03 (x6) | static, both | POST /compile/<bad> (static token) | 404, same as GET /sources |
 | SID-04 (x6) | static, both | MCP `tools/call compile_update` with a bad id | `isError: true`, "not a valid source_id", no traceback |
 | SID-05 | static | MCP `tools/list` | the seven tools; only `compile_update` takes a source id |
-| SID-06 (x6) | CLI, offline backends | `llmwiki compile|source <bad>` (incl. `""`, `../../etc/passwd`) | exit ≠ 0, message on stderr, no traceback |
-| SID-07 | static + CLI | POST /compile and `llmwiki compile` with a well-formed unknown id | < 500 and no traceback (pre-existing, PRE-03) |
+| SID-06 (x6) | CLI, offline backends | `llmwiki compile|source <bad>` (incl. `""`, `../../etc/passwd`) | exit ≠ 0, exactly one stderr line, empty stdout, no traceback |
+| SID-07 (x2) / 07b (x2) / 07c / 07d | static, both, CLI | POST /compile/<well-formed unknown>; MCP compile_update; `llmwiki compile`; `llmwiki source` | 404 `{"detail":"no such source: '<id>'"}`; MCP `isError` "no such source"; CLI exit 1 with one error line (besides INFO logging), no traceback; `source` keeps the unknown-source status, exit 0 |
 
 ## 4. Case counts (v1.2)
 
-Regression @ 6520890: +51 items in `test_qasso_r2_fixes.py` (NS 8, RED 5, ROT 5, SID 33); the suite now collects **1,249** items.
+Regression @ 6520890: +51 items in `test_qasso_r2_fixes.py` (NS 8, RED 5, ROT 5, SID 33); the suite collected 1,249 items.
+Quick check @ ba2097f: `test_qasso_r2_fixes.py` has 99 items (NS 27, RED 28, ROT 5, SID 39); the suite collects **1,297** items.
 
 | Area (file) | Test functions | pytest items |
 |---|---|---|
