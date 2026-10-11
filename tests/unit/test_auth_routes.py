@@ -879,3 +879,16 @@ def test_sso_logout_crash_during_rotation_does_not_block_login(build, sso, tmp_p
     monkeypatch.setattr(AuthService, "_discard", boom)
     r = _relogin(client, old_cookie)
     assert r.status_code == 303 and len(store_rows(tmp_path)) == 1
+
+
+@pytest.mark.parametrize("mode", ["sso", "both"])
+@pytest.mark.parametrize("path", ["/login/", "/dashboard/"])
+def test_trailing_slash_redirects_are_no_store(build, mode, path) -> None:
+    r = build(auth_mode=mode).get(path)
+    assert r.status_code == 307 and r.headers["location"].endswith(path.rstrip("/"))
+    assert r.headers.get_list("cache-control") == ["no-store"]
+
+
+@pytest.mark.parametrize("path", ["/login/", "/dashboard/"])
+def test_static_trailing_slash_responses_unchanged(build, path) -> None:
+    assert "cache-control" not in build(auth_mode="static").get(path).headers

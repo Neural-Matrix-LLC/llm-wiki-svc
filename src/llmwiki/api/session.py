@@ -46,7 +46,9 @@ logger = logging.getLogger(__name__)
 SKIP_PREFIXES = ("/mcp", "/channels/", "/healthz")
 #: Pages that show or set session state: never cached (QA Q-20). Only in sso/both (this
 #: middleware is not installed in static mode, whose /dashboard stays byte-for-byte unchanged).
-NO_STORE_PATHS = frozenset({"/login", "/logout", "/dashboard"})
+NO_STORE_PATHS = frozenset({"/login", "/logout", "/dashboard",
+                            # Starlette's 307 trailing-slash redirects to the above
+                            "/login/", "/logout/", "/dashboard/"})
 
 
 def read_cookie(scope: Mapping[str, Any], name: str) -> str | None:
