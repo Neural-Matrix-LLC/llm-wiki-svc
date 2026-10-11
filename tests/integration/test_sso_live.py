@@ -2,8 +2,10 @@
 
 Starts SSO-server (branch feat/app-permissions) under gunicorn on SQLite and llm-wiki-svc under
 uvicorn (offline backends, AUTH_MODE=sso) on dedicated free ports, seeds users with and without
-``application.app1`` (direct and via a group), then drives the browser flow and the Bearer flow over
-real HTTP. Local only: no cloud keys, nothing costs money.
+``application.app1`` (direct and via a group) and llm-wiki's ServiceClient, then drives the browser
+flow, the Bearer flow and /mcp over real HTTP. uvicorn runs with --proxy-headers, so each test
+"browser" gets its own X-Forwarded-For IP and the SSO's per-IP throttle (design v1.1 item 4) can be
+observed per end user. Local only: no cloud keys, nothing costs money.
 
     SSO_SERVER_DIR=../sso-server pytest -m integration tests/integration/test_sso_live.py
 
@@ -31,6 +33,10 @@ pytestmark = pytest.mark.integration
 REPO = Path(__file__).resolve().parents[2]
 PERM = "application.app1"
 PASSWORD = "Wiki-Pass-" + "9" * 8
+CLIENT_ID = "llm-wiki"
+CLIENT_SECRET = "wiki-svc-" + secrets.token_urlsafe(24)
+PER_IP_LIMIT = 8  # SSO_THROTTLE_LOGIN for this run (per-user stays 5/min)
+_ips = iter(f"198.51.100.{n}" for n in range(1, 255))
 
 SEED = r"""
 from django.contrib.auth.models import Group, Permission, User
@@ -47,6 +53,11 @@ mk("wiki_inactive", is_active=False).user_permissions.add(p)
 mk("wiki_super", is_superuser=True, is_staff=True)
 mk("wiki_revoke").user_permissions.add(p)
 mk("wiki_throttle").user_permissions.add(p)
+mk("wiki_race").user_permissions.add(p)
+from sso.models import ServiceClient
+c = ServiceClient(client_id=CLIENT_ID, name="llm-wiki-svc")
+c.set_secret(CLIENT_SECRET)
+c.save()
 print("seeded")
 """
 
@@ -112,13 +123,15 @@ def sso(tmp_path_factory):
         "SSO_CORS_ALLOWED_ORIGINS": "http://127.0.0.1:1", "SSO_SSL_REDIRECT": "False",
         "SSO_COOKIE_SECURE": "False", "SSO_CACHE_URL": f"filecache://{tmp}/cache",
         # 1 min access tokens: every session request is inside the 60 s refresh margin, so the
-        # live run exercises refresh + rotation. Generous per-IP limit; per-user stays 5/min.
-        "SSO_ACCESS_TTL_MIN": "1", "SSO_THROTTLE_LOGIN": "1000/min",
+        # live run exercises refresh + rotation. A low per-IP limit: each test browser has its
+        # own IP (delegated client_ip); per-user stays 5/min.
+        "SSO_ACCESS_TTL_MIN": "1", "SSO_THROTTLE_LOGIN": f"{PER_IP_LIMIT}/min",
     }
     run = {"cwd": sso_dir, "env": env, "check": True, "capture_output": True, "text": True}
     subprocess.run([str(python), "manage.py", "migrate", "--noinput", "-v", "0"], **run)
     subprocess.run([str(python), "manage.py", "shell", "-c",
-                    f"PASSWORD={PASSWORD!r}\n" + SEED], **run)
+                    f"PASSWORD={PASSWORD!r}\nCLIENT_ID={CLIENT_ID!r}\n"
+                    f"CLIENT_SECRET={CLIENT_SECRET!r}\n" + SEED], **run)
     log = open(tmp / "gunicorn.log", "w")  # noqa: SIM115
     proc = subprocess.Popen([str(python.parent / "gunicorn"), "ssoproject.wsgi:application",
                              "-b", f"127.0.0.1:{port}", "--workers", "2"],
@@ -152,24 +165,46 @@ def wiki(sso, tmp_path_factory):
         "AGENT_SKILLS_DIR": str(tmp / "noskills"),
         "INGEST_API_TOKEN": "static-" + secrets.token_urlsafe(24),
         "AUTH_MODE": "sso", "SSO_BASE_URL": sso["base"], "SSO_ISSUER": sso["base"],
-        "SESSION_SECRET": secrets.token_urlsafe(48), "SESSION_COOKIE_SECURE": "false",
+        "SSO_CLIENT_ID": CLIENT_ID, "SSO_CLIENT_SECRET": CLIENT_SECRET,
+        "SESSION_COOKIE_SECURE": "false",
     }
     log = open(tmp / "uvicorn.log", "w")  # noqa: SIM115
     proc = subprocess.Popen([sys.executable, "-m", "uvicorn", "llmwiki.api.app:app",
-                             "--host", "127.0.0.1", "--port", str(port)],
+                             "--host", "127.0.0.1", "--port", str(port),
+                             "--proxy-headers", "--forwarded-allow-ips", "127.0.0.1"],
                             cwd=tmp, env=env, stdout=log, stderr=subprocess.STDOUT)
     try:
         _wait(f"http://127.0.0.1:{port}/healthz", proc)
         yield {"base": f"http://127.0.0.1:{port}", "log": tmp / "uvicorn.log",
-               "static": env["INGEST_API_TOKEN"], "secret": env["SESSION_SECRET"]}
+               "static": env["INGEST_API_TOKEN"], "db": tmp / "data" / "sessions.sqlite3"}
     finally:
         proc.terminate()
         proc.wait(10)
         log.close()
 
 
-def browser(wiki: dict) -> httpx.Client:
-    return httpx.Client(base_url=wiki["base"], follow_redirects=False, timeout=15)
+def browser(wiki: dict, ip: str | None = None) -> httpx.Client:
+    """A browser with its own IP (X-Forwarded-For; uvicorn trusts it from 127.0.0.1)."""
+    return httpx.Client(base_url=wiki["base"], follow_redirects=False, timeout=15,
+                        headers={"X-Forwarded-For": ip or next(_ips)})
+
+
+def session_row(wiki: dict, cookie: str) -> dict | None:
+    import hashlib
+    import sqlite3
+
+    conn = sqlite3.connect(wiki["db"])
+    conn.row_factory = sqlite3.Row
+    try:
+        row = conn.execute("SELECT * FROM sessions WHERE id_hash = ?",
+                           (hashlib.sha256(cookie.encode()).hexdigest(),)).fetchone()
+        return dict(row) if row else None
+    finally:
+        conn.close()
+
+
+def csrf_meta(page: httpx.Response) -> str:
+    return re.search(r'<meta name="csrf-token" content="([^"]+)">', page.text).group(1)
 
 
 def form_login(client: httpx.Client, username: str, password: str = PASSWORD) -> httpx.Response:
@@ -188,7 +223,7 @@ def sso_tokens(sso: dict, username: str) -> dict:
 
 def test_healthz_reports_sso_mode(wiki, sso) -> None:
     auth = httpx.get(f"{wiki['base']}/healthz").json()["config"]["auth"]
-    assert auth["mode"] == "sso" and auth["sso_issuer"] == sso["base"]
+    assert auth["mode"] == "sso" and auth["sso_issuer"] == sso["base"] and auth["mcp_protected"]
 
 
 @pytest.mark.parametrize("user", ["wiki_direct", "wiki_group", "wiki_super"])
@@ -198,7 +233,8 @@ def test_browser_login_with_permission(wiki, user) -> None:
         assert r.status_code == 303 and r.headers["location"] == "/dashboard"
         page = c.get("/dashboard")
         assert page.status_code == 200 and f"Signed in as <strong>{user}</strong>" in page.text
-        assert c.post("/lint").status_code == 200  # the session works on JSON routes too
+        assert c.post("/lint").status_code == 403  # cookie write without X-CSRF-Token
+        assert c.post("/lint", headers={"X-CSRF-Token": csrf_meta(page)}).status_code == 200
 
 
 def test_login_by_email(wiki) -> None:
@@ -220,9 +256,32 @@ def test_browser_login_refused(wiki, user, password, status, text) -> None:
         assert c.get("/dashboard").status_code == 303
 
 
+def test_per_ip_throttle_applies_to_the_browser_not_to_the_wiki_server(wiki, sso) -> None:
+    """v1.1 item 4: Basic auth + client_ip -> the SSO's per-IP limit counts each browser."""
+    ip_a, ip_b = next(_ips), next(_ips)
+    with browser(wiki, ip_a) as c:
+        statuses = [form_login(c, f"ghost{n}", "wrong").status_code
+                    for n in range(PER_IP_LIMIT + 1)]
+    assert statuses[:PER_IP_LIMIT] == [401] * PER_IP_LIMIT and statuses[-1] == 429, statuses
+    with browser(wiki, ip_b) as c:  # another browser behind the same wiki server: not blocked
+        assert form_login(c, "wiki_direct").status_code == 303
+    log = Path(sso["log"]).read_text()
+    assert f'"ip": "{ip_a}"' in log and f'"ip": "{ip_b}"' in log  # the SSO logged the real IPs
+
+
+def test_client_ip_without_basic_auth_is_ignored_by_the_real_sso(sso) -> None:
+    r = httpx.post(f"{sso['base']}/api/v1/auth/login",
+                   json={"username": "ghost-direct", "password": "x", "client": "native",
+                         "client_ip": "192.0.2.77"})
+    assert r.status_code == 401
+    log = Path(sso["log"]).read_text()
+    assert '"ip": "192.0.2.77"' not in log
+    assert re.search(r'"ip": "127\.0\.0\.1".*"username": "ghost-direct"', log)
+
+
 def test_rate_limited_by_the_real_sso(wiki) -> None:
-    with browser(wiki) as c:
-        statuses = [form_login(c, "wiki_throttle", "wrong").status_code for _ in range(7)]
+    with browser(wiki) as c:  # per-user limit (5/min), whatever the IP
+        statuses = [form_login(c, "wiki_throttle", "wrong").status_code for _ in range(6)]
     assert 429 in statuses, statuses
     with browser(wiki) as c:
         r = form_login(c, "wiki_throttle", "wrong")
@@ -245,11 +304,57 @@ def test_bearer_tokens_from_the_real_sso(wiki, sso) -> None:
 def test_session_refresh_rotates_at_the_real_sso(wiki, sso) -> None:
     with browser(wiki) as c:
         assert form_login(c, "wiki_direct").status_code == 303
-        first = c.cookies["llmwiki_session"]
+        cookie = c.cookies["llmwiki_session"]
+        before = session_row(wiki, cookie)
+        assert before is not None and before["refresh"] and cookie not in str(before)
         r = c.get("/dashboard")  # 1-minute access token: refreshed now
         assert r.status_code == 200
-        assert c.cookies["llmwiki_session"] != first
+        assert c.cookies["llmwiki_session"] == cookie  # the opaque id does not change
+        after = session_row(wiki, cookie)
+        assert after["refresh"] != before["refresh"] and after["created_at"] == before["created_at"]
         assert c.get("/dashboard").status_code == 200
+    # the rotated-away refresh token is blacklisted at the SSO
+    r = httpx.post(f"{sso['base']}/api/v1/auth/refresh", json={"refresh_token": before["refresh"]})
+    assert r.status_code == 401
+
+
+def test_concurrent_requests_do_not_double_refresh(wiki) -> None:
+    """Five parallel requests on one session with a due access token: if two of them used the same
+    refresh token, the SSO's reuse detection would refuse one and end the session."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    with browser(wiki) as c:
+        assert form_login(c, "wiki_race").status_code == 303
+        cookie = c.cookies["llmwiki_session"]
+        ip = c.headers["X-Forwarded-For"]
+
+    def hit(_: int) -> int:
+        with httpx.Client(base_url=wiki["base"], timeout=30,
+                          headers={"X-Forwarded-For": ip},
+                          cookies={"llmwiki_session": cookie}) as one:
+            return one.get("/usage").status_code
+
+    with ThreadPoolExecutor(5) as pool:
+        statuses = list(pool.map(hit, range(5)))
+    assert statuses == [200] * 5, statuses
+    assert hit(0) == 200 and session_row(wiki, cookie) is not None
+
+
+def test_mcp_requires_an_sso_bearer(wiki, sso) -> None:
+    body = {"jsonrpc": "2.0", "id": 1, "method": "initialize",
+            "params": {"protocolVersion": "2025-03-26", "capabilities": {},
+                       "clientInfo": {"name": "t", "version": "0"}}}
+    accept = {"Accept": "application/json, text/event-stream"}
+    url = f"{wiki['base']}/mcp/"
+    assert httpx.post(url, json=body, headers=accept).status_code == 401
+    assert httpx.post(url, json=body, headers={
+        **accept, "Authorization": f"Bearer {wiki['static']}"}).status_code == 401
+    none = sso_tokens(sso, "wiki_none")["access_token"]
+    assert httpx.post(url, json=body, headers={
+        **accept, "Authorization": f"Bearer {none}"}).status_code == 403
+    ok = sso_tokens(sso, "wiki_group")["access_token"]
+    assert httpx.post(url, json=body, headers={
+        **accept, "Authorization": f"Bearer {ok}"}).status_code == 200
 
 
 def test_revoked_permission_takes_effect_on_refresh(wiki, sso) -> None:
@@ -269,13 +374,11 @@ def test_logout_blacklists_the_refresh_token_at_the_sso(wiki, sso) -> None:
         assert form_login(c, "wiki_super").status_code == 303
         page = c.get("/dashboard")
         csrf = re.search(r"name='csrf_token' value='([^']+)'", page.text).group(1)
-        from itsdangerous import URLSafeTimedSerializer
-
-        data = URLSafeTimedSerializer(wiki["secret"], salt="llmwiki-session-v1").loads(
-            c.cookies["llmwiki_session"])
-        refresh_token = data["refresh_token"]
+        cookie = c.cookies["llmwiki_session"]
+        refresh_token = session_row(wiki, cookie)["refresh"]
         r = c.post("/logout", data={"csrf_token": csrf})
         assert r.status_code == 303 and r.headers["location"] == "/login"
+        assert session_row(wiki, cookie) is None  # row deleted server-side
         assert c.get("/dashboard").status_code == 303
     r = httpx.post(f"{sso['base']}/api/v1/auth/refresh", json={"refresh_token": refresh_token})
     assert r.status_code == 401  # blacklisted by the SSO
