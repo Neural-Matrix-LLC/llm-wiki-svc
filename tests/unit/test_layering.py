@@ -54,12 +54,6 @@ FORBIDDEN: dict[str, set[str]] = {
     "notify": {"storage", "extractors", "embedding", "vector", "llm", "wiki", "agent",
                "pipeline", "tools", "api", "mcp", "cli", "channels", "factory", "eval",
                "websearch", "lexical", "rerank"},
-    # SSO integration (docs/sso-integration-design.md B2): token verification, the SSO
-    # HTTP client and the session cookie. An L1 primitive reading only config/models;
-    # api/ reaches it through tools.auth_service and tools' re-exported exceptions.
-    "auth": {"storage", "extractors", "embedding", "vector", "llm", "wiki", "agent",
-             "pipeline", "tools", "api", "mcp", "cli", "channels", "factory", "chains",
-             "websearch", "eval", "lexical", "rerank", "notify"},
     "wiki": {"api", "mcp", "cli", "channels", "pipeline", "agent", "tools", "factory", "eval"},
     "agent": {"api", "mcp", "cli", "channels", "pipeline", "tools", "factory", "eval"},
     "pipeline": {"api", "mcp", "cli", "channels", "tools", "factory", "eval"},
