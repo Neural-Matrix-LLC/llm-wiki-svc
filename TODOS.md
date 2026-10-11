@@ -4,6 +4,27 @@ Future-planning items that are not yet scheduled into a phase. Each entry
 records what is known so the work can be picked up without re-deriving it.
 Move an item to `HISTORY.md` when it lands.
 
+## Test isolation: factory/tools hold an import-time copy of `settings` (2026-10-10)
+
+Pre-existing (fails identically at bca2bef; QA SSO-LOGIN-RESULTS.md, open question 10). Not fixed on purpose.
+
+- Symptom: 4 unit tests fail unless real R2 credentials are in the environment:
+  `test_channels.py::test_email_webhook_ingests_bare_url_body`,
+  `::test_email_webhook_ingests_an_attachment_and_the_cover_note`,
+  `::test_email_bracket_prefix_is_an_explicit_domain_and_stripped_from_the_title`, and
+  `test_tools_and_mcp.py::test_mcp_is_reachable_at_slash_mcp`. They raise
+  `RuntimeError: missing required configuration: R2_ACCESS_KEY_ID, ...`.
+- Cause: `factory.py:18` binds `from llmwiki.config import settings as default_settings` at import,
+  and every builder does `cfg = cfg or default_settings`. The tests only
+  `monkeypatch.setattr(config, "settings", cfg)`, so a call without an explicit `cfg` (e.g.
+  `compile_worker()` from the email webhook / MCP ingest path) still builds from the import-time
+  Settings (R2 backend from the developer's environment). The traceback surfaces in
+  `factory.py:36` (`_cached` -> `build()`). `tools.py` has the same `default_settings` pattern.
+- Fix options: resolve lazily (`cfg = cfg or config.settings` via the module, not a copied name),
+  or have the tests also patch `llmwiki.factory.default_settings` / `llmwiki.tools.default_settings`
+  (as `test_tools_and_mcp.py::test_tools_sources_...` at line 147 already does). The first is the
+  real fix; check that nothing relies on the snapshot.
+
 ## Reconcile with `~/branch/llm-wiki-svc` (Phase 1.x) — stashed work (2026-09-25)
 
 This tree (Phase 2, `ef96cca`) and `~/branch/llm-wiki-svc` split after
