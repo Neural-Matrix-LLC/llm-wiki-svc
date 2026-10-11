@@ -43,6 +43,12 @@ class SSOUnavailable(Exception):
     """The SSO server could not be reached or answered with a 5xx / non-JSON body."""
 
 
+class SSOMisconfigured(SSOUnavailable):
+    """The SSO refused this app's ServiceClient credentials (401 ``invalid_client``, design v1.2
+    C-19): an operator error. Handled like an outage (sessions kept, 503) but logged as an error
+    and shown as "Login service misconfigured"."""
+
+
 class SSOLoginError(Exception):
     """The SSO server refused a login/refresh: ``code`` is its ``error`` field (spec §6.8)."""
 

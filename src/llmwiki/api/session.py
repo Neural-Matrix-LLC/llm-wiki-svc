@@ -1,23 +1,28 @@
-"""Browser-session and MCP auth middleware (docs/sso-integration-design.md B4, v1.1 items 1-3, 7).
+"""Browser-session and MCP auth middleware (docs/sso-integration-design.md B4, v1.1, v1.2).
 
-Installed only when AUTH_MODE != static. Plain ASGI (not ``BaseHTTPMiddleware``), so streaming
-responses - the mounted MCP app - pass through untouched.
+Plain ASGI (not ``BaseHTTPMiddleware``), so streaming responses - the mounted MCP app - pass
+through untouched.
 
-:class:`SessionAuthMiddleware`: for a request carrying the ``llmwiki_session`` cookie (an opaque
-session id), look the session up in the server-side store, refresh its SSO access token when it
-expires within 60 s (one refresh per session at a time: a process-local asyncio lock here, and
-``BEGIN IMMEDIATE`` in the store across workers), and leave in ``request.state``:
+:class:`SessionAuthMiddleware` (AUTH_MODE=sso|both): for a request carrying the
+``llmwiki_session`` cookie (an opaque session id), look the session up in the server-side store,
+refresh its SSO access token when it expires within 60 s (one refresh per session at a time: a
+process-local asyncio lock here, and ``BEGIN IMMEDIATE`` in the store across workers), and leave
+in ``request.state``:
 
 * ``auth_principal`` / ``auth_session`` - the signed-in principal (``via="session"``) and its
-record;
-* ``auth_problem`` - None, ``"expired"`` (unknown id, refresh refused: cookie cleared),
-  ``"forbidden"`` (permission gone: session deleted, cookie cleared) or ``"unavailable"`` (SSO down
-  and the access token expired: session kept, routes answer 503).
+  record;
+* ``auth_problem`` - None, ``"expired"`` (unknown/idle id, refresh refused: cookie cleared),
+  ``"forbidden"`` (permission gone: session deleted, cookie cleared), ``"unavailable"`` (SSO down
+  and the access token expired) or ``"misconfigured"`` (the SSO refused our ServiceClient); in
+  the last two the session is kept and routes answer 503.
 
-:class:`MCPAuthMiddleware`: wraps the mounted MCP app (v1.1 item 1). Bearer only - an SSO access
-token
-with the permission (sso, both) or the static token (both); MCP clients are not browsers, so the
-session cookie is deliberately not accepted there (no CSRF surface on /mcp).
+:class:`MCPAuthMiddleware`: wraps the mounted MCP app. sso/both (v1.1 item 1): Bearer only - an
+SSO access token with the permission, or the static token in ``both``. static with
+SSO_PROTECT_READS=true (v1.2 C-12): the static token, with the Phase 0 401 body. MCP clients are
+not browsers, so the session cookie is deliberately not accepted there (no CSRF surface on /mcp).
+
+:func:`client_ip_of`: the browser IP sent to the SSO (v1.2 C-11): the TCP peer, or
+``CLIENT_IP_HEADER`` when the peer is one of ``TRUSTED_PROXY_IPS``.
 """
 
 from __future__ import annotations
@@ -62,15 +67,34 @@ def read_header(scope: Mapping[str, Any], name: str) -> str:
     return ""
 
 
-def client_ip_of(scope: Mapping[str, Any]) -> str | None:
-    """The browser's address as uvicorn sees it (behind a proxy: uvicorn --proxy-headers)."""
-    client = scope.get("client")
-    if not client:
-        return None
+def _ip(value: str) -> ipaddress.IPv4Address | ipaddress.IPv6Address | None:
     try:
-        return str(ipaddress.ip_address(str(client[0])))
-    except ValueError:  # e.g. a unix socket peer: let the SSO use the caller's address
+        return ipaddress.ip_address(value.strip())
+    except ValueError:
         return None
+
+
+def client_ip_of(scope: Mapping[str, Any], cfg: Settings) -> str | None:
+    """The browser IP to pass to the SSO (design v1.2 C-11/Q-25).
+
+    The TCP peer as uvicorn reports it, unless ``CLIENT_IP_HEADER`` is set AND the peer is in
+    ``TRUSTED_PROXY_IPS``: then that header. A comma list (``X-Forwarded-For``) is read right to
+    left, skipping trusted proxies; the first other valid IP wins. A missing or malformed header
+    falls back to the peer. None (the SSO then uses our own address) for a non-IP peer.
+    """
+    client = scope.get("client")
+    peer = _ip(str(client[0])) if client else None
+    header = cfg.client_ip_header.strip()
+    if peer is not None and header:
+        trusted = cfg.trusted_proxy_networks
+        if any(peer in net for net in trusted):
+            for part in reversed(read_header(scope, header).split(",")):
+                ip = _ip(part)
+                if ip is None:
+                    break  # malformed: do not guess further left
+                if not any(ip in net for net in trusted):
+                    return str(ip)
+    return str(peer) if peer is not None else None
 
 
 def cookie_header(cfg: Settings, name: str, value: str, max_age: int,
@@ -114,7 +138,7 @@ class SessionAuthMiddleware:
         if raw:
             async with self._lock(hashlib.sha256(raw.encode()).hexdigest()):
                 clear = await anyio.to_thread.run_sync(self._resolve, service, raw, state,
-                                                       client_ip_of(scope))
+                                                       client_ip_of(scope, self.cfg))
         if not clear:
             await self.app(scope, receive, send)
             return
@@ -145,6 +169,9 @@ class SessionAuthMiddleware:
                         service.required_permission)
             state["auth_problem"] = "forbidden"
             return True
+        except tools.SSOMisconfigured:  # logged as an error by the service; session kept
+            state["auth_problem"] = "misconfigured"
+            return False
         except tools.SSOUnavailable as exc:
             logger.warning("session refresh impossible, SSO unavailable: %s", exc)
             state["auth_problem"] = "unavailable"  # session kept (v1.1 Q-05)
@@ -159,7 +186,8 @@ class SessionAuthMiddleware:
 
 
 class MCPAuthMiddleware:
-    """Bearer auth in front of the mounted MCP ASGI app (AUTH_MODE=sso|both, v1.1 item 1)."""
+    """Bearer auth in front of the mounted MCP ASGI app (sso/both: v1.1 item 1; static with
+    SSO_PROTECT_READS=true: v1.2 C-12, Phase 0 401 body)."""
 
     def __init__(self, app: Any, cfg: Settings) -> None:
         self.app = app
@@ -174,8 +202,11 @@ class MCPAuthMiddleware:
             return
         auth = read_header(scope, "authorization")
         scheme, _, token = auth.partition(" ")
-        status, body, headers = 401, {"detail": "invalid or missing credentials"}, [
-            (b"www-authenticate", b'Bearer error="invalid_token"')]
+        if self.cfg.auth_mode == "static":  # the same 401 as every static-mode route
+            status, body, headers = 401, {"detail": "invalid or missing bearer token"}, []
+        else:
+            status, body, headers = 401, {"detail": "invalid or missing credentials"}, [
+                (b"www-authenticate", b'Bearer error="invalid_token"')]
         if scheme.lower() == "bearer" and token.strip():
             service = tools.auth_service(self.cfg)
             try:

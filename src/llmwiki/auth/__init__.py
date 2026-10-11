@@ -13,7 +13,9 @@ from llmwiki.auth.principal import (
     PermissionDenied,
     Principal,
     SSOLoginError,
+    SSOMisconfigured,
     SSOUnavailable,
 )
 
-__all__ = ["AuthError", "PermissionDenied", "Principal", "SSOLoginError", "SSOUnavailable"]
+__all__ = ["AuthError", "PermissionDenied", "Principal", "SSOLoginError", "SSOMisconfigured",
+           "SSOUnavailable"]

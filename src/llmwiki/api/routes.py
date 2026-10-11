@@ -67,16 +67,22 @@ class Forbidden(Exception):
     BODY = {"detail": "forbidden", "error": "permission_denied"}
 
 
-#: Safe methods; any other cookie-authenticated request needs X-CSRF-Token (v1.1 item 3).
-SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
+#: Cookie-authenticated requests with these methods need X-CSRF-Token (v1.1 item 3, v1.2 C-13).
+CSRF_METHODS = frozenset({"POST", "PUT", "PATCH", "DELETE"})
 
 
-def _csrf_failed() -> HTTPException:
-    return HTTPException(status_code=403, detail="missing or invalid X-CSRF-Token")
+class CSRFFailed(Exception):
+    """Cookie-authenticated write without a matching X-CSRF-Token -> 403 (v1.2 Q-30)."""
+
+    BODY = {"error": "csrf_failed"}
 
 
 def _sso_unavailable() -> HTTPException:
     return HTTPException(status_code=503, detail="Login service unavailable")
+
+
+def _sso_misconfigured() -> HTTPException:
+    return HTTPException(status_code=503, detail="Login service misconfigured")
 
 
 def _unauthorized() -> HTTPException:
@@ -121,16 +127,18 @@ def require_auth(
             raise _unauthorized() from exc
     principal = getattr(request.state, "auth_principal", None)
     if principal is not None:
-        if request.method not in SAFE_METHODS:
+        if request.method in CSRF_METHODS:
             session = request.state.auth_session
             if not service.csrf_ok(session.csrf, request.headers.get(service.csrf_header)):
-                raise _csrf_failed()
+                raise CSRFFailed()
         return principal
     problem = getattr(request.state, "auth_problem", None)
     if problem == "forbidden":
         raise Forbidden()
     if problem == "unavailable":
         raise _sso_unavailable()
+    if problem == "misconfigured":
+        raise _sso_misconfigured()
     raise _unauthorized()
 
 
@@ -280,8 +288,8 @@ def dashboard(
             problem = getattr(request.state, "auth_problem", None)
             if problem == "forbidden":
                 return login_pages.no_access_page(request)
-            if problem == "unavailable":
-                return login_pages.unavailable_page()
+            if problem in ("unavailable", "misconfigured"):
+                return login_pages.unavailable_page(misconfigured=problem == "misconfigured")
             target = "/dashboard" + (f"?month={month}" if month else "")
             return RedirectResponse(f"/login?{urlencode({'next': target})}", status_code=303)
         signed_in_as = principal.username or principal.sub

@@ -127,10 +127,14 @@ def no_access_page(request: Request) -> HTMLResponse:
     return login_page(request, next_url=DEFAULT_NEXT, error=no_access_message(), status=403)
 
 
-def unavailable_page() -> HTMLResponse:
-    """503: the SSO is unreachable and the access token has expired; the session is kept (Q-05)."""
-    body = ("<h1>llmwiki</h1><p class='bad'>Login service unavailable. "
-            "Please try again in a moment.</p>")
+UNAVAILABLE = "Login service unavailable. Please try again in a moment."
+MISCONFIGURED = "Login service misconfigured. Please tell the administrator."
+
+
+def unavailable_page(misconfigured: bool = False) -> HTMLResponse:
+    """503: the SSO is unreachable (session kept, Q-05) or refused our ServiceClient (C-19)."""
+    body = (f"<h1>llmwiki</h1><p class='bad'>{MISCONFIGURED if misconfigured else UNAVAILABLE}"
+            "</p>")
     return HTMLResponse(_page("llmwiki", body),
                         status_code=503, headers={"Retry-After": "30", "Cache-Control": "no-store"})
 
@@ -164,7 +168,8 @@ def login_submit(
         return login_page(request, next_url=target, username=username, status=400,
                           error="Enter your username or email and your password.")
     try:
-        session_id, rec, principal = service.login(username, password, client_ip_of(request.scope))
+        session_id, rec, principal = service.login(username, password,
+                                                   client_ip_of(request.scope, cfg))
     except tools.PermissionDenied:
         logger.info("login without %s: %s", service.required_permission, username)
         return login_page(request, next_url=target, username=username, status=403,
@@ -172,14 +177,15 @@ def login_submit(
     except tools.SSOLoginError as exc:
         logger.info("login refused by the SSO (%s): %s", exc.code, username)
         return _login_error(request, target, username, exc)
-    except tools.SSOUnavailable as exc:
+    except tools.SSOMisconfigured as exc:  # v1.2 C-19
+        logger.error("login impossible: %s", exc)
+        return _login_503(request, target, username, MISCONFIGURED)
+    except tools.SSOUnavailable as exc:  # v1.2 C-14: 503 everywhere
         logger.warning("login service unavailable: %s", exc)
-        return login_page(request, next_url=target, username=username, status=502,
-                          error="Login service unavailable. Please try again later.")
+        return _login_503(request, target, username, UNAVAILABLE)
     except tools.AuthError as exc:  # the SSO answered a token we cannot verify (iss/keys)
-        logger.error("SSO login returned an unverifiable token: %s", exc)
-        return login_page(request, next_url=target, username=username, status=502,
-                          error="Login service unavailable. Please try again later.")
+        logger.error("SSO login returned an unverifiable token (SSO_ISSUER/JWKS?): %s", exc)
+        return _login_503(request, target, username, MISCONFIGURED)
     logger.info("login ok: %s (sub %s)", principal.username, principal.sub)
     response = RedirectResponse(target, status_code=303)
     response.headers.append("set-cookie", cookie_header(
@@ -187,6 +193,12 @@ def login_submit(
     # the login double-submit cookie has done its job; the session carries its own csrf value
     response.headers.append("set-cookie", clear_cookie_header(cfg, service.login_csrf_cookie))
     response.headers["Cache-Control"] = "no-store"
+    return response
+
+
+def _login_503(request: Request, target: str, username: str, message: str) -> HTMLResponse:
+    response = login_page(request, next_url=target, username=username, status=503, error=message)
+    response.headers["Retry-After"] = "30"
     return response
 
 

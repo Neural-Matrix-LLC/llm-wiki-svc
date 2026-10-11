@@ -14,7 +14,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
 from llmwiki import __version__
-from llmwiki.api.routes import Forbidden, router
+from llmwiki.api.routes import CSRFFailed, Forbidden, router
 from llmwiki.config import configure_logging
 from llmwiki.config import settings as default_settings
 
@@ -44,6 +44,7 @@ def create_app() -> FastAPI:
     # Replaces FastAPI's default 422 handler; see _validation_error.
     app.add_exception_handler(RequestValidationError, _validation_error)
     app.add_exception_handler(Forbidden, _forbidden)
+    app.add_exception_handler(CSRFFailed, _csrf_failed)
     _mount_auth(app)
 
     if mcp_app is not None:
@@ -93,7 +94,8 @@ def _mount_auth(app: FastAPI) -> None:
 
     current_settings.require_auth_config()
     if current_settings.auth_mode == "static":
-        logger.warning("MCP is unauthenticated in AUTH_MODE=static")
+        if not current_settings.sso_protect_reads:
+            logger.warning("MCP is unauthenticated in AUTH_MODE=static")
         weak = current_settings.static_token_weakness()
         if weak:
             logger.warning("INGEST_API_TOKEN %s; AUTH_MODE=sso|both would refuse to start", weak)
@@ -111,10 +113,11 @@ def _mount_auth(app: FastAPI) -> None:
 
 
 def _protect_mcp(mcp_app):  # type: ignore[no-untyped-def]
-    """Wrap /mcp in the Bearer check in AUTH_MODE=sso|both (v1.1 item 1); static: unchanged."""
+    """Wrap /mcp in the Bearer check in AUTH_MODE=sso|both (v1.1 item 1), and in static mode when
+    SSO_PROTECT_READS=true (v1.2 C-12). Default static (reads open): unchanged, unwrapped."""
     from llmwiki.config import settings as current_settings
 
-    if current_settings.auth_mode == "static":
+    if current_settings.auth_mode == "static" and not current_settings.sso_protect_reads:
         return mcp_app
     from llmwiki.api.session import MCPAuthMiddleware
 
@@ -124,6 +127,11 @@ def _protect_mcp(mcp_app):  # type: ignore[no-untyped-def]
 async def _forbidden(request: Request, exc: Exception) -> JSONResponse:
     """403 for a caller without SSO_REQUIRED_PERMISSION (design B2: never 401)."""
     return JSONResponse(status_code=403, content=Forbidden.BODY)
+
+
+async def _csrf_failed(request: Request, exc: Exception) -> JSONResponse:
+    """403 for a cookie-authenticated write without X-CSRF-Token (design v1.2 Q-30)."""
+    return JSONResponse(status_code=403, content=CSRFFailed.BODY)
 
 
 def _mount_channels(app: FastAPI) -> None:

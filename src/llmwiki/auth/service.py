@@ -17,6 +17,7 @@ from llmwiki.auth.principal import (
     PermissionDenied,
     Principal,
     SSOLoginError,
+    SSOMisconfigured,
     SSOUnavailable,
 )
 from llmwiki.auth.session import (
@@ -97,7 +98,8 @@ class AuthService:
     def store(self) -> SessionStore:
         if self._store is None:
             self._store = SessionStore(self.cfg.effective_session_db_path,
-                                       int(self.cfg.session_max_age_hours * 3600))
+                                       int(self.cfg.session_max_age_hours * 3600),
+                                       idle_s=int(self.cfg.session_idle_hours * 3600))
         return self._store
 
     def init_sessions(self) -> int:
@@ -158,8 +160,9 @@ class AuthService:
         try:
             self.client.logout(refresh_token)
         except (SSOLoginError, SSOUnavailable) as exc:
-            logger.warning("SSO logout failed (%s); the refresh token expires on its own",
-                           type(exc).__name__)
+            log = logger.error if isinstance(exc, SSOMisconfigured) else logger.warning
+            log("SSO logout failed (%s); the refresh token expires on its own",
+                type(exc).__name__)
 
     def get_session(self, session_id: str | None) -> SessionRecord | None:
         return self.store.get(session_id)
@@ -196,7 +199,9 @@ class AuthService:
             except PermissionDenied:
                 self.store.delete(rec.id_hash)
                 raise
-            except SSOUnavailable:
+            except SSOUnavailable as exc:
+                if isinstance(exc, SSOMisconfigured):
+                    logger.error("session refresh: %s", exc)
                 if rec.access_expires_within(0):
                     raise
                 logger.warning("SSO unreachable for a session refresh; "

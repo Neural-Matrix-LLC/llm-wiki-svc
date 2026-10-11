@@ -376,19 +376,56 @@ def test_rate_limited_login_shows_retry_after(build, sso) -> None:
     assert r.headers["retry-after"] == "42"
 
 
-def test_sso_down_is_a_502_page(build, sso) -> None:
+def test_sso_down_is_a_503_page(build, sso) -> None:
+    """v1.2 C-14: SSO unreachable -> 503 everywhere, login included."""
     client = build(auth_mode="sso")
     token = csrf_of(client)
     sso.down = True
     r = login(client, csrf=token)
-    assert r.status_code == 502 and "Login service unavailable" in r.text
+    assert r.status_code == 503 and "Login service unavailable" in r.text
+    assert r.headers["retry-after"] == "30"
 
 
-def test_sso_token_with_a_wrong_issuer_is_a_502_not_a_session(build, sso) -> None:
+def test_sso_5xx_is_a_503_page(build, sso, monkeypatch) -> None:
+    import httpx
+
+    client = build(auth_mode="sso")
+    token = csrf_of(client)
+    monkeypatch.setattr(sso, "handle", lambda request: httpx.Response(502, text="bad gateway"))
+    from llmwiki import tools
+
+    monkeypatch.setattr(tools, "auth_transport", sso.transport)
+    tools.reset_auth()
+    assert login(client, csrf=token).status_code == 503
+
+
+def test_sso_token_with_a_wrong_issuer_is_a_503_misconfigured(build, sso, caplog) -> None:
     sso.issuer = "https://impostor.example"
     r = login(build(auth_mode="sso"))
-    assert r.status_code == 502 and not any(
-        h.startswith("llmwiki_session=") for h in set_cookie_headers(r))
+    assert r.status_code == 503 and "Login service misconfigured" in r.text
+    assert not any(h.startswith("llmwiki_session=") for h in set_cookie_headers(r))
+
+
+def test_wrong_service_credentials_are_a_503_misconfigured(build, sso, caplog) -> None:
+    """v1.2 C-19: the SSO answers 401 invalid_client -> error log + 503 'misconfigured'."""
+    sso.client_secret = "the-real-secret"
+    r = login(build(auth_mode="sso"))
+    assert r.status_code == 503 and "Login service misconfigured" in r.text
+    assert any(rec.levelname == "ERROR" and "invalid_client" in rec.getMessage()
+               for rec in caplog.records)
+    assert CLIENT_SECRET not in caplog.text
+
+
+def test_wrong_service_credentials_during_refresh_keep_the_session(build, sso, tmp_path) -> None:
+    sso.access_ttl = -5
+    client = build(auth_mode="sso")
+    login(client)
+    sso.client_secret = "rotated-at-the-sso"
+    r = client.get("/usage")
+    assert r.status_code == 503 and r.json() == {"detail": "Login service misconfigured"}
+    page = client.get("/dashboard")
+    assert page.status_code == 503 and "Login service misconfigured" in page.text
+    assert len(store_rows(tmp_path)) == 1  # kept
 
 
 def test_empty_fields_are_a_400(build) -> None:
@@ -479,13 +516,44 @@ def test_json_write_with_a_session_needs_the_csrf_header(build) -> None:
     client = build(auth_mode="sso")
     login(client)
     r = client.post("/lint")
-    assert r.status_code == 403 and r.json() == {"detail": "missing or invalid X-CSRF-Token"}
-    assert client.post("/lint", headers={"X-CSRF-Token": "x" * 43}).status_code == 403
+    assert r.status_code == 403 and r.json() == {"error": "csrf_failed"}  # v1.2 Q-30
+    assert client.post("/lint", headers={"X-CSRF-Token": "x" * 43}).json() == {
+        "error": "csrf_failed"}
     csrf = csrf_meta(client)
     assert client.post("/lint", headers={"X-CSRF-Token": csrf}).status_code == 200
     assert client.put("/domains/notes", json={"description": "d"},
                       headers={"X-CSRF-Token": csrf}).status_code == 200
     assert client.get("/usage").status_code == 200  # GET needs no CSRF header
+
+
+@pytest.mark.parametrize("method", ["POST", "PUT", "PATCH", "DELETE"])
+def test_csrf_applies_to_post_put_patch_delete(build, method) -> None:
+    """v1.2 C-13: exactly these methods need the header (with a cookie session)."""
+    from fastapi import Depends
+
+    from llmwiki.api import routes
+
+    client = build(auth_mode="sso")
+    client.app.add_api_route("/_probe", lambda: {"ok": True}, methods=[method, "GET", "HEAD",
+                                                                       "OPTIONS"],
+                             dependencies=[Depends(routes.require_auth)])
+    login(client)
+    csrf = csrf_meta(client)
+    assert client.request(method, "/_probe").status_code == 403
+    assert client.request(method, "/_probe", headers={"X-CSRF-Token": csrf}).status_code == 200
+    for safe in ("GET", "HEAD", "OPTIONS"):
+        assert client.request(safe, "/_probe").status_code == 200, safe
+
+
+def test_invalid_bearer_is_401_even_with_a_valid_session(build) -> None:
+    """v1.2 Q-31: an explicit Bearer is never overridden by the cookie."""
+    client = build(auth_mode="both")
+    login(client)
+    csrf = csrf_meta(client)
+    for path, method in (("/usage", "GET"), ("/lint", "POST"), ("/dashboard", "GET")):
+        r = client.request(method, path, headers={**bearer("wrong-token"), "X-CSRF-Token": csrf})
+        assert r.status_code == 401, path
+    assert client.get("/usage").status_code == 200  # the session itself still works
 
 
 def test_bearer_requests_are_exempt_from_csrf(build, key) -> None:

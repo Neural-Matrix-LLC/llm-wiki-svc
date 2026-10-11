@@ -270,3 +270,150 @@ def test_basic_auth_header_shape_sent_to_the_sso(build, sso) -> None:
     assert scheme == "Basic"
     assert base64.b64decode(value).decode().startswith("llm-wiki:")
     assert csrf_meta(client)
+
+
+# ---------------------------------------------------------------- v1.2 clarifications
+def test_db_file_0600_and_new_directory_0700(tmp_path) -> None:
+    """v1.2 D-16."""
+    import os
+
+    old = os.umask(0o022)
+    try:
+        store = SessionStore(tmp_path / "new-dir" / "s.db", 3600)
+        store.init()
+    finally:
+        os.umask(old)
+    assert (tmp_path / "new-dir" / "s.db").stat().st_mode & 0o777 == 0o600
+    assert (tmp_path / "new-dir").stat().st_mode & 0o777 == 0o700
+
+
+@pytest.mark.parametrize("mode", [0o640, 0o604, 0o660, 0o666, 0o620])
+def test_refuses_a_group_or_world_accessible_db(tmp_path, mode) -> None:
+    path = tmp_path / "s.db"
+    SessionStore(path, 3600).init()
+    path.chmod(mode)
+    with pytest.raises(RuntimeError, match="must not be accessible by group or others"):
+        SessionStore(path, 3600).init()
+
+
+def test_service_refuses_to_start_with_a_readable_db(build, tmp_path) -> None:
+    db = tmp_path / "data" / "sessions.sqlite3"
+    db.parent.mkdir(parents=True)
+    SessionStore(db, 3600).init()
+    db.chmod(0o644)
+    with pytest.raises(RuntimeError, match="chmod 600"):
+        build(auth_mode="sso")
+
+
+def test_idle_timeout(tmp_path) -> None:
+    """v1.2 Q-27: SESSION_IDLE_HOURS ends an unused session; use keeps it alive."""
+    clock = Clock()
+    store = SessionStore(tmp_path / "s.db", 7 * 24 * 3600, clock=clock, idle_s=12 * 3600)
+    active, _ = store.create(**tokens(1))
+    idle, _ = store.create(**tokens(2))
+    for _ in range(4):  # 4 x 4 h with use of "active" only
+        clock.now += 4 * 3600
+        assert store.get(active) is not None
+    assert store.get(idle) is None  # 16 h unused
+    clock.now += 12 * 3600
+    assert store.get(active) is None
+
+
+def test_idle_rows_are_pruned(tmp_path) -> None:
+    clock = Clock()
+    store = SessionStore(tmp_path / "s.db", 7 * 24 * 3600, clock=clock, idle_s=3600)
+    store.create(**tokens())
+    clock.now += 3601
+    assert store.prune() == 1
+
+
+def test_session_idle_hours_setting(build, sso) -> None:
+    client = build(auth_mode="sso", session_idle_hours=0.5)
+    login(client)
+    from llmwiki import tools
+
+    assert tools.auth_service().store.idle_s == 1800
+    header = [h for h in client.get("/dashboard").headers.get_list("set-cookie")]
+    assert header == []  # Max-Age stays the remaining absolute lifetime (Q-26), not re-sent
+
+
+# ---------------------------------------------------------------- client IP (v1.2 C-11)
+@pytest.mark.parametrize("peer,header_value,cfg,expected", [
+    ("198.51.100.7", "203.0.113.1", {}, "198.51.100.7"),  # no CLIENT_IP_HEADER: the peer
+    ("198.51.100.7", "203.0.113.1", {"client_ip_header": "cf-connecting-ip",
+                                     "trusted_proxy_ips": "127.0.0.1/32"}, "198.51.100.7"),
+    ("127.0.0.1", "203.0.113.1", {"client_ip_header": "cf-connecting-ip",
+                                  "trusted_proxy_ips": "127.0.0.1/32"}, "203.0.113.1"),
+    ("127.0.0.1", "garbage", {"client_ip_header": "cf-connecting-ip",
+                              "trusted_proxy_ips": "127.0.0.1"}, "127.0.0.1"),
+    ("127.0.0.1", None, {"client_ip_header": "cf-connecting-ip",
+                         "trusted_proxy_ips": "127.0.0.1"}, "127.0.0.1"),
+    ("10.0.0.2", "6.6.6.6, 203.0.113.9, 10.0.0.1", {
+        "client_ip_header": "x-forwarded-for", "trusted_proxy_ips": "10.0.0.0/8"}, "203.0.113.9"),
+    ("::1", "2001:db8::5", {"client_ip_header": "x-real-ip", "trusted_proxy_ips": "::1/128"},
+     "2001:db8::5"),
+])
+def test_client_ip_header_only_from_trusted_proxies(tmp_path, peer, header_value, cfg,
+                                                    expected) -> None:
+    from llmwiki.api.session import client_ip_of
+
+    settings = make_settings(tmp_path, **cfg)
+    headers = []
+    if header_value is not None:
+        headers.append((settings.client_ip_header.lower().encode() or b"x-none",
+                        header_value.encode()))
+    assert client_ip_of({"client": (peer, 1), "headers": headers}, settings) == expected
+
+
+def test_client_ip_reaches_the_sso_via_a_trusted_proxy(build, sso) -> None:
+    client = build(auth_mode="sso", client_ip_header="cf-connecting-ip",
+                   trusted_proxy_ips=f"{BROWSER_IP}/32")
+    page = client.get("/login")
+    csrf = page.text.split("name='csrf_token' value='")[1].split("'")[0]
+    client.post("/login", data={"username": "alice", "password": "alice-pw",
+                                "csrf_token": csrf}, headers={"CF-Connecting-IP": "192.0.2.44"})
+    assert sso.calls[0][1]["client_ip"] == "192.0.2.44"
+
+
+def test_client_ip_header_from_an_untrusted_peer_is_ignored(build, sso) -> None:
+    client = build(auth_mode="sso", client_ip_header="cf-connecting-ip",
+                   trusted_proxy_ips="10.0.0.0/8")
+    page = client.get("/login")
+    csrf = page.text.split("name='csrf_token' value='")[1].split("'")[0]
+    client.post("/login", data={"username": "alice", "password": "alice-pw",
+                                "csrf_token": csrf}, headers={"CF-Connecting-IP": "192.0.2.44"})
+    assert sso.calls[0][1]["client_ip"] == BROWSER_IP
+
+
+@pytest.mark.parametrize("over,match", [
+    ({"client_ip_header": "cf-connecting-ip"}, "TRUSTED_PROXY_IPS is empty"),
+    ({"trusted_proxy_ips": "not-a-cidr"}, "TRUSTED_PROXY_IPS"),
+    ({"session_idle_hours": 0}, "SESSION_IDLE_HOURS"),
+])
+def test_bad_client_ip_settings_fail_fast(build, over, match) -> None:
+    with pytest.raises(RuntimeError, match=match):
+        build(auth_mode="sso", **over)
+
+
+# ---------------------------------------------------------------- /mcp in static mode (v1.2 C-12)
+def test_static_mode_protect_reads_also_protects_mcp(build, caplog) -> None:
+    import logging
+
+    caplog.set_level(logging.WARNING, logger="llmwiki.api.app")
+    with build(auth_mode="static", sso_protect_reads=True) as client:
+        r = mcp(client)
+        assert r.status_code == 401
+        assert r.json() == {"detail": "invalid or missing bearer token"}  # Phase 0 401 body
+        assert "www-authenticate" not in r.headers
+        assert mcp(client, bearer("wrong")).status_code == 401
+        assert mcp(client, bearer(STATIC)).status_code == 200
+    assert "MCP is unauthenticated" not in caplog.text
+
+
+def test_static_mode_default_mcp_stays_open_and_unwrapped(build) -> None:
+    from llmwiki.api.session import MCPAuthMiddleware
+
+    with build(auth_mode="static") as client:
+        assert mcp(client).status_code == 200
+        mounts = [r for r in client.app.routes if getattr(r, "path", "") == "/mcp"]
+        assert mounts and not isinstance(mounts[0].app, MCPAuthMiddleware)

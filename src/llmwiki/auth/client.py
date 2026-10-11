@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import httpx
 
-from llmwiki.auth.principal import SSOLoginError, SSOUnavailable
+from llmwiki.auth.principal import SSOLoginError, SSOMisconfigured, SSOUnavailable
 
 LOGIN_PATH = "/api/v1/auth/login"
 REFRESH_PATH = "/api/v1/auth/refresh"
@@ -47,6 +47,9 @@ class SSOClient:
             body = {}
         if not isinstance(body, dict):
             body = {}
+        if body.get("error") == "invalid_client":
+            return SSOMisconfigured("the SSO refused SSO_CLIENT_ID/SSO_CLIENT_SECRET "
+                                    "(invalid_client)")
         retry_after: int | None = None
         raw = response.headers.get("Retry-After")
         if raw and raw.strip().isdigit():

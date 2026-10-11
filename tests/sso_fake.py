@@ -114,6 +114,7 @@ class FakeSSO:
         self.down = False
         self.rate_limited: int | None = None
         self.refresh_delay = 0.0  # seconds; widens the window for concurrency tests
+        self.client_secret: str | None = None  # set: Basic auth must carry this secret
         self.jwks_fetches = 0
         self.issuer = ISSUER
 
@@ -146,6 +147,11 @@ class FakeSSO:
         body = json.loads(request.content or b"{}") if request.method == "POST" else {}
         self.calls.append((path, body))
         self.auth_headers.append(request.headers.get("authorization", ""))
+        if (self.client_secret is not None and path.startswith("/api/v1/auth/")
+                and request.headers.get("authorization", "").startswith("Basic ")):
+            sent = base64.b64decode(request.headers["authorization"][6:]).decode()
+            if sent.partition(":")[2] != self.client_secret:
+                return self._err(401, "invalid_client", "Service client authentication failed.")
         if path == "/.well-known/jwks.json":
             self.jwks_fetches += 1
             return httpx.Response(200, json={"keys": [self.key.jwk()]})

@@ -28,6 +28,7 @@ from llmwiki.auth import (  # noqa: F401  (re-exported for api/, see below)
     PermissionDenied,
     Principal,
     SSOLoginError,
+    SSOMisconfigured,
     SSOUnavailable,
 )
 from llmwiki.auth.service import AuthService

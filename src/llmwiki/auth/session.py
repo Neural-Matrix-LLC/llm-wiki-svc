@@ -1,28 +1,33 @@
-"""Server-side browser sessions (docs/sso-integration-design.md v1.1 item 2).
+"""Server-side browser sessions (docs/sso-integration-design.md v1.1 item 2, v1.2).
 
-The ``llmwiki_session`` cookie holds only a random 256-bit session id. The SSO tokens live server-
-side
-in SQLite (``SESSION_DB_PATH``), keyed by the SHA-256 of that id, so a leaked database does not hand
-out live cookies and the browser never holds a token. Columns: id hash, username, sub, access,
-refresh, access_exp, csrf, created_at, last_seen. Logout and refresh failure delete the row.
+The ``llmwiki_session`` cookie holds only a random 256-bit session id. The SSO tokens live
+server-side in SQLite (``SESSION_DB_PATH``), keyed by the SHA-256 of that id, so a leaked database
+does not hand out live cookies and the browser never holds a token. Columns: id hash, username,
+sub, access, refresh, access_exp, csrf, created_at, last_seen. Logout and refresh failure delete
+the row.
 
 Lifetime is absolute (``SESSION_MAX_AGE_HOURS``, default 168 h = 7 days) from ``created_at``; a
-refresh
-never extends it. Expired rows are pruned at start and then at most hourly (on the next access).
+refresh never extends it. A session unused for ``SESSION_IDLE_HOURS`` (default 12, design v1.2
+Q-27) ends too. Expired rows are pruned at start and then at most hourly (on the next access).
 
-Concurrency: :meth:`SessionStore.refresh_locked` runs inside ``BEGIN IMMEDIATE``, re-reads the row
-and
-only refreshes when no one else already did, so two requests (or two uvicorn workers sharing the
-file)
-never refresh one session twice; the loser reuses the winner's new access token. The api layer also
-holds a process-local asyncio lock per session so waiting happens there, not in SQLite.
+File safety (design v1.2 D-16): the database is created with mode 0600 (its directory 0700 when
+we create it); :meth:`SessionStore.init` refuses to run when the file is accessible by group or
+others.
+
+Concurrency: :meth:`SessionStore.refresh_locked` runs inside ``BEGIN IMMEDIATE``, re-reads the
+row and only refreshes when no one else already did, so two requests (or two uvicorn workers
+sharing the file) never refresh one session twice; the loser reuses the winner's new access
+token. The api layer also holds a process-local asyncio lock per session so waiting happens
+there, not in SQLite.
 """
 
 from __future__ import annotations
 
 import hashlib
+import os
 import secrets
 import sqlite3
+import stat
 import threading
 import time
 from collections.abc import Callable
@@ -70,9 +75,11 @@ class SessionRecord:
 
 
 class SessionStore:
-    def __init__(self, path: Path, max_age_s: int, clock: Callable[[], float] = time.time) -> None:
+    def __init__(self, path: Path, max_age_s: int, clock: Callable[[], float] = time.time,
+                 idle_s: int | None = None) -> None:
         self.path = Path(path)
         self.max_age_s = max_age_s
+        self.idle_s = idle_s if idle_s is not None else max_age_s
         self._clock = clock
         self._last_prune = 0.0
         self._init_lock = threading.Lock()
@@ -89,17 +96,23 @@ class SessionStore:
         with self._init_lock:
             if self._ready:
                 return
-            self.path.parent.mkdir(parents=True, exist_ok=True)
+            if not self.path.parent.exists():
+                self.path.parent.mkdir(parents=True, mode=0o700)
+            if not self.path.exists():
+                os.close(os.open(self.path, os.O_CREAT | os.O_WRONLY, 0o600))
+                os.chmod(self.path, 0o600)  # whatever the umask
+            mode = stat.S_IMODE(self.path.stat().st_mode)
+            if mode & 0o077:
+                raise RuntimeError(
+                    f"session database {self.path} has mode {mode:04o}: it holds live SSO "
+                    f"tokens and must not be accessible by group or others "
+                    f"(chmod 600 {self.path})")
             conn = self._connect()
             try:
                 conn.execute("PRAGMA journal_mode = WAL")
                 conn.execute(_SCHEMA)
             finally:
                 conn.close()
-            try:
-                self.path.chmod(0o600)  # holds live SSO tokens
-            except OSError:  # pragma: no cover - e.g. a filesystem without modes
-                pass
             self._ready = True
         self.prune()
 
@@ -113,7 +126,7 @@ class SessionStore:
         return SessionRecord(**dict(row)) if row else None
 
     def _expired(self, rec: SessionRecord, now: float) -> bool:
-        return now - rec.created_at >= self.max_age_s
+        return now - rec.created_at >= self.max_age_s or now - rec.last_seen >= self.idle_s
 
     def prune(self) -> int:
         """Delete rows past the absolute lifetime. Returns how many."""
@@ -121,8 +134,8 @@ class SessionStore:
         self._last_prune = now
         conn = self._connect()
         try:
-            cur = conn.execute("DELETE FROM sessions WHERE created_at <= ?",
-                               (int(now - self.max_age_s),))
+            cur = conn.execute("DELETE FROM sessions WHERE created_at <= ? OR last_seen <= ?",
+                               (int(now - self.max_age_s), int(now - self.idle_s)))
             return cur.rowcount
         finally:
             conn.close()

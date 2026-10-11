@@ -6,6 +6,7 @@ Everything else receives a :class:`Settings` instance.  Secrets are typed as
 
 from __future__ import annotations
 
+import ipaddress
 import logging
 from pathlib import Path
 from typing import Literal
@@ -180,6 +181,13 @@ class Settings(BaseSettings):
     # blank = {LOCAL_STORAGE_PATH}/sessions.sqlite3. Absolute lifetime in hours.
     session_db_path: Path | None = None
     session_max_age_hours: float = 168.0
+    # Idle timeout (design v1.2 Q-27): a session unused this long ends.
+    session_idle_hours: float = 12.0
+    # Browser IP passed to the SSO (design v1.2 C-11/Q-25): blank = the TCP peer
+    # (uvicorn's view, i.e. after --proxy-headers). e.g. "cf-connecting-ip" or
+    # "x-forwarded-for"; honoured ONLY when the peer is in TRUSTED_PROXY_IPS (CIDRs).
+    client_ip_header: str = ""
+    trusted_proxy_ips: str = ""  # comma-separated IPs/CIDRs, e.g. "127.0.0.1/32,::1/128"
     session_cookie_secure: bool = True  # false only for local http dev
     # true: read routes (/search, /answer, /concepts, /page, GET /domains,
     # /worker, /sources) need auth too. /healthz and /login stay public.
@@ -367,6 +375,12 @@ class Settings(BaseSettings):
         """``SESSION_DB_PATH``, or ``{LOCAL_STORAGE_PATH}/sessions.sqlite3`` when unset."""
         return self.session_db_path or (self.local_storage_path / "sessions.sqlite3")
 
+    @property
+    def trusted_proxy_networks(self) -> list[ipaddress.IPv4Network | ipaddress.IPv6Network]:
+        """TRUSTED_PROXY_IPS parsed (ValueError on a bad entry)."""
+        return [ipaddress.ip_network(x.strip(), strict=False)
+                for x in self.trusted_proxy_ips.split(",") if x.strip()]
+
     def static_token_weakness(self) -> str | None:
         """Why INGEST_API_TOKEN is weak, or None. Weak = ``changeme`` or shorter than
         ``MIN_STATIC_TOKEN_CHARS`` (24) characters (design v1.1 item 6)."""
@@ -400,8 +414,15 @@ class Settings(BaseSettings):
                 f"AUTH_MODE={self.auth_mode} refuses a weak INGEST_API_TOKEN: it {weak}. Use e.g. "
                 "python -c 'import secrets; print(secrets.token_urlsafe(32))'"
             )
-        if self.session_max_age_hours <= 0:
-            raise RuntimeError("SESSION_MAX_AGE_HOURS must be positive")
+        if self.session_max_age_hours <= 0 or self.session_idle_hours <= 0:
+            raise RuntimeError("SESSION_MAX_AGE_HOURS and SESSION_IDLE_HOURS must be positive")
+        try:
+            networks = self.trusted_proxy_networks
+        except ValueError as exc:
+            raise RuntimeError(f"TRUSTED_PROXY_IPS: {exc}") from exc
+        if self.client_ip_header.strip() and not networks:
+            raise RuntimeError("CLIENT_IP_HEADER is set but TRUSTED_PROXY_IPS is empty: the "
+                               "header would never be honoured")
 
     def require(self, *fields: str) -> None:
         """Fail loudly, and by name, when a backend's credentials are absent.
