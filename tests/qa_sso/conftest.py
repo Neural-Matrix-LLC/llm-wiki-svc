@@ -19,7 +19,7 @@ Environment (see README.md):
   LLM_WIKI_SESSION_DBS               name=path,... SESSION_DB_PATH of each instance (server-side sessions)
   LLM_WIKI_SESSION_MAX_AGE_HOURS     SESSION_MAX_AGE_HOURS of the instances (default 168)
   QA_SSO_RESTART_CMD                 command template restarting one instance by PID, e.g. 'run/restart.sh {name}'
-  SSO_NOSUPER_URL                    a 2nd SSO on the same DB with SSO_SUPERUSER_ALL_APPS=false (v1.1 item 8)
+  SSO_ALLAPPS_URL                    a 2nd SSO on the same DB with the opt-in SSO_SUPERUSER_ALL_APPS=true
   SSO_SERVER_LOG                     SSO stderr log (JSON login events with "ip")
   LLM_WIKI_COOKIE_SECURE             expected Secure flag of the instances (default true)
   LLM_WIKI_LOG_FILES                 comma list of llm-wiki log files (no-secrets-in-logs)
@@ -69,7 +69,7 @@ class Cfg:
     sso_access_log: str | None = field(default_factory=lambda: _env("SSO_ACCESS_LOG"))
     access_ttl: int = field(default_factory=lambda: int(_env("SSO_ACCESS_TTL_SECONDS", "900")))
     static_token: str | None = field(default_factory=lambda: _env("LLM_WIKI_STATIC_TOKEN"))
-    sso_nosuper_url: str | None = field(default_factory=lambda: (_env("SSO_NOSUPER_URL") or "").rstrip("/") or None)
+    sso_allapps_url: str | None = field(default_factory=lambda: (_env("SSO_ALLAPPS_URL") or "").rstrip("/") or None)
     sso_server_log: str | None = field(default_factory=lambda: _env("SSO_SERVER_LOG"))
     session_dbs: dict = field(default_factory=lambda: dict(
         kv.split("=", 1) for kv in (_env("LLM_WIKI_SESSION_DBS") or "").split(",") if "=" in kv))
@@ -125,7 +125,7 @@ if not QA_ENABLED:
 
 def _port_8000_guard():
     from urllib.parse import urlsplit
-    urls = [CFG.sso_url, CFG.stub_url, CFG.stubbed_url, CFG.sso_nosuper_url, CFG.dotted_url] + \
+    urls = [CFG.sso_url, CFG.stub_url, CFG.stubbed_url, CFG.sso_allapps_url, CFG.dotted_url] + \
         [i.url for i in CFG.instances.values()]
     bad = [u for u in urls if u and (urlsplit(u).port == 8000)]
     if bad and not _bool("QA_SSO_ALLOW_PORT_8000", False):

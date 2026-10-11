@@ -31,7 +31,7 @@ def build(name: str, *, tokens, cfg, jwks, signing_key_or_none, session_cookie=N
         return {"headers": {"Authorization": "Basic " + base64.b64encode(b"qa:" + (cfg.static_token or "x").encode()).decode()}}
     if name == "garbage_jwt":
         return bearer("eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiIxIn0.c2ln")
-    user = {"sso_direct": "qa_wiki_direct", "sso_group": "qa_wiki_group", "sso_super": "qa_wiki_super",
+    user = {"sso_direct": "qa_wiki_direct", "sso_group": "qa_wiki_group", "sso_super": "qa_wiki_super_app1", "sso_super_nogrant": "qa_wiki_super",
             "sso_none": "qa_wiki_none", "sso_staff": "qa_wiki_staff", "sso_other_app": "qa_wiki_app2"}
     if name in user:
         return bearer(tokens(user[name])["access_token"])

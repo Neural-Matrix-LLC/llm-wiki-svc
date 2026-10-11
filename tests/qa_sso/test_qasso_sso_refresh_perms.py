@@ -96,12 +96,34 @@ def test_PREF_06_deactivated_user_refresh_fails(sso_http, sso_admin, reset_user,
 
 
 def test_PREF_07_superuser_flag_on_refresh(sso_http, sso_admin, reset_user):
+    """Default SSO_SUPERUSER_ALL_APPS=false (2026-10-11): promoting a user without grants to superuser gives no app
+    permission at the next refresh."""
     reset_user("qa_wiki_mut_grant")
     first = _login(sso_http, "qa_wiki_mut_grant")
-    sso_admin.call("set_superuser", "qa_wiki_mut_grant", True)
-    r = _refresh(sso_http, first["refresh_token"])
-    assert r.status_code == 200
-    assert D.APP_PERM in jwt_forge.payload(r.json()["access_token"])["perms"]
-    sso_admin.call("set_superuser", "qa_wiki_mut_grant", False)
-    r2 = _refresh(sso_http, r.json()["refresh_token"])
-    assert D.APP_PERM not in (jwt_forge.payload(r2.json()["access_token"]).get("perms") or [])
+    try:
+        sso_admin.call("set_superuser", "qa_wiki_mut_grant", True)
+        r = _refresh(sso_http, first["refresh_token"])
+        assert r.status_code == 200
+        assert jwt_forge.payload(r.json()["access_token"])["perms"] == []
+    finally:
+        sso_admin.call("set_superuser", "qa_wiki_mut_grant", False)
+
+
+def test_PREF_07b_superuser_flag_on_refresh_with_opt_in(cfg, sso_admin, reset_user):
+    """Opt-in SSO_SUPERUSER_ALL_APPS=true (2nd SSO, same DB): promotion gives every application.* at the next
+    refresh, demotion takes them away again."""
+    if not cfg.sso_allapps_url:
+        pytest.skip("SSO_ALLAPPS_URL not set")
+    import httpx
+    reset_user("qa_wiki_mut_grant")
+    with httpx.Client(base_url=cfg.sso_allapps_url, timeout=30) as c:
+        first = _login(c, "qa_wiki_mut_grant")
+        try:
+            sso_admin.call("set_superuser", "qa_wiki_mut_grant", True)
+            r = _refresh(c, first["refresh_token"])
+            assert r.status_code == 200
+            assert D.APP_PERM in jwt_forge.payload(r.json()["access_token"])["perms"]
+        finally:
+            sso_admin.call("set_superuser", "qa_wiki_mut_grant", False)
+        r2 = _refresh(c, r.json()["refresh_token"])
+        assert D.APP_PERM not in (jwt_forge.payload(r2.json()["access_token"]).get("perms") or [])

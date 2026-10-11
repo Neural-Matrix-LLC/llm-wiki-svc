@@ -41,9 +41,25 @@ def test_APPCMD_04_accepts_boundary_codenames(sso_admin, seeded, codename):
     assert f"application.{codename}" in sso_admin.json("all_app_perms")
 
 
-def test_APPCMD_05_superuser_gets_new_app_perm_without_code_change(sso_admin, sso_http, seeded):
+def test_APPCMD_05_new_app_perm_not_given_to_superusers_by_default(sso_admin, sso_http, seeded):
+    """Default SSO_SUPERUSER_ALL_APPS=false (2026-10-11): a newly created app permission reaches no superuser
+    automatically (with or without other grants)."""
     sso_admin.manage("create_app_permission", "qa_app4", "QA fourth app")
-    r = sso_login(sso_http, "qa_wiki_super")
+    for user, expected in (("qa_wiki_super", []), ("qa_wiki_super_app1", [D.APP_PERM])):
+        r = sso_login(sso_http, user)
+        assert r.status_code == 200
+        assert jwt_forge.payload(r.json()["access_token"])["perms"] == expected, user
+
+
+def test_APPCMD_05b_new_app_perm_reaches_superusers_with_flag_true(sso_admin, cfg, seeded):
+    """Opt-in variant: on the SSO_SUPERUSER_ALL_APPS=true instance a new app permission reaches superusers
+    without a code change."""
+    if not cfg.sso_allapps_url:
+        pytest.skip("SSO_ALLAPPS_URL not set")
+    import httpx
+    sso_admin.manage("create_app_permission", "qa_app4", "QA fourth app", check=False)
+    with httpx.Client(base_url=cfg.sso_allapps_url, timeout=30) as c:
+        r = sso_login(c, "qa_wiki_super")
     assert r.status_code == 200
     assert "application.qa_app4" in jwt_forge.payload(r.json()["access_token"])["perms"]
 

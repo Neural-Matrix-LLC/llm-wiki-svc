@@ -45,7 +45,7 @@ def test_LOGIN_01_get_login_page(wiki, browser_factory):
     assert "/dashboard" in form.fields.values() or "/dashboard" in form.action, "next must survive the form"
 
 
-@pytest.mark.parametrize("username", ["qa_wiki_direct", "qa_wiki_group", "qa_wiki_super"])
+@pytest.mark.parametrize("username", ["qa_wiki_direct", "qa_wiki_group", "qa_wiki_super_app1", "qa_wiki_super_group"])
 def test_LOGIN_02_success_sets_session_and_redirects(wiki, browser_factory, seeded, username):
     b = browser_factory(wiki)
     r = b.login(username, D.PASSWORD)
@@ -101,7 +101,8 @@ def test_LOGIN_08_inactive_wrong_password_looks_like_wrong_password(wiki, browse
     assert MSG_WRONG in r.text and MSG_INACTIVE not in r.text
 
 
-@pytest.mark.parametrize("username", ["qa_wiki_none", "qa_wiki_staff", "qa_wiki_app2", "qa_wiki_nonapp"])
+@pytest.mark.parametrize("username", ["qa_wiki_none", "qa_wiki_staff", "qa_wiki_app2", "qa_wiki_nonapp",
+                                      "qa_wiki_super"])  # superuser without a grant (default false, 2026-10-11)
 def test_LOGIN_09_no_permission_page_and_no_session(wiki, browser_factory, seeded, username):
     b = browser_factory(wiki)
     r = b.submit_login(username, D.PASSWORD)

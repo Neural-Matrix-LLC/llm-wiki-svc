@@ -1,4 +1,4 @@
-# llm-wiki-svc SSO login and `application.app1`: QA test plan (v1.2 + regression @ 6520890 + rechecks @ ba2097f, 2be7913)
+# llm-wiki-svc SSO login and `application.app1`: QA test plan (v1.2 + regression @ 6520890 + rechecks @ ba2097f, 2be7913 + superuser default false @ 317ef33)
 
 | | |
 |---|---|
@@ -18,9 +18,34 @@
   scope (LOGOUT-07 skipped with that reason); Q-20 no-store in sso/both only, static byte-identical (NS-01..04);
   Q-21 no local `/login` rate limit (nothing to test beyond THR); Q-32 data-dir default (START-11); Q-12/19/23
   current behaviour accepted. Developer's `/mcp` Bearer-only (MCP-10, CSRF-21) and 60 s `last_seen` (SESS-22/23)
-  accepted. `SSO_SUPERUSER_ALL_APPS` still pending Thomas: both values stay under test (PERM-17..20).
+  accepted. `SSO_SUPERUSER_ALL_APPS`: decided 2026-10-11, default **false** (section 0d).
 - New file `tests/qa_sso/test_qasso_r2_fixes.py` (section 3.19). LOG-03 is strict again (no `?token=` exclusion);
   COOKIE-08 now also asserts the pre-login cookie dies on re-login.
+
+## 0d. Superuser default false @ 317ef33 / sso-server e9b0b36 (decision 2026-10-11)
+
+- **Decision (Thomas, relayed by Philip):** superusers administer users and get **no automatic app access**.
+  `SSO_SUPERUSER_ALL_APPS` defaults to false; true is kept as an explicit opt-in. `perms` comes from real permission
+  rows (own + group grants, `application` app), not `get_all_permissions()`. Resolves D-11 / C-17 / Q-33 (Q-17).
+- Harness: the primary SSO (8030) runs the code default (false); the 2nd SSO (8040, same DB/keys/issuer) now runs
+  the opt-in true (`SSO_ALLAPPS_URL`, was `SSO_NOSUPER_URL`). `expected_perms(..., superuser_all_apps=False)` by
+  default. The QA oracle `sso_ops.user_perms` now calls the SSO's own `user_app_perms` (Django's
+  `get_all_permissions()` returns everything for a superuser).
+- Users: `qa_wiki_super` (no grant), `qa_wiki_super_app1` (direct grant), new `qa_wiki_super_group` (grant via
+  group), new `qa_wiki_inactive_super_app1` (inactive, direct + group grant). Working superuser logins
+  (matrix `sso_super`, LOGIN-01, COOKIE-06, REG token probe) use `qa_wiki_super_app1`; the matrix gains
+  `sso_super_nogrant` (category no-permission → 403).
+- New file `tests/qa_sso/test_qasso_superuser.py`:
+
+| ID | Steps | Expected |
+|---|---|---|
+| SU-01 | default SSO: no-grant superuser → token; Bearer on /usage and /dashboard; login page | perms `[]`; JSON 403 without challenge; HTML 403; login page shows the no-permission message, no session cookie, no session row; cookie-less afterwards → 401 |
+| SU-02 (×2) | superuser with direct / group grant | perms `[app1]`; Bearer 200; login 303 and /dashboard 200 |
+| SU-03 (×2) | inactive superuser without / with grants on the login page | refused, no cookie, no row, < 500 |
+| SU-04 | flag-true SSO: same no-grant superuser's token at llm-wiki | perms = every application.*; 200 (same keys/issuer); inactive superuser still 403 `account_inactive` |
+| SU-05 | throw-away llm-wiki (sso mode, port 8039) with `SSO_BASE_URL` = flag-true SSO | the no-grant superuser logs in through the page (303 /dashboard, 200); `qa_wiki_none` still refused |
+
+LOGIN-09 also covers `qa_wiki_super` (no-permission page). PREF-07 flipped to the default, PREF-07b keeps the opt-in.
 
 ## 0c. Recheck @ 2be7913 (2026-10-11)
 
@@ -64,7 +89,7 @@
 | 5 Static byte-for-byte, no `/login`/`/logout` (404), PROTECT_READS uses the static token | D-07, D-08, Q-01, Q-03 resolved. REG-01 exact inventory, REG-02/04/05 exact headers and bytes, REG-12/13; new instance `static_reads` |
 | 6 JWT-verify-then-static fallback in both; refuse changeme / < 24 chars in sso/both, warn in static | D-09, Q-16 resolved. New FB-* (instance `dotted`), START-05/05b/05c |
 | 7 SSO down during refresh keeps the session (continue / 503); refresh without perm deletes the session (403); invalid explicit Bearer on HTML = 401 | Q-05, Q-06, Q-07 resolved. SESS-09/09b/10/11, SEM-10/11/12, MATRIX dashboard cells pinned |
-| 8 `perms` always a list; superuser-all switchable (`SSO_SUPERUSER_ALL_APPS`, default true); Q-13 rule | Q-11, Q-13, Q-17 (pending Thomas) resolved. PERM-01 strict, PERM-16..20 (2nd SSO with the flag off), APPCMD-06/10 |
+| 8 `perms` always a list; superuser-all switchable (`SSO_SUPERUSER_ALL_APPS`, default true; **changed to false 2026-10-11, see 0d**); Q-13 rule | Q-11, Q-13, Q-17 (pending Thomas) resolved. PERM-01 strict, PERM-16..20 (2nd SSO with the flag off), APPCMD-06/10 |
 | 9 `SESSION_SECRET` dropped; revocation window accepted | SESSION_SECRET cases removed (old START-01 variant, COOKIE-02/03/05/08, LOG-05); START-09; D-10 accepted |
 
 ## 1. Scope
@@ -87,7 +112,7 @@ hold), Cloudflare Access configuration (M-07), myFinance itself (only the shared
   | port | process |
   |---|---|
   | 8030 | SSO (gunicorn, 2 workers, SQLite + file cache under `run/state/`) |
-  | 8040 | 2nd SSO process on the **same** DB/keys/issuer with `SSO_SUPERUSER_ALL_APPS=false` |
+  | 8040 | 2nd SSO process on the **same** DB/keys/issuer with the opt-in `SSO_SUPERUSER_ALL_APPS=true` (the primary 8030 runs the default, false) |
   | 8031 | llm-wiki `both` (primary `LLM_WIKI_BASE_URL`) |
   | 8034 | llm-wiki `sso` (login flows, cookies, CSRF, restart cases) |
   | 8035 | llm-wiki `AUTH_MODE` unset (static default) |
@@ -132,7 +157,7 @@ Format: **ID**: preconditions → steps → expected. *Auto* = automated (file i
 | PERM-02 | `qa_wiki_direct` | app1 in `perms` |
 | PERM-03 | `qa_wiki_group` | app1 in `perms`; group in `groups` |
 | PERM-04 | `qa_wiki_both` | `["application.app1"]`, no duplicates |
-| PERM-05 | `qa_wiki_super` (no explicit grants), flag default | all application.* |
+| PERM-05 | `qa_wiki_super` (no explicit grants), default (flag false) | `[]` in token, login `user` and the SSO's own `user_app_perms`, although application.* perms exist |
 | PERM-06 (×4) **v1.1** | none / staff / non-app / other-app users | `perms` is a list without app1 |
 | PERM-07 | Users holding `auth.view_user` | Non-application perms never exported |
 | PERM-08 (×2) | Inactive with grant, inactive superuser | 403 `account_inactive`, no tokens |
@@ -144,10 +169,10 @@ Format: **ID**: preconditions → steps → expected. *Auto* = automated (file i
 | PERM-14 | Refresh token | `perms` present? xfail(Q-12, still open) |
 | PERM-15 | `qa_wiki_many` (40 groups) | Claims complete; sizes recorded (no longer feeds the cookie: tokens are server-side) |
 | PERM-16 (×2) **v1.1** | No-grant users: token, login `user`, `/me`, `/introspect` | `perms == []` in all four (never absent, never null) |
-| PERM-17 (×2) **v1.1** | `qa_wiki_super`, `qa_wiki_super_app1` on the default SSO (flag true) | every application.* |
-| PERM-18 (×4) **v1.1** | Same DB via the 8040 SSO (`SSO_SUPERUSER_ALL_APPS=false`): super, super_app1, direct, mixed | `[]`, `[app1]`, `[app1]`, `[app1, qa_app2]` consistently in token, `user`, `/me`, `/introspect` |
-| PERM-19 **v1.1** | Flag off: superuser refresh | Refreshed token still `[]` |
-| PERM-20 **v1.1** | Flag off: superuser token at llm-wiki | 403 |
+| PERM-17 (×5) | Default SSO: super, super_app1 (direct grant), super_group (group grant), direct, mixed | `[]`, `[app1]`, `[app1]`, `[app1]`, `[app1, qa_app2]`, identical in token, `user`, /me, /introspect |
+| PERM-18 (×6) | Flag-true SSO (8040, opt-in): super, super_app1, super_group, direct, mixed, none | superusers: every application.* (`all_app_perms`); others unchanged by the flag |
+| PERM-19 / 19b | Refresh of the no-grant superuser on the flag-true / default SSO | all application.* / `[]` |
+| PERM-20 (×2) | Inactive superuser without and with grants (direct + group), both SSOs | 403 `account_inactive`, no tokens (also PERM-08/09) |
 
 `[test_qasso_sso_refresh_perms.py]` (mutable users are reset before and after each test)
 
@@ -159,7 +184,8 @@ Format: **ID**: preconditions → steps → expected. *Auto* = automated (file i
 | PREF-04 | app1 removed from the group itself → refresh (restored afterwards) | app1 dropped for the member |
 | PREF-05 | Added to the app1 group → refresh | app1 added |
 | PREF-06 | Login → deactivate → refresh; introspect old access | Refresh 403 `account_inactive`; introspect `active:false`, no perms |
-| PREF-07 | Set superuser → refresh → unset → refresh | app1 appears, then disappears |
+| PREF-07 | Default SSO: promote a no-grant user to superuser → refresh | perms stay `[]` (no automatic app access, 2026-10-11) |
+| PREF-07b | Flag-true SSO: promote → refresh → demote → refresh | app1 appears, then disappears |
 
 Consequence documented in the plan and tested on the llm-wiki side (JWTV-12, SESS-32): llm-wiki verifies
 locally and never introspects, so a revoked user keeps access **until their current access token is
@@ -173,7 +199,7 @@ refreshed** (≤ 15 min with the default TTL; for a browser session, until the 6
 | APPCMD-02 | `create_app_permission qa_app3` twice | Exit 0 both times, exactly one row (idempotent) |
 | APPCMD-03 (×11) | Bad codenames: `App1`, `1app`, `a`, `app-1`, `app 1`, `app1;drop`, `_app`, 64×`x`, `app1\n`, empty, `äpp` | Non-zero exit, no row created |
 | APPCMD-04 (×4) | Boundaries: `ab`, 63 chars, `app_2`, `z9` | Accepted |
-| APPCMD-05 | Create `qa_app4`; superuser logs in | `application.qa_app4` in superuser's perms with no code change |
+| APPCMD-05 / 05b | Create `qa_app4`; superusers log in on the default / flag-true SSO | default: not in any superuser's perms (super `[]`, super_app1 `[app1]`); flag true: `application.qa_app4` reaches the superuser with no code change |
 | APPCMD-06 | Delete `application.qa_app2` (command-created; simulated `remove_stale_contenttypes`) → `migrate` | **Not** recreated (v1.1 item 8, Q-13 resolved: only code-defined permissions come back; documented); app1 still present. Restored with the command afterwards |
 | APPCMD-10 | Delete `application.app1` (code-defined) → `migrate` | Recreated by post-migrate; every app1 grant is lost (A3 warning). Re-seeded afterwards |
 | APPCMD-07 | `showmigrations application` | `0001` applied (migration owned by `application`) |
@@ -696,7 +722,7 @@ docs (M-*); **G-11 hourly prune (SESS-21 manual)**; **G-12 production client IP 
 | D-08 | `tests/unit/test_layering.py` edited | **Resolved** (9f6a15a revert; file identical to bca2bef; REG-10 passes) |
 | D-09 | Dotted static token in both | **Resolved by design** (item 6). Verify: FB-* |
 | D-10 | Revocation latency | **Accepted** (item 9) |
-| D-11 | Superuser ⇒ every app | **Kept, switchable** (`SSO_SUPERUSER_ALL_APPS`, default true), pending Thomas. Verify: PERM-17..20 |
+| D-11 | Superuser ⇒ every app | **Resolved 2026-10-11 (Thomas via Philip): superusers get no automatic app access**; `SSO_SUPERUSER_ALL_APPS` defaults to false, true is an opt-in. PERM-05/17..20, APPCMD-05/05b, SU-01..05 |
 | D-12 | Inactive/no-access messages confirm the password | Info, unchanged |
 | D-13 | Sliding sessions | **Resolved**: absolute 168 h. Verify: SESS-14..16 |
 | D-14 | `/answer` open by default | Info, unchanged |
@@ -713,7 +739,7 @@ docs (M-*); **G-11 hourly prune (SESS-21 manual)**; **G-12 production client IP 
 | C-14 | Low | Status inconsistency: SSO unreachable at **login** → 502 (B4), during **refresh** → 503 (item 7), both "Login service unavailable". Pick one | LERR-03, SESS-11 |
 | C-15 | Low | The v1.1 section is **uncommitted in both repos** (identical today). sso-server already committed code for items 4 and 8 (120b550, 6476a22, 17d06cd) while its design copy is still a working-tree change; commit both copies together to avoid drift | – |
 | C-16 | Info | No idle timeout: `last_seen` is stored but unused; a stolen cookie works for up to 7 days even if the user never comes back. Intended? | SESS-17 (Q-27) |
-| C-17 | Info | Superuser rule is "pending Thomas's confirmation": tests cover both settings; the default must be re-confirmed before release | PERM-17..20 |
+| C-17 | Info | ~~Superuser rule pending Thomas~~ **Resolved 2026-10-11: default false** | PERM-17..20, SU-* |
 | C-18 | Info | A valid ServiceClient can claim any `client_ip`, so a leaked `SSO_CLIENT_SECRET` disables the per-IP throttle for the attacker (per-username stays). Rotate/scope the secret; consider rate-limiting per ServiceClient as a ceiling | THR-12 |
 | C-19 | Info | Invalid Basic on `/login` is silently ignored by the SSO (logged once as `service_client_auth invalid`). A mistyped `SSO_CLIENT_SECRET` in llm-wiki degrades to D-03 silently; suggest llm-wiki checks the credentials at startup or warns | THR-11 |
 
@@ -730,7 +756,7 @@ Resolved by v1.1: Q-01..07, Q-11, Q-13, Q-14 part 1, Q-16, Q-17 (pending Thomas)
 Q-14 (missing kid → reject), Q-25, Q-26, Q-27, Q-28, Q-29 (= D-16), Q-30, Q-31.
 
 Decided at the regression round @ 6520890 (Philip, 2026-10-10): Q-08, Q-10, Q-12, Q-15, Q-19, Q-20, Q-21, Q-23, Q-32
-(rows below kept for traceability). Still pending: Q-33 `SSO_SUPERUSER_ALL_APPS` default (Thomas).
+(rows below kept for traceability). Q-33 (superuser default) resolved 2026-10-11: default false. No open questions remain.
 
 | Q | Question | What the tests do now |
 |---|---|---|
@@ -742,7 +768,7 @@ Decided at the regression round @ 6520890 (Philip, 2026-10-10): Q-08, Q-10, Q-12
 | Q-20 | `Cache-Control: no-store` on `/login`, `/dashboard` | **Decided: yes in sso/both, not in static** (NS-01..04) |
 | Q-21 | llm-wiki's own `/login` rate limit | **Decided: none**; relies on the SSO throttle (THR) |
 | Q-32 | Session DB default path for non-local storage backends | **Decided: data-dir default, documented**; START-11 |
-| Q-33 (new) | Superuser-gets-all default (`SSO_SUPERUSER_ALL_APPS`) | Pending Thomas; PERM-17..20 run both settings |
+| Q-33 | Superuser-gets-all default (`SSO_SUPERUSER_ALL_APPS`) | **Resolved 2026-10-11: default false** (no automatic app access); flag true is an opt-in, both tested (PERM-17..20, SU-*) |
 
 ## 8. Entry and exit criteria
 

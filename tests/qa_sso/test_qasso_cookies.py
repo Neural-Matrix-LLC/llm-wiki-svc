@@ -111,7 +111,7 @@ def test_COOKIE_05_ids_unique_per_login(wiki, browser_factory, seeded):
 def test_COOKIE_06_size_small_and_constant(wiki, browser_factory, seeded):
     """D-05 resolved by v1.1 item 2: the cookie no longer grows with groups/perms (qa_wiki_many: 40 long groups)."""
     sizes = {}
-    for user in ("qa_wiki_direct", "qa_wiki_many", "qa_wiki_super"):
+    for user in ("qa_wiki_direct", "qa_wiki_many", "qa_wiki_super_app1"):
         _, _, c = _login_response(wiki, browser_factory, user)
         sizes[user] = (len(c.name) + 1 + len(c.value), len(c.raw))
     print("session cookie sizes (name=value, full Set-Cookie):", sizes)

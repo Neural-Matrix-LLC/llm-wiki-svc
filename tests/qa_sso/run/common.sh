@@ -25,14 +25,14 @@ PORT_WIKI_SSO_READS="${PORT_WIKI_SSO_READS:-8036}"  # AUTH_MODE=sso, SSO_PROTECT
 PORT_WIKI_APP2="${PORT_WIKI_APP2:-8037}"         # AUTH_MODE=sso, SSO_REQUIRED_PERMISSION=application.qa_app2
 PORT_UNREACHABLE=8038                            # nothing listens here (SSO-down cases)
 PORT_STARTUP=8039                                # test_qasso_startup.py throw-away processes
-PORT_SSO_NOSUPER="${PORT_SSO_NOSUPER:-8040}"     # 2nd SSO, same DB, SSO_SUPERUSER_ALL_APPS=false (v1.1 item 8)
+PORT_SSO_ALLAPPS="${PORT_SSO_ALLAPPS:-8040}"     # 2nd SSO, same DB, opt-in SSO_SUPERUSER_ALL_APPS=true (default is false since 2026-10-11)
 PORT_WIKI_STATIC_READS="${PORT_WIKI_STATIC_READS:-8041}"  # AUTH_MODE=static, SSO_PROTECT_READS=true (v1.1 item 5)
 PORT_WIKI_DOTTED="${PORT_WIKI_DOTTED:-8042}"     # AUTH_MODE=both, JWT-shaped INGEST_API_TOKEN (v1.1 item 6, D-09)
 
 QA_SSO_ACCESS_TTL_MIN="${QA_SSO_ACCESS_TTL_MIN:-2}"   # short, so refresh cases run in minutes
 STATIC_TOKEN_FILE="$STATE/static_token"
 
-all_ports() { echo "$PORT_SSO $PORT_WIKI_BOTH $PORT_WIKI_STUBBED $PORT_STUB $PORT_WIKI_SSO $PORT_WIKI_STATIC $PORT_WIKI_SSO_READS $PORT_WIKI_APP2 $PORT_SSO_NOSUPER $PORT_WIKI_STATIC_READS $PORT_WIKI_DOTTED"; }
+all_ports() { echo "$PORT_SSO $PORT_WIKI_BOTH $PORT_WIKI_STUBBED $PORT_STUB $PORT_WIKI_SSO $PORT_WIKI_STATIC $PORT_WIKI_SSO_READS $PORT_WIKI_APP2 $PORT_SSO_ALLAPPS $PORT_WIKI_STATIC_READS $PORT_WIKI_DOTTED"; }
 
 # stop_one NAME -> stop the process recorded in $PIDS/NAME.pid, by PID, only if its cmdline has the marker
 stop_one() {

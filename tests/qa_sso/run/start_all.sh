@@ -80,11 +80,12 @@ SSO_ALLOW_SYNTHETIC_SEED=1 QA_SSO_TESTS_DIR="$QA_DIR" "$STATE/sso-manage.sh" she
   start_bg sso gunicorn "$SSO_REPO" "$LOGS/sso.log" -- "$SSO_VENV/bin/gunicorn" ssoproject.wsgi \
     --bind "127.0.0.1:$PORT_SSO" --workers 2 --access-logfile "$LOGS/sso-access.log" )
 wait_http "http://127.0.0.1:$PORT_SSO/healthz" 60
-# 2nd SSO process on the same DB/keys/issuer with SSO_SUPERUSER_ALL_APPS=false (v1.1 item 8)
-( source "$STATE/sso.env"; export SSO_SUPERUSER_ALL_APPS=false
-  start_bg sso-nosuper gunicorn "$SSO_REPO" "$LOGS/sso-nosuper.log" -- "$SSO_VENV/bin/gunicorn" ssoproject.wsgi \
-    --bind "127.0.0.1:$PORT_SSO_NOSUPER" --workers 1 --access-logfile "$LOGS/sso-nosuper-access.log" )
-wait_http "http://127.0.0.1:$PORT_SSO_NOSUPER/healthz" 60
+# 2nd SSO process on the same DB/keys/issuer with the opt-in SSO_SUPERUSER_ALL_APPS=true (the primary SSO runs
+# with the code default, false since e9b0b36 / decision 2026-10-11)
+( source "$STATE/sso.env"; export SSO_SUPERUSER_ALL_APPS=true
+  start_bg sso-allapps gunicorn "$SSO_REPO" "$LOGS/sso-allapps.log" -- "$SSO_VENV/bin/gunicorn" ssoproject.wsgi \
+    --bind "127.0.0.1:$PORT_SSO_ALLAPPS" --workers 1 --access-logfile "$LOGS/sso-allapps-access.log" )
+wait_http "http://127.0.0.1:$PORT_SSO_ALLAPPS/healthz" 60
 
 # ---- llm-wiki venv (outside the repo's own .venv; never touches uv.lock) ----------------------------------
 if [[ ! -x "$WIKI_VENV/bin/python" ]]; then
@@ -165,7 +166,7 @@ export QA_PY='$QA_PY'
 export LLM_WIKI_SSO_CLIENT_ID='$LOGIN_CLIENT_ID'
 export LLM_WIKI_SSO_CLIENT_SECRET='$LOGIN_CLIENT_SECRET'
 export QA_SSO_RESTART_CMD='$RUN_DIR/restart.sh {name}'
-export SSO_NOSUPER_URL='http://127.0.0.1:$PORT_SSO_NOSUPER'
+export SSO_ALLAPPS_URL='http://127.0.0.1:$PORT_SSO_ALLAPPS'
 export SSO_SERVER_LOG='$LOGS/sso.log'
 export LLM_WIKI_COOKIE_SECURE='true'
 export LLM_WIKI_LOG_FILES='$(ls "$LOGS"/wiki-*.log | paste -sd, -)'

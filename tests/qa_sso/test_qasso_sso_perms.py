@@ -20,16 +20,16 @@ def _perms(obj):
     return obj.get("perms", None)
 
 
-@pytest.mark.parametrize("username", GRANTED + NOT_GRANTED + ["qa_wiki_super", "qa_wiki_super_app1", "qa_wiki_many"])
+SUPERS = ["qa_wiki_super", "qa_wiki_super_app1", "qa_wiki_super_group"]
+
+
+@pytest.mark.parametrize("username", GRANTED + NOT_GRANTED + SUPERS + ["qa_wiki_many"])
 def test_PERM_01_access_token_perms_claim(tokens, sso_admin, username):
-    """A2: perms = sorted application.* perms (direct + group; superuser = all application.*)."""
+    """A2: perms = sorted application.* perms (direct + group). Superusers: only explicit grants (default
+    SSO_SUPERUSER_ALL_APPS=false, decision 2026-10-11)."""
     body = tokens(username)
     claim = _perms(jwt_forge.payload(body["access_token"]))
-    if username in ("qa_wiki_super", "qa_wiki_super_app1"):
-        expected = sso_admin.json("all_app_perms")
-        assert D.APP_PERM in expected and D.OTHER_APP_PERM in expected
-    else:
-        expected = D.expected_perms(username)
+    expected = D.expected_perms(username)
     assert claim is not None, "v1.1 item 8: perms is always present ([] when none)"
     assert claim == expected, (username, claim, expected)
     assert claim == sorted(claim), "perms must be sorted"
@@ -49,9 +49,14 @@ def test_PERM_04_direct_and_group_no_duplicates(tokens):
     assert jwt_forge.payload(tokens("qa_wiki_both")["access_token"])["perms"] == [D.APP_PERM]
 
 
-def test_PERM_05_superuser_gets_every_application_perm(tokens, sso_admin):
-    pl = jwt_forge.payload(tokens("qa_wiki_super")["access_token"])
-    assert pl["perms"] == sso_admin.json("all_app_perms")
+def test_PERM_05_superuser_without_grant_gets_no_app_perm(tokens, sso_admin):
+    """Default SSO_SUPERUSER_ALL_APPS=false (Thomas, 2026-10-11): a superuser without a grant gets perms [] in the
+    token, the login user object and the SSO's own computation, although application.* perms exist."""
+    body = tokens("qa_wiki_super")
+    assert jwt_forge.payload(body["access_token"])["perms"] == []
+    assert body["user"]["perms"] == []
+    assert sso_admin.json("user_perms", "qa_wiki_super") == []
+    assert len(sso_admin.json("all_app_perms")) >= 2
 
 
 @pytest.mark.parametrize("username", NOT_GRANTED)
@@ -68,7 +73,7 @@ def test_PERM_07_only_application_namespace_exported(tokens):
         assert all(p.startswith("application.") for p in perms)
 
 
-@pytest.mark.parametrize("username", ["qa_wiki_inactive", "qa_wiki_inactive_super"])
+@pytest.mark.parametrize("username", ["qa_wiki_inactive", "qa_wiki_inactive_super", "qa_wiki_inactive_super_app1"])
 def test_PERM_08_inactive_user_cannot_log_in(sso_http, seeded, username):
     """Inactive users (even with a grant / superuser) get 403 account_inactive and no tokens (A2: no perms)."""
     r = sso_login(sso_http, username)
@@ -80,6 +85,7 @@ def test_PERM_09_inactive_user_computed_perms_empty(sso_admin, seeded):
     """A2 'inactive users get none' (Django get_all_permissions returns set() for inactive users)."""
     assert sso_admin.json("user_perms", "qa_wiki_inactive") == []
     assert sso_admin.json("user_perms", "qa_wiki_inactive_super") == []
+    assert sso_admin.json("user_perms", "qa_wiki_inactive_super_app1") == []  # direct + group grant, inactive
 
 
 @pytest.mark.parametrize("username", ["qa_wiki_direct", "qa_wiki_none", "qa_wiki_super"])
@@ -147,49 +153,70 @@ def test_PERM_16_empty_perms_is_empty_list_everywhere(sso_http, tokens, service_
     assert intro["perms"] == expected
 
 
-# ---------------------------------------------------------------- SSO_SUPERUSER_ALL_APPS (v1.1 item 8)
+# ---------------------------------------------------------------- SSO_SUPERUSER_ALL_APPS
+# Decision (Thomas via Philip, 2026-10-11): default false. The primary SSO (8030) runs with the default; the 2nd SSO
+# (8040, same DB/keys/issuer) runs with the opt-in SSO_SUPERUSER_ALL_APPS=true.
 @pytest.fixture(scope="module")
-def nosuper_http(cfg):
-    if not cfg.sso_nosuper_url:
-        pytest.skip("SSO_NOSUPER_URL not set (2nd SSO on the same DB with SSO_SUPERUSER_ALL_APPS=false)")
+def allapps_http(cfg):
+    if not cfg.sso_allapps_url:
+        pytest.skip("SSO_ALLAPPS_URL not set (2nd SSO on the same DB with SSO_SUPERUSER_ALL_APPS=true)")
     import httpx
-    with httpx.Client(base_url=cfg.sso_nosuper_url, timeout=30) as c:
+    with httpx.Client(base_url=cfg.sso_allapps_url, timeout=30) as c:
         yield c
 
 
-@pytest.mark.parametrize("username", ["qa_wiki_super", "qa_wiki_super_app1"])
-def test_PERM_17_superuser_all_apps_on_default(tokens, sso_admin, username):
-    assert jwt_forge.payload(tokens(username)["access_token"])["perms"] == sso_admin.json("all_app_perms")
+def _all_views(http, service_auth, username):
+    r = sso_login(http, username)
+    assert r.status_code == 200, r.text
+    body = r.json()
+    me = http.get("/api/v1/auth/me", headers={"Authorization": f"Bearer {body['access_token']}"}).json()
+    intro = http.post("/api/v1/auth/introspect", json={"token": body["access_token"]}, auth=service_auth).json()
+    return {"token": jwt_forge.payload(body["access_token"])["perms"], "user": body["user"]["perms"],
+            "me": me.get("user", me)["perms"], "introspect": intro["perms"]}
 
 
 @pytest.mark.parametrize("username,expected", [("qa_wiki_super", []),
                                                ("qa_wiki_super_app1", [D.APP_PERM]),
+                                               ("qa_wiki_super_group", [D.APP_PERM]),
                                                ("qa_wiki_direct", [D.APP_PERM]),
                                                ("qa_wiki_mixed", [D.APP_PERM, D.OTHER_APP_PERM])])
-def test_PERM_18_superuser_all_apps_off(nosuper_http, service_auth, seeded, username, expected):
-    """SSO_SUPERUSER_ALL_APPS=false: superusers get only their explicit (user + group) grants; others unchanged.
-    Consistent across token, login user object, /me and /introspect."""
-    r = sso_login(nosuper_http, username)
-    assert r.status_code == 200, r.text
-    body = r.json()
-    assert jwt_forge.payload(body["access_token"])["perms"] == expected
-    assert body["user"]["perms"] == expected
-    me = nosuper_http.get("/api/v1/auth/me", headers={"Authorization": f"Bearer {body['access_token']}"}).json()
-    assert me.get("user", me)["perms"] == expected
-    intro = nosuper_http.post("/api/v1/auth/introspect", json={"token": body["access_token"]}, auth=service_auth).json()
-    assert intro["perms"] == expected
+def test_PERM_17_superuser_default_explicit_grants_only(sso_http, service_auth, seeded, username, expected):
+    """Default (flag false): superusers get exactly their explicit user/group grants; token, login user object,
+    /me and /introspect agree; normal users unchanged."""
+    views = _all_views(sso_http, service_auth, username)
+    assert all(v == expected for v in views.values()), views
 
 
-def test_PERM_19_superuser_all_apps_off_refresh_consistent(nosuper_http, seeded):
-    r = sso_login(nosuper_http, "qa_wiki_super")
-    ref = nosuper_http.post("/api/v1/auth/refresh", json={"refresh_token": r.json()["refresh_token"]})
+@pytest.mark.parametrize("username,all_apps", [("qa_wiki_super", True), ("qa_wiki_super_app1", True),
+                                               ("qa_wiki_super_group", True), ("qa_wiki_direct", False),
+                                               ("qa_wiki_mixed", False), ("qa_wiki_none", False)])
+def test_PERM_18_superuser_all_apps_opt_in(allapps_http, sso_admin, service_auth, seeded, username, all_apps):
+    """Opt-in SSO_SUPERUSER_ALL_APPS=true: every active superuser gets every application.* permission (with or
+    without a grant); non-superusers are unaffected by the flag."""
+    expected = sso_admin.json("all_app_perms") if all_apps else D.expected_perms(username)
+    views = _all_views(allapps_http, service_auth, username)
+    assert all(v == expected for v in views.values()), views
+
+
+def test_PERM_19_flag_true_refresh_consistent(allapps_http, sso_admin, seeded):
+    r = sso_login(allapps_http, "qa_wiki_super")
+    ref = allapps_http.post("/api/v1/auth/refresh", json={"refresh_token": r.json()["refresh_token"]})
+    assert ref.status_code == 200
+    assert jwt_forge.payload(ref.json()["access_token"])["perms"] == sso_admin.json("all_app_perms")
+
+
+def test_PERM_19b_default_refresh_consistent(sso_http, seeded):
+    r = sso_login(sso_http, "qa_wiki_super")
+    ref = sso_http.post("/api/v1/auth/refresh", json={"refresh_token": r.json()["refresh_token"]})
     assert ref.status_code == 200
     assert jwt_forge.payload(ref.json()["access_token"])["perms"] == []
 
 
-def test_PERM_20_superuser_without_grant_denied_at_llm_wiki_when_off(nosuper_http, wiki, seeded):
-    """End to end: a superuser token from the flag-off SSO (same key/issuer) is 403 at llm-wiki."""
-    import httpx
-    tok = sso_login(nosuper_http, "qa_wiki_super").json()["access_token"]
-    with httpx.Client(base_url=wiki.url, timeout=30) as c:
-        assert c.get("/usage", headers={"Authorization": f"Bearer {tok}"}).status_code == 403
+@pytest.mark.parametrize("username", ["qa_wiki_inactive_super", "qa_wiki_inactive_super_app1"])
+def test_PERM_20_inactive_superuser_refused_under_both_settings(sso_http, allapps_http, seeded, username):
+    """Inactive superusers (with or without grants) never log in: 403 account_inactive, no tokens, on the
+    default SSO and on the flag-true SSO."""
+    for http in (sso_http, allapps_http):
+        r = sso_login(http, username)
+        assert r.status_code == 403 and r.json().get("error") == "account_inactive", (http.base_url, r.text)
+        assert "access_token" not in r.text

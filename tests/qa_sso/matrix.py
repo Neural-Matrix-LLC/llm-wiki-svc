@@ -72,7 +72,8 @@ CREDS = {
     "basic_scheme": "static_bad",             # Authorization: Basic <...>
     "sso_direct": "sso_ok",
     "sso_group": "sso_ok",
-    "sso_super": "sso_ok",
+    "sso_super": "sso_ok",                    # superuser WITH an explicit app1 grant (default false, 2026-10-11)
+    "sso_super_nogrant": "sso_noperm",        # superuser without a grant: no automatic app access
     "sso_none": "sso_noperm",
     "sso_staff": "sso_noperm",
     "sso_other_app": "sso_noperm",

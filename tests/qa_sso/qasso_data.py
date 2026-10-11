@@ -31,8 +31,11 @@ USERS: dict[str, dict] = {
     "qa_wiki_direct":   {"email": "qa_wiki_direct@example.invalid", "perms": [APP_PERM]},
     "qa_wiki_group":    {"email": "qa_wiki_group@example.invalid", "groups": [APP_GROUP]},
     "qa_wiki_both":     {"email": "qa_wiki_both@example.invalid", "perms": [APP_PERM], "groups": [APP_GROUP]},
-    "qa_wiki_super":    {"email": "qa_wiki_super@example.invalid", "is_superuser": True, "is_staff": True},
+    # superusers (Thomas, 2026-10-11: no automatic app access; SSO_SUPERUSER_ALL_APPS defaults to false)
+    "qa_wiki_super":    {"email": "qa_wiki_super@example.invalid", "is_superuser": True, "is_staff": True},  # no grant
     "qa_wiki_super_app1": {"email": "qa_wiki_super_app1@example.invalid", "is_superuser": True, "perms": [APP_PERM]},
+    "qa_wiki_super_group": {"email": "qa_wiki_super_group@example.invalid", "is_superuser": True,
+                            "groups": [APP_GROUP]},
     "qa_wiki_none":     {"email": "qa_wiki_none@example.invalid", "groups": [EMPTY_GROUP]},
     "qa_wiki_staff":    {"email": "qa_wiki_staff@example.invalid", "is_staff": True},          # staff != permission
     "qa_wiki_nonapp":   {"email": "qa_wiki_nonapp@example.invalid", "perms": [NON_APP_PERM]},  # only a non-app perm
@@ -40,6 +43,8 @@ USERS: dict[str, dict] = {
     "qa_wiki_app2":     {"email": "qa_wiki_app2@example.invalid", "perms": [OTHER_APP_PERM]},  # other app only
     "qa_wiki_inactive": {"email": "qa_wiki_inactive@example.invalid", "perms": [APP_PERM], "is_active": False},
     "qa_wiki_inactive_super": {"email": "qa_wiki_isuper@example.invalid", "is_superuser": True, "is_active": False},
+    "qa_wiki_inactive_super_app1": {"email": "qa_wiki_isuper_app1@example.invalid", "is_superuser": True,
+                                    "is_active": False, "perms": [APP_PERM], "groups": [APP_GROUP]},
     "qa_wiki_many":     {"email": "qa_wiki_many@example.invalid", "perms": [APP_PERM, OTHER_APP_PERM],
                          "groups": MANY_GROUPS, "first_name": "Many", "last_name": "Groups-And-Perms"},
     # mutable users: tests grant/revoke/deactivate them and reset them afterwards
@@ -75,10 +80,12 @@ for _g in MANY_GROUPS:
     GROUP_PERMS[_g] = []
 
 
-def expected_perms(username: str, superuser_all_apps: bool = True) -> list[str]:
-    """Design A2 + v1.1 item 8: sorted application.* perms from user + groups; always a list ([] when none);
-    superuser = all application.* while SSO_SUPERUSER_ALL_APPS is true (default), else only explicit grants;
-    inactive = []."""
+def expected_perms(username: str, superuser_all_apps: bool = False) -> list[str]:
+    """Design A2 + v1.1 item 8 + superuser decision (2026-10-11): sorted application.* perms from user + groups;
+    always a list ([] when none); superusers get only their explicit grants by default
+    (SSO_SUPERUSER_ALL_APPS=false), all application.* only with the opt-in flag true; inactive = [].
+    With the flag true the real set is every application.* permission in the DB (tests compare with
+    sso_admin all_app_perms); this returns the seeded ones."""
     u = USERS[username]
     if not u["is_active"]:
         return []

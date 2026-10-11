@@ -413,3 +413,70 @@ The 6 skips are not failures: 5 matrix cells for a `both_reads` instance the har
   which is correct behaviour: redaction is keyed on the parameter name, like `?foo=<x>`. Those probes now use a non-secret
   value and check timing and status only. First-pass logs: `run/logs/first-pass/`.
 - **No issues found.**
+
+---
+
+# Superuser default false @ 317ef33
+
+> **Status: COMPLETE** (2026-10-11)
+
+## State
+
+- llm-wiki-svc `feat/sso-login` @ **c7dbbe1** (= 317ef33 "Live SSO test: superusers need an explicit grant" + Philip's
+  doc sync c7dbbe1), clean; 5179322 is an ancestor. sso-server `feat/app-permissions` @ **e9b0b36**, clean, on b46bc94.
+- **Code says default false:** `ssoproject/settings.py:56` `env.bool("SSO_SUPERUSER_ALL_APPS", default=False)`;
+  `application/permissions.py:103` `getattr(settings, "SSO_SUPERUSER_ALL_APPS", False)`; perms from real permission
+  rows (own + group, `application` app), no `get_all_permissions()`. `.env.example`, README and `docs/SSO-server.md`
+  agree.
+- **Design docs:** both copies of `sso-integration-design.md` are byte-identical and add "Superusers and app access
+  (2026-10-11): default **false** ... overrides v1.1 item 8's default". **Minor mismatch (Info):** v1.1 item 8 (line
+  190, both copies) still reads "`SSO_SUPERUSER_ALL_APPS` (default true)" in place. The new section explicitly overrides
+  it, so this isn't a conflict, but a reader of item 8 alone gets the old default. Suggest striking it through or
+  annotating it.
+- Note (Info, no action): the new query no longer restricts to the `applicationaccess` model, only to the
+  `application` app. All three models there set `default_permissions = ()`, so today only app permissions exist. If a
+  future model in that app keeps Django's default add/change/delete/view permissions, those would appear in `perms`.
+
+## Test changes
+
+`expected_perms(superuser_all_apps=False)` default. PERM-05, PERM-17, APPCMD-05 and PREF-07 flipped to the new default;
+PERM-18/19/20, APPCMD-05b and PREF-07b are the opt-in (flag true) variants on the 2nd SSO (8040, now
+`SSO_SUPERUSER_ALL_APPS=true`, renamed `SSO_ALLAPPS_URL`). New users `qa_wiki_super_group` and
+`qa_wiki_inactive_super_app1`. Working superuser logins use `qa_wiki_super_app1`. The matrix gains `sso_super_nogrant`
+(→ 403). New `test_qasso_superuser.py` (SU-01..05). The QA oracle `sso_ops.user_perms` now calls the SSO's
+`user_app_perms`; it used `get_all_permissions()`, which is wrong for superusers. 1,416 items.
+
+## Results
+
+Full run per Python (functional + restart + throttle phase). PREF-07 failed in both full runs because it still
+expected the old default (QA test not yet flipped; not a product defect). It was flipped (+ PREF-07b) and
+`test_qasso_sso_refresh_perms.py` re-run on a fresh stack per Python (8/8). The table uses that re-run for this file.
+Server processes: all 11 on CPython 3.11.14 / 3.13.16 respectively (incl. `sso-allapps`), also after restart.
+
+| Area | py3.11 | py3.13 |
+|---|---|---|
+| sso_perms (PERM, incl. 17-20 on/off) | 56/0/0 | 56/0/0 |
+| superuser (SU-01..05, new) | 7/0/0 | 7/0/0 |
+| sso_app_perm_command (APPCMD-05/05b) | 24/0/0 | 24/0/0 |
+| sso_refresh_perms (PREF-07/07b) | 8/0/0 | 8/0/0 |
+| auth_matrix (incl. `sso_super_nogrant`) | 520/0/140 | 520/0/140 |
+| login (LOGIN-01 super_app1/super_group, LOGIN-09 super) | 30/0/0 | 30/0/0 |
+| all other areas (unchanged, green) | 623/0/30 | 623/0/30 |
+| **Total** (pass / fail / skip incl. 1 xfail and 20 throttle tests skipped in the functional phase) | **1,268 / 0 / 170** | **1,268 / 0 / 170** |
+
+Superuser behaviour verified:
+- Default: no-grant superuser → perms `[]` (token, login `user`, /me, /introspect, refresh); llm-wiki JSON 403 without
+  a challenge and HTML 403 for a Bearer; the login page shows the no-permission page, no cookie, no session row.
+- Default: superuser with a direct grant or via a group → `[app1]`, logs in normally.
+- A newly created app permission reaches no superuser by default. Promoting a no-grant user to superuser gives nothing
+  at the next refresh.
+- Inactive superusers, with or without direct + group grants → 403 `account_inactive` on both SSOs, refused on the
+  llm-wiki login page, no row.
+- Flag true (opt-in): the same no-grant superuser gets every application.* and llm-wiki access (Bearer 200, and a full
+  login-page login through a throw-away llm-wiki pointed at the flag-true SSO). Promotion/demotion takes effect at
+  refresh; non-superusers are unaffected by the flag.
+
+**No product failures.**
+
+Existing llm-wiki suite @ c7dbbe1, py3.11.14 (clean worktree, removed): `4 failed, 1096 passed, 1 skipped,
+33 deselected`. Only the 4 known R2_* factory-isolation failures.

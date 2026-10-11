@@ -155,7 +155,10 @@ def all_app_perms():
 def user_perms(username):
     _q(username)
     user = User.objects.get(username=username)
-    print(json.dumps(sorted(p for p in user.get_all_permissions() if p.startswith("application."))))
+    # the SSO's own computation (application.permissions.user_app_perms, as used for the perms claim). Not
+    # Django's get_all_permissions(), which returns everything for a superuser (decision 2026-10-11).
+    from application.permissions import user_app_perms
+    print(json.dumps(user_app_perms(user)))
 
 
 def delete_app_permission(codename, allow_app1=False):

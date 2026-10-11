@@ -23,7 +23,7 @@ any URL on port 8000 aborts the run.
 | 8037 | llm-wiki `sso` + `SSO_REQUIRED_PERMISSION=application.qa_app2` | JWTV-17 |
 | 8038 | nothing listens here | SSO unreachable |
 | 8039 | throw-away processes from `test_qasso_startup.py` | fail-fast cases |
-| 8040 | 2nd SSO process, same DB/keys/issuer, `SSO_SUPERUSER_ALL_APPS=false` | PERM-18..20 (v1.1 item 8) |
+| 8040 | 2nd SSO process, same DB/keys/issuer, opt-in `SSO_SUPERUSER_ALL_APPS=true` (the primary SSO runs the default, false) | PERM-18..20, APPCMD-05b, SU-04/05 |
 | 8041 | llm-wiki `static` + `SSO_PROTECT_READS=true` | REG-13/14 (v1.1 item 5) |
 | 8042 | llm-wiki `both` with a JWT-shaped `INGEST_API_TOKEN` | FB-* (v1.1 item 6, D-09) |
 
@@ -118,7 +118,7 @@ it with the design's `create_app_permission` command. Users, groups and grants a
 | `LLM_WIKI_SESSION_MAX_AGE_HOURS` | `SESSION_MAX_AGE_HOURS` of the instances (168) |
 | `LLM_WIKI_SSO_CLIENT_ID`, `_SECRET` | the ServiceClient llm-wiki uses for /login and /refresh delegation |
 | `QA_SSO_RESTART_CMD` | `run/restart.sh {name}` (by PID) |
-| `SSO_NOSUPER_URL` | 2nd SSO with `SSO_SUPERUSER_ALL_APPS=false` |
+| `SSO_ALLAPPS_URL` | 2nd SSO with the opt-in `SSO_SUPERUSER_ALL_APPS=true` (default false) |
 | `SSO_SERVER_LOG` | SSO stderr log (JSON login events with `ip`, THR-15) |
 | `LLM_WIKI_COOKIE_SECURE` | expected `Secure` flag (instances run with the default `true`) |
 | `LLM_WIKI_LOG_FILES` | llm-wiki logs scanned by `test_qasso_zy_logs.py` |

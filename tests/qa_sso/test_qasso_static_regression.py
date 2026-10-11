@@ -73,7 +73,7 @@ def test_REG_03_protected_static_token_allowed_auth_before_validation(static, st
 @pytest.mark.needs_sso
 def test_REG_04_sso_token_is_just_a_wrong_static_token(static, tokens):
     with _c(static) as c:
-        r = c.get("/usage", headers={"Authorization": f"Bearer {tokens('qa_wiki_super')['access_token']}"})
+        r = c.get("/usage", headers={"Authorization": f"Bearer {tokens('qa_wiki_super_app1')['access_token']}"})
     assert_baseline_401(r, {"detail": "invalid or missing bearer token"})
 
 
