@@ -236,6 +236,43 @@ Over MCP the same shows up as an optional `domain` argument on `search_wiki`,
 `list_domains`. A Telegram caption/text starting with `#ml-systems`, or an
 email subject starting with `[ml-systems]`, files the source there.
 
+### Authentication: SSO login (optional)
+
+`AUTH_MODE` (docs/sso-integration-design.md, v1.1 section overrides v1.0):
+
+| Mode | Writes, `/usage`, `/dashboard` | `/mcp` | `/login` |
+|---|---|---|---|
+| `static` (default) | `INGEST_API_TOKEN` - exactly the Phase 0 behaviour | open (WARNING at start) | 404 |
+| `sso` | SSO access token with `SSO_REQUIRED_PERMISSION` (Bearer) or the browser session | SSO Bearer | yes |
+| `both` | either; a bearer that fails JWT verification falls back to the static compare | SSO Bearer or static token | yes |
+
+* Grant access in the SSO admin: permission `application.app1` on the user or a group
+  (SSO README §6a). Register this app there as a ServiceClient
+  (`manage.py create_service_client llm-wiki`) and set `SSO_CLIENT_ID` / `SSO_CLIENT_SECRET`:
+  login and refresh are sent with it plus the browser's IP, so the SSO throttles per user.
+  Behind a reverse proxy run uvicorn with `--proxy-headers --forwarded-allow-ips <proxy>` so the
+  browser's IP is the one passed on.
+* In `sso`/`both` the service refuses to start without `SSO_BASE_URL`, `SSO_ISSUER`,
+  `SSO_CLIENT_ID`, `SSO_CLIENT_SECRET`, or with a **weak `INGEST_API_TOKEN`: `changeme` or
+  shorter than 24 characters** (static mode only logs a warning).
+* Browser sessions are server-side: the `llmwiki_session` cookie (HttpOnly, SameSite=Lax, Secure
+  unless `SESSION_COOKIE_SECURE=false`) holds a random 256-bit id; the SSO tokens live in SQLite at
+  `SESSION_DB_PATH` (default `$LOCAL_STORAGE_PATH/sessions.sqlite3`, mode 0600, keyed by the
+  SHA-256 of the id). Absolute lifetime `SESSION_MAX_AGE_HOURS` (168 = 7 days), never extended;
+  expired rows are pruned at start and hourly. All uvicorn workers must share that file: the
+  `BEGIN IMMEDIATE` transaction around a refresh is what stops two workers refreshing one session
+  (a per-process asyncio lock only saves waiting inside one worker).
+* CSRF: cookie-authenticated non-GET requests need `X-CSRF-Token` (the value is in the dashboard's
+  `<meta name="csrf-token">`); Bearer requests are exempt. `/logout` takes it as a form field.
+* SSO unreachable while a session's access token has expired: 503 "Login service unavailable"
+  (the session is kept). Revoking the permission takes effect at the next refresh, i.e. within the
+  access-token lifetime (15 min).
+* `SSO_PROTECT_READS=true` also protects `/search /answer /concepts /page /domains /worker
+  /sources` (in static mode with the static token).
+
+Integration test against a real SSO-server checkout (gunicorn + SQLite, nothing external):
+`SSO_SERVER_DIR=../sso-server uv run pytest -m integration tests/integration/test_sso_live.py`.
+
 ## Docker
 
 ```bash
