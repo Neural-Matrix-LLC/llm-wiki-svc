@@ -245,6 +245,9 @@ def main(argv: list[str] | None = None) -> int:
         except tools.InvalidSourceId as exc:
             print(f"{exc}: {args.source_id!r}", file=sys.stderr)
             return 1
+        except tools.SourceNotFound as exc:
+            print(str(exc), file=sys.stderr)
+            return 1
         _dump(compiled.model_dump(mode="json"))
         return 0
 

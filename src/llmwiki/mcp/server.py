@@ -66,6 +66,8 @@ def build_server() -> Any:
             return tools.compile_update(source_id, force=force).model_dump(mode="json")
         except tools.InvalidSourceId as exc:  # a clean tool error, not a crash (QA PRE-01)
             raise ToolError(f"{exc}: {source_id!r}") from exc
+        except tools.SourceNotFound as exc:  # QA PRE-03
+            raise ToolError(str(exc)) from exc
 
     @mcp.tool()
     def list_concepts(prefix: str | None = None, domain: str | None = None) -> list[dict]:

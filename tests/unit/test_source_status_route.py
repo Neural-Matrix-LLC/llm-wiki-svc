@@ -48,3 +48,10 @@ def test_compile_malformed_source_id_is_404(client, bad) -> None:
     assert r.status_code == 404, r.text
     assert r.json() == {"detail": "not a valid source_id"}
     assert client.post(f"/compile/{bad}").status_code == 401  # auth still comes first
+
+
+def test_compile_unknown_source_is_404(client) -> None:
+    """QA PRE-03: a well-formed id with nothing captured: 404 with a clear detail, not a 500."""
+    r = client.post("/compile/00000000000000aa", headers=AUTH)
+    assert r.status_code == 404, r.text
+    assert r.json() == {"detail": "no such source: '00000000000000aa'"}

@@ -108,6 +108,15 @@ class InvalidSourceId(ValueError):
         self.source_id = source_id
 
 
+class SourceNotFound(LookupError):
+    """A well-formed ``source_id`` with nothing captured under it (QA PRE-03): HTTP 404, MCP tool
+    error, CLI exit 1."""
+
+    def __init__(self, source_id: str) -> None:
+        super().__init__(f"no such source: {source_id!r}")
+        self.source_id = source_id
+
+
 def _require_source_id(source_id: str) -> str:
     if not is_source_id(source_id):
         raise InvalidSourceId(source_id)
@@ -224,7 +233,8 @@ def compile_update(
 ) -> CompileResult:
     """Re-run the incremental compiler for one already-captured source.
 
-    InvalidSourceId for a malformed id (checked before any backend is built).
+    InvalidSourceId for a malformed id (checked before any backend is built); SourceNotFound
+    when nothing was captured under a well-formed id.
 
     The source stays in the domain it was routed to (``raw/{id}/routing.json``);
     a source captured before Phase 2 is ``general``.
@@ -232,7 +242,10 @@ def compile_update(
     _require_source_id(source_id)
     store, vectors, embedder, llm, cfg = _components(cfg)
     pipeline = _pipeline(cfg)
-    meta = pipeline.load_meta(source_id)
+    try:
+        meta = pipeline.load_meta(source_id)
+    except ObjectNotFound as exc:
+        raise SourceNotFound(source_id) from exc
     doc = pipeline.extract(meta)
     domain = pipeline.load_routing(source_id).domain
     return Compiler(store, vectors, embedder, llm, cfg, lexical=pipeline.lexical).compile_source(

@@ -434,7 +434,7 @@ def compile_source(source_id: str, force: bool = False) -> CompileResult:
     """Re-run the incremental compiler for one source."""
     try:
         return tools.compile_update(source_id, force=force)
-    except tools.InvalidSourceId as exc:  # malformed id: 404, like /sources (QA F-R2-01)
+    except (tools.InvalidSourceId, tools.SourceNotFound) as exc:  # QA F-R2-01, PRE-03
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 

@@ -65,3 +65,43 @@ def test_cli_prints_a_clear_message_and_exits_1(cli_env, capsys, argv) -> None:
 def test_cli_source_with_a_well_formed_id_still_works(cli_env, capsys) -> None:
     assert cli.main(["--offline", "source", "0123456789abcdef"]) == 0
     assert '"source_id": "0123456789abcdef"' in capsys.readouterr().out
+
+
+# ---------------------------------------------------------------- QA PRE-03: well-formed, unknown
+UNKNOWN = "00000000000000aa"
+
+
+def test_compile_unknown_source_raises_source_not_found(cli_env) -> None:
+    from llmwiki import factory
+    from llmwiki.config import load_settings
+
+    factory.reset()
+    cfg = load_settings()
+    with pytest.raises(tools.SourceNotFound) as info:
+        tools.compile_update(UNKNOWN, cfg=cfg)
+    assert str(info.value) == f"no such source: {UNKNOWN!r}" and info.value.source_id == UNKNOWN
+    factory.reset()
+
+
+def test_cli_compile_unknown_source_is_one_stderr_line(cli_env, capsys) -> None:
+    assert cli.main(["--offline", "compile", UNKNOWN]) == 1
+    out, err = capsys.readouterr()
+    assert out == ""
+    assert err.strip().splitlines()[-1] == f"no such source: {UNKNOWN!r}"
+    assert "Traceback" not in err
+
+
+@pytest.mark.asyncio
+async def test_mcp_compile_update_unknown_source_is_a_tool_error(monkeypatch) -> None:
+    from fastmcp import Client
+
+    def missing(source_id, force=False, cfg=None):
+        raise tools.SourceNotFound(source_id)
+
+    monkeypatch.setattr(tools, "compile_update", missing)
+    async with Client(mcp_server.build_server()) as client:
+        result = await client.call_tool("compile_update", {"source_id": UNKNOWN},
+                                        raise_on_error=False)
+    assert result.is_error
+    text = " ".join(getattr(part, "text", "") for part in result.content)
+    assert f"no such source: {UNKNOWN!r}" in text and "Traceback" not in text
