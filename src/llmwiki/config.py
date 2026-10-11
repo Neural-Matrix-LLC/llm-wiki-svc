@@ -9,6 +9,7 @@ from __future__ import annotations
 import ipaddress
 import logging
 import re
+import urllib.parse
 from pathlib import Path
 from typing import Literal
 
@@ -19,23 +20,45 @@ _LOG_FORMAT = "%(asctime)s %(levelname)-7s %(name)s:%(lineno)d  %(message)s"
 _LOG_DATEFMT = "%H:%M:%S"
 _logging_configured = False
 
-# PRE-02: ``/dashboard?token=<INGEST_API_TOKEN>`` (and any ``*_token=``) must not reach the logs.
-# Matches the parameter anywhere in a query string, not only as the last one.
-_TOKEN_PARAM = re.compile(r"(?i)([?&;](?:[a-z0-9_]*_)?token=)[^&;\s\"'#]*")
+# PRE-02 / F-R2-02: ``/dashboard?token=<INGEST_API_TOKEN>`` (and any ``*_token=``) must not reach
+# the logs. Parameters are matched by their percent-decoded name (``%74oken`` is ``token`` to
+# Starlette, so it must be to us too), case-insensitively, anywhere in the query string.
+_QUERY = re.compile(r"\?([^\s\"'#]*)")  # a query string inside a log line
+_PARAM_SPLIT = re.compile(r"([&;])")
 REDACTED = "[redacted]"
 
 
+def _is_token_name(raw_name: str) -> bool:
+    # decoded like Starlette's parse_qsl; .strip() errs on the side of redacting
+    name = urllib.parse.unquote_plus(raw_name).strip().lower()
+    return name == "token" or name.endswith("_token")
+
+
+def _redact_query(query: str) -> str:
+    parts = _PARAM_SPLIT.split(query)  # separators kept at odd indexes
+    for i in range(0, len(parts), 2):
+        name, sep, _value = parts[i].partition("=")
+        if sep and _is_token_name(name):
+            parts[i] = f"{name}={REDACTED}"  # the raw name is kept, only the value goes
+    return "".join(parts)
+
+
 def redact_tokens(text: str) -> str:
-    """``...?token=secret&month=x`` -> ``...?token=[redacted]&month=x``."""
-    return _TOKEN_PARAM.sub(lambda m: m.group(1) + REDACTED, text)
+    """``...?token=secret&month=x`` -> ``...?token=[redacted]&month=x``; also ``%74oken=``,
+    ``Access_Token=``, repeated parameters. Everything else in ``text`` is left byte for byte."""
+    if "?" not in text:
+        return text
+    return _QUERY.sub(lambda m: "?" + _redact_query(m.group(1)), text)
 
 
 class TokenRedactingFilter(logging.Filter):
-    """Redacts ``token=`` query parameters in a log record (uvicorn's access log puts the
-    full path, query string included, in ``record.args``). Never drops a record."""
+    """Redacts token query parameters in a log record (uvicorn's access log puts the full path,
+    query string included, in ``record.args``). Never drops a record."""
 
     def filter(self, record: logging.LogRecord) -> bool:
-        if isinstance(record.msg, str) and "token=" in record.msg.lower():
+        # with args, msg is a format string (uvicorn's AccessFormatter unpacks record.args): leave
+        # it alone so placeholders and arg count stay valid, and redact the args instead
+        if isinstance(record.msg, str) and not record.args:
             record.msg = redact_tokens(record.msg)
         if isinstance(record.args, tuple):
             record.args = tuple(redact_tokens(a) if isinstance(a, str) else a
