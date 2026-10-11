@@ -1,0 +1,526 @@
+"""AUTH_MODE matrix, SSO_PROTECT_READS, /login, the browser session and /logout
+(docs/sso-integration-design.md B3/B4/B7). The SSO is tests/sso_fake.FakeSSO over an
+httpx.MockTransport.
+"""
+
+from __future__ import annotations
+
+import logging
+import re
+import time
+
+import pytest
+from fastapi.testclient import TestClient
+from tests.sso_fake import AUDIENCE, BASE_URL, ISSUER, PERM, FakeSSO, Key, access_claims
+
+from llmwiki.api.app import create_app
+from llmwiki.config import Settings
+
+STATIC = "test-static-token"
+SECRET = "session-secret-" + "x" * 40
+
+
+@pytest.fixture(scope="module")
+def key() -> Key:
+    return Key.generate()
+
+
+@pytest.fixture
+def sso(key) -> FakeSSO:
+    return FakeSSO(key)
+
+
+def make_settings(tmp_path, **over) -> Settings:
+    base = dict(
+        _env_file=None, storage_backend="local", vector_backend="memory",
+        embedding_backend="fake", llm_backend="fake", local_storage_path=tmp_path / "data",
+        embedding_dim=64, ingest_api_token=STATIC, sso_base_url=BASE_URL, sso_issuer=ISSUER,
+        sso_audience=AUDIENCE, session_secret=SECRET,
+    )
+    base.update(over)
+    return Settings(**base)
+
+
+@pytest.fixture
+def build(tmp_path, monkeypatch, sso):
+    """build(auth_mode=..., **settings) -> TestClient on https://testserver (Secure cookies)."""
+    from llmwiki import config, factory, tools
+
+    def _build(**over) -> TestClient:
+        cfg = make_settings(tmp_path, **over)
+        monkeypatch.setattr(config, "settings", cfg)
+        monkeypatch.setattr("llmwiki.api.routes.settings", cfg)
+        monkeypatch.setattr("llmwiki.tools.default_settings", cfg)
+        monkeypatch.setattr("llmwiki.factory.default_settings", cfg)
+        monkeypatch.setattr(tools, "auth_transport", sso.transport)
+        tools.reset_auth()
+        factory.reset()
+        return TestClient(create_app(), base_url="https://testserver", follow_redirects=False)
+
+    yield _build
+    tools.reset_auth()
+    factory.reset()
+
+
+def bearer(token: str) -> dict:
+    return {"Authorization": f"Bearer {token}"}
+
+
+def csrf_of(client: TestClient, path: str = "/login") -> str:
+    page = client.get(path)
+    match = re.search(r"name='csrf_token' value='([^']+)'", page.text)
+    assert match, page.text
+    return match.group(1)
+
+
+def login(client: TestClient, username="alice", password="alice-pw", next_url="/dashboard",
+          csrf: str | None = None):
+    token = csrf if csrf is not None else csrf_of(client)
+    return client.post("/login", data={"username": username, "password": password,
+                                       "csrf_token": token, "next": next_url})
+
+
+def set_cookie_headers(response) -> list[str]:
+    return response.headers.get_list("set-cookie")
+
+
+def session_cookie(response) -> str:
+    return next(h for h in set_cookie_headers(response) if h.startswith("llmwiki_session="))
+
+
+# ---------------------------------------------------------------- startup
+@pytest.mark.parametrize("missing", ["sso_base_url", "sso_issuer", "session_secret"])
+def test_sso_mode_fails_fast_without_required_settings(build, missing) -> None:
+    with pytest.raises(RuntimeError, match=missing.upper()):
+        build(auth_mode="sso", **{missing: ""})
+
+
+def test_short_session_secret_fails_fast(build) -> None:
+    with pytest.raises(RuntimeError, match="32 characters"):
+        build(auth_mode="both", session_secret="short")
+
+
+def test_static_mode_needs_no_sso_settings_and_mounts_no_login(build) -> None:
+    client = build(auth_mode="static", sso_base_url="", sso_issuer="", session_secret="")
+    assert client.get("/login").status_code == 404
+    assert client.post("/lint", headers=bearer(STATIC)).status_code == 200
+    r = client.post("/lint")
+    assert r.status_code == 401 and "www-authenticate" not in r.headers  # Phase 0 401, unchanged
+    assert r.json() == {"detail": "invalid or missing bearer token"}
+
+
+def test_jwks_url_defaults_from_the_base_url(tmp_path) -> None:
+    cfg = make_settings(tmp_path, sso_base_url="https://sso.x/")
+    assert cfg.effective_sso_jwks_url == "https://sso.x/.well-known/jwks.json"
+    assert make_settings(tmp_path, sso_jwks_url="https://k/j").effective_sso_jwks_url == "https://k/j"
+
+
+def test_healthz_reports_the_auth_mode(build) -> None:
+    body = build(auth_mode="both").get("/healthz").json()
+    assert body["config"]["auth"] == {"mode": "both", "sso_issuer": ISSUER,
+                                      "required_permission": PERM, "protect_reads": False}
+
+
+# ---------------------------------------------------------------- AUTH_MODE matrix (Bearer)
+@pytest.mark.parametrize("mode,credential,status", [
+    ("static", "static", 200), ("static", "sso", 401), ("static", "none", 401),
+    ("sso", "static", 401), ("sso", "sso", 200), ("sso", "sso_noperm", 403), ("sso", "none", 401),
+    ("both", "static", 200), ("both", "sso", 200), ("both", "sso_noperm", 403),
+    ("both", "none", 401), ("both", "garbage", 401), ("sso", "expired", 401),
+])
+def test_auth_mode_matrix_on_a_protected_route(build, key, mode, credential, status) -> None:
+    client = build(auth_mode=mode)
+    headers = {
+        "static": bearer(STATIC),
+        "sso": bearer(key.sign(access_claims())),
+        "sso_noperm": bearer(key.sign(access_claims(perms=[]))),
+        "expired": bearer(key.sign(access_claims(exp=int(time.time()) - 600))),
+        "garbage": bearer("x.y.z"),
+        "none": {},
+    }[credential]
+    r = client.post("/lint", headers=headers)
+    assert r.status_code == status, r.text
+    if status == 403:
+        assert r.json() == {"detail": "forbidden", "error": "permission_denied"}
+    if status == 401 and mode != "static":
+        assert r.headers["www-authenticate"] == 'Bearer error="invalid_token"'
+
+
+def test_require_token_is_an_alias_of_require_auth() -> None:
+    from llmwiki.api import routes
+
+    assert routes.require_token is routes.require_auth
+
+
+def test_sso_bearer_works_on_every_write_route_kind(build, key) -> None:
+    client = build(auth_mode="sso")
+    h = bearer(key.sign(access_claims()))
+    assert client.put("/domains/notes", json={"description": "d"}, headers=h).status_code == 200
+    assert client.get("/usage", headers=h).status_code == 200
+    assert client.post("/ingest", json={"text": "hello world"}, headers=h).status_code == 200
+
+
+# ---------------------------------------------------------------- SSO_PROTECT_READS
+READS = ["/search?q=x", "/answer?q=x", "/concepts", "/page/nothing", "/domains", "/worker",
+         "/sources/0123456789abcdef"]
+
+
+@pytest.mark.parametrize("path", READS)
+def test_reads_are_open_by_default(build, path) -> None:
+    assert build(auth_mode="sso").get(path).status_code not in (401, 403)
+
+
+@pytest.mark.parametrize("path", READS)
+def test_protect_reads_requires_auth(build, key, path) -> None:
+    client = build(auth_mode="sso", sso_protect_reads=True)
+    assert client.get(path).status_code == 401
+    assert client.get(path, headers=bearer(key.sign(access_claims(perms=[])))).status_code == 403
+    assert client.get(path, headers=bearer(key.sign(access_claims()))).status_code not in (401, 403)
+
+
+def test_protect_reads_keeps_healthz_and_login_public(build) -> None:
+    client = build(auth_mode="sso", sso_protect_reads=True)
+    assert client.get("/healthz").status_code == 200
+    assert client.get("/login").status_code == 200
+
+
+def test_protect_reads_in_static_mode_uses_the_static_token(build) -> None:
+    client = build(auth_mode="static", sso_protect_reads=True)
+    assert client.get("/concepts").status_code == 401
+    assert client.get("/concepts", headers=bearer(STATIC)).status_code == 200
+
+
+def test_protect_reads_with_a_session(build) -> None:
+    client = build(auth_mode="sso", sso_protect_reads=True)
+    assert login(client).status_code == 303
+    assert client.get("/concepts").status_code == 200
+
+
+# ---------------------------------------------------------------- login page
+def test_login_page_renders_a_form_with_csrf(build) -> None:
+    client = build(auth_mode="sso")
+    r = client.get("/login?next=/dashboard")
+    assert r.status_code == 200 and "<form class='login'" in r.text
+    assert "name='username'" in r.text and "type='password'" in r.text
+    assert "value='/dashboard'" in r.text and r.headers["cache-control"] == "no-store"
+    csrf_header = next(h for h in set_cookie_headers(r) if h.startswith("llmwiki_csrf="))
+    assert "SameSite=strict" in csrf_header and "HttpOnly" in csrf_header
+    assert "Secure" in csrf_header
+    value = csrf_header.split(";")[0].split("=", 1)[1]
+    assert f"value='{value}'" in r.text  # double submit: cookie == hidden field
+
+
+def test_login_success_sets_the_session_and_redirects(build, sso) -> None:
+    client = build(auth_mode="sso")
+    r = login(client, next_url="/dashboard?month=2026-10")
+    assert r.status_code == 303 and r.headers["location"] == "/dashboard?month=2026-10"
+    assert sso.calls[0] == ("/api/v1/auth/login",
+                            {"username": "alice", "password": "alice-pw", "client": "native"})
+    page = client.get("/dashboard")
+    assert page.status_code == 200
+    assert "Signed in as <strong>alice</strong>" in page.text and "Log out" in page.text
+
+
+def test_login_accepts_an_email_style_identifier_and_passes_it_through(build, sso) -> None:
+    sso.users["alice@example.test"] = sso.users["alice"]
+    client = build(auth_mode="sso")
+    assert login(client, username="alice@example.test").status_code == 303
+
+
+def test_session_cookie_flags_and_size(build, sso) -> None:
+    client = build(auth_mode="sso")
+    header = session_cookie(login(client))
+    attrs = [a.strip() for a in header.split(";")]
+    assert "HttpOnly" in attrs and "Secure" in attrs
+    assert "SameSite=lax" in attrs and "Path=/" in attrs
+    max_age = int(next(a for a in attrs if a.startswith("Max-Age=")).split("=")[1])
+    assert sso.refresh_ttl - 60 <= max_age <= sso.refresh_ttl  # = refresh lifetime
+    assert len(header.encode()) < 4096
+
+
+def test_session_cookie_fits_with_a_3072_bit_key_and_many_groups(tmp_path, monkeypatch) -> None:
+    """Design B4: ~2 KB, under the 4 KB browser limit (production keys are 3072-bit)."""
+    from llmwiki import tools
+    from llmwiki.config import Settings as _S  # noqa: N814
+
+    big = FakeSSO(Key.generate(3072))
+    big.users["alice"].perms = [PERM, "application.app2", "application.app3"]
+    cfg = make_settings(tmp_path, auth_mode="sso")
+    assert isinstance(cfg, _S)
+    monkeypatch.setattr(tools, "auth_transport", big.transport)
+    tools.reset_auth()
+    session, _ = tools.auth_service(cfg).login("alice", "alice-pw")
+    value = tools.auth_service(cfg).dump_session(session)
+    tools.reset_auth()
+    header = f"llmwiki_session={value}; Path=/; Max-Age=604800; HttpOnly; SameSite=lax; Secure"
+    assert len(header) < 4096
+    assert len(value) < 2600
+
+
+def test_cookie_secure_flag_can_be_disabled_for_local_http(build) -> None:
+    client = build(auth_mode="sso", session_cookie_secure=False)
+    assert "Secure" not in session_cookie(login(client))
+
+
+@pytest.mark.parametrize("user,password,status,message", [
+    ("alice", "wrong", 401, "Wrong username or password"),
+    ("nobody", "nobody-pw", 401, "Wrong username or password"),
+    ("carol", "carol-pw", 403, "Please activate your account"),
+    ("bob", "bob-pw", 403, "doesn&#x27;t have access to llm-wiki (application.app1)"),
+])
+def test_login_failures(build, sso, user, password, status, message) -> None:
+    client = build(auth_mode="sso")
+    r = login(client, user, password)
+    assert r.status_code == status and message in r.text
+    assert not any(h.startswith("llmwiki_session=") for h in set_cookie_headers(r))
+    assert f"value='{user}'" in r.text  # username kept, password never echoed
+    assert password not in r.text.replace(f"value='{user}'", "")
+
+
+def test_no_permission_discards_the_refresh_token_at_the_sso(build, sso) -> None:
+    client = build(auth_mode="sso")
+    login(client, "bob", "bob-pw")
+    assert sso.paths() == ["/api/v1/auth/login", "/.well-known/jwks.json", "/api/v1/auth/logout"]
+    assert sso.live_refresh == {}
+
+
+def test_rate_limited_login_shows_retry_after(build, sso) -> None:
+    sso.rate_limited = 42
+    r = login(build(auth_mode="sso"))
+    assert r.status_code == 429 and "try again in 42 s" in r.text
+    assert r.headers["retry-after"] == "42"
+
+
+def test_sso_down_is_a_502_page(build, sso) -> None:
+    client = build(auth_mode="sso")
+    token = csrf_of(client)
+    sso.down = True
+    r = login(client, csrf=token)
+    assert r.status_code == 502 and "Login service unavailable" in r.text
+
+
+def test_sso_token_with_a_wrong_issuer_is_a_502_not_a_session(build, sso) -> None:
+    sso.issuer = "https://impostor.example"
+    r = login(build(auth_mode="sso"))
+    assert r.status_code == 502 and not any(
+        h.startswith("llmwiki_session=") for h in set_cookie_headers(r))
+
+
+def test_empty_fields_are_a_400(build) -> None:
+    assert login(build(auth_mode="sso"), "", "").status_code == 400
+
+
+@pytest.mark.parametrize("csrf", ["", "forged-value-" + "z" * 40])
+def test_login_csrf_failure(build, sso, csrf) -> None:
+    client = build(auth_mode="sso")
+    csrf_of(client)  # sets the cookie; the form value below does not match it
+    r = login(client, csrf=csrf)
+    assert r.status_code == 403 and "expired" in r.text
+    assert sso.calls == []  # the SSO is never called
+
+
+def test_login_csrf_failure_without_cookie(build, sso) -> None:
+    client = build(auth_mode="sso")
+    r = client.post("/login", data={"username": "alice", "password": "alice-pw",
+                                    "csrf_token": "a" * 43})
+    assert r.status_code == 403 and sso.calls == []
+
+
+@pytest.mark.parametrize("target", [
+    "https://evil.example/", "//evil.example/x", "/\\evil.example", "http:/evil",
+    "javascript:alert(1)",
+    "evil", "/login", "/logout", "/%0d%0aSet-Cookie:x", "\\\\evil", "/ok\r\nX: y",
+])
+def test_open_redirects_are_rejected(build, target) -> None:
+    from llmwiki.api.login import safe_next
+
+    assert safe_next(target) in ("/dashboard", target) and not safe_next(target).startswith("//")
+    if target.startswith(("/%0d", )):
+        return  # an encoded path on this origin is harmless
+    r = login(build(auth_mode="sso"), next_url=target)
+    assert r.status_code == 303 and r.headers["location"] == "/dashboard"
+
+
+def test_relative_next_is_kept(build) -> None:
+    from llmwiki.api.login import safe_next
+
+    assert safe_next("/concepts?prefix=a") == "/concepts?prefix=a"
+    assert safe_next(None) == "/dashboard"
+
+
+def test_signed_in_user_visiting_login_goes_to_next(build) -> None:
+    client = build(auth_mode="sso")
+    login(client)
+    r = client.get("/login?next=/concepts")
+    assert r.status_code == 303 and r.headers["location"] == "/concepts"
+
+
+# ---------------------------------------------------------------- dashboard
+def test_unauthenticated_browser_is_redirected_to_login(build) -> None:
+    r = build(auth_mode="sso").get("/dashboard?month=2026-10")
+    assert r.status_code == 303
+    assert r.headers["location"] == "/login?next=%2Fdashboard%3Fmonth%3D2026-10"
+
+
+def test_sso_mode_ignores_the_token_query_parameter(build) -> None:
+    r = build(auth_mode="sso").get("/dashboard", params={"token": STATIC})
+    assert r.status_code == 303  # not accepted: tokens stay out of URLs
+
+
+def test_both_mode_still_accepts_the_token_query_parameter(build) -> None:
+    client = build(auth_mode="both")
+    assert client.get("/dashboard", params={"token": STATIC}).status_code == 200
+    assert client.get("/dashboard", params={"token": "wrong"}).status_code == 401
+
+
+def test_dashboard_accepts_an_sso_bearer(build, key) -> None:
+    client = build(auth_mode="sso")
+    assert client.get("/dashboard", headers=bearer(key.sign(access_claims()))).status_code == 200
+    assert client.get("/dashboard",
+                      headers=bearer(key.sign(access_claims(perms=[])))).status_code == 403
+
+
+def test_forged_session_cookie_is_cleared(build) -> None:
+    client = build(auth_mode="sso")
+    client.cookies.set("llmwiki_session", "forged.value.sig", domain="testserver.local")
+    r = client.get("/dashboard", headers={"Cookie": "llmwiki_session=forged.value"})
+    assert r.status_code == 303
+    assert any(h.startswith('llmwiki_session=""') and "Max-Age=0" in h
+               for h in set_cookie_headers(r))
+
+
+def test_json_route_with_a_session(build) -> None:
+    client = build(auth_mode="sso")
+    login(client)
+    assert client.post("/lint").status_code == 200
+
+
+# ---------------------------------------------------------------- refresh
+def test_session_refresh_rotates_both_tokens(build, sso) -> None:
+    sso.access_ttl = 30  # expires within the 60 s margin -> refresh on the next request
+    client = build(auth_mode="sso")
+    first = session_cookie(login(client))
+    old_refresh = next(iter(sso.live_refresh))
+    sso.access_ttl = 900
+    r = client.get("/dashboard")
+    assert r.status_code == 200
+    assert "/api/v1/auth/refresh" in sso.paths()
+    rotated = session_cookie(r)
+    assert rotated != first and old_refresh not in sso.live_refresh and len(sso.live_refresh) == 1
+    sso.calls.clear()
+    assert client.get("/dashboard").status_code == 200
+    assert "/api/v1/auth/refresh" not in sso.paths()  # fresh token now: no refresh
+
+
+def test_refresh_picks_up_a_revoked_permission(build, sso) -> None:
+    sso.access_ttl = 30
+    client = build(auth_mode="sso")
+    login(client)
+    sso.users["alice"].perms = []
+    r = client.get("/dashboard")
+    assert r.status_code == 403 and "doesn&#x27;t have access" in r.text
+    assert any(h.startswith('llmwiki_session=""') for h in set_cookie_headers(r))
+    assert sso.live_refresh == {}  # the rotated refresh token was discarded too
+    assert client.post("/lint").status_code == 401  # cookie gone
+
+
+def test_refresh_permission_revoked_on_a_json_route_is_403(build, sso) -> None:
+    sso.access_ttl = 30
+    client = build(auth_mode="sso")
+    login(client)
+    sso.users["alice"].perms = []
+    assert client.post("/lint").status_code == 403
+
+
+def test_refresh_failure_clears_the_session_and_redirects(build, sso) -> None:
+    sso.access_ttl = 30
+    client = build(auth_mode="sso")
+    login(client)
+    sso.live_refresh.clear()  # e.g. logout-all at the SSO
+    r = client.get("/dashboard")
+    assert r.status_code == 303 and r.headers["location"].startswith("/login?next=")
+    assert any(h.startswith('llmwiki_session=""') for h in set_cookie_headers(r))
+
+
+def test_refresh_failure_on_a_json_route_is_401(build, sso) -> None:
+    sso.access_ttl = 30
+    client = build(auth_mode="sso")
+    login(client)
+    sso.live_refresh.clear()
+    r = client.post("/lint")
+    assert r.status_code == 401 and r.headers["www-authenticate"]
+
+
+def test_sso_down_during_refresh_keeps_a_still_valid_session(build, sso) -> None:
+    sso.access_ttl = 30
+    client = build(auth_mode="sso")
+    login(client)
+    sso.down = True
+    r = client.get("/dashboard")
+    assert r.status_code == 200  # access token still valid for ~30 s
+    assert not any(h.startswith("llmwiki_session=") for h in set_cookie_headers(r))
+
+
+def test_sso_down_with_an_expired_access_token_keeps_the_cookie(build, sso) -> None:
+    sso.access_ttl = -5
+    client = build(auth_mode="sso")
+    login(client)  # SSO accepted the login; the token is already within the leeway
+    sso.down = True
+    r = client.post("/lint")
+    assert r.status_code == 401
+    assert not any(h.startswith("llmwiki_session=") for h in set_cookie_headers(r))
+
+
+# ---------------------------------------------------------------- logout
+def test_logout_calls_the_sso_and_clears_the_cookie(build, sso) -> None:
+    client = build(auth_mode="sso")
+    login(client)
+    refresh_token = next(iter(sso.live_refresh))
+    page = client.get("/dashboard")
+    csrf = re.search(r"name='csrf_token' value='([^']+)'", page.text).group(1)
+    r = client.post("/logout", data={"csrf_token": csrf})
+    assert r.status_code == 303 and r.headers["location"] == "/login"
+    assert ("/api/v1/auth/logout", {"refresh_token": refresh_token}) in sso.calls
+    assert refresh_token not in sso.live_refresh
+    assert any(h.startswith('llmwiki_session=""') and "Max-Age=0" in h
+               for h in set_cookie_headers(r))
+    assert client.get("/dashboard").status_code == 303
+
+
+def test_logout_needs_csrf(build, sso) -> None:
+    client = build(auth_mode="sso")
+    login(client)
+    r = client.post("/logout", data={"csrf_token": "nope"})
+    assert r.status_code == 403
+    assert "/api/v1/auth/logout" not in sso.paths()
+    assert client.get("/dashboard").status_code == 200  # still signed in
+
+
+def test_logout_survives_an_sso_outage(build, sso) -> None:
+    client = build(auth_mode="sso")
+    login(client)
+    csrf = re.search(r"name='csrf_token' value='([^']+)'", client.get("/dashboard").text).group(1)
+    sso.down = True
+    r = client.post("/logout", data={"csrf_token": csrf})
+    assert r.status_code == 303  # cookie cleared locally; the refresh token expires on its own
+
+
+# ---------------------------------------------------------------- logs
+def test_no_tokens_or_passwords_in_logs(build, sso, key, caplog) -> None:
+    caplog.set_level(logging.DEBUG)
+    sso.access_ttl = 30
+    client = build(auth_mode="both")
+    login(client)
+    issued = list(sso.live_refresh)
+    sso.access_ttl = 900
+    client.get("/dashboard")
+    issued += list(sso.live_refresh)
+    jwt_bearer = key.sign(access_claims())
+    client.post("/lint", headers=bearer(jwt_bearer))
+    client.post("/lint", headers=bearer(STATIC))
+    client.post("/lint", headers=bearer("wrong-static-token-value"))
+    logged = "\n".join(r.getMessage() for r in caplog.records)
+    assert "require_auth:" in logged and "login ok: alice" in logged
+    for secret in [*issued, jwt_bearer, STATIC, "alice-pw", SECRET]:
+        assert secret not in logged
+    assert not re.search(r"eyJ[\w-]{20,}\.[\w-]{20,}", logged)

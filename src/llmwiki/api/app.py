@@ -14,7 +14,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
 from llmwiki import __version__
-from llmwiki.api.routes import router
+from llmwiki.api.routes import Forbidden, router
 from llmwiki.config import configure_logging
 from llmwiki.config import settings as default_settings
 
@@ -43,6 +43,8 @@ def create_app() -> FastAPI:
     app.include_router(router)
     # Replaces FastAPI's default 422 handler; see _validation_error.
     app.add_exception_handler(RequestValidationError, _validation_error)
+    app.add_exception_handler(Forbidden, _forbidden)
+    _mount_auth(app)
 
     if mcp_app is not None:
         from llmwiki.mcp.server import mount
@@ -77,6 +79,31 @@ def _lifespan(inner):  # type: ignore[no-untyped-def]
             tools.shutdown_worker()
 
     return lifespan
+
+
+def _mount_auth(app: FastAPI) -> None:
+    """AUTH_MODE=sso|both (docs/sso-integration-design.md B1/B4): fail fast, then /login + sessions.
+
+    ``static`` (the default) mounts nothing: the service behaves exactly as before.
+    """
+    from llmwiki.config import settings as current_settings
+
+    current_settings.require_auth_config()
+    if current_settings.auth_mode == "static":
+        return
+    from llmwiki.api.login import router as login_router
+    from llmwiki.api.session import SessionAuthMiddleware
+
+    app.include_router(login_router)
+    app.add_middleware(SessionAuthMiddleware, cfg=current_settings)
+    logger.info("auth: AUTH_MODE=%s, issuer %s, permission %s, protect reads %s",
+                current_settings.auth_mode, current_settings.sso_issuer,
+                current_settings.sso_required_permission, current_settings.sso_protect_reads)
+
+
+async def _forbidden(request: Request, exc: Exception) -> JSONResponse:
+    """403 for a caller without SSO_REQUIRED_PERMISSION (design B2: never 401)."""
+    return JSONResponse(status_code=403, content=Forbidden.BODY)
 
 
 def _mount_channels(app: FastAPI) -> None:

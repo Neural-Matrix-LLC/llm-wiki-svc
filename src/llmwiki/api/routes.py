@@ -1,15 +1,27 @@
 """HTTP routes. No business logic lives here - every handler calls ``tools.py``.
 
-Phase 0 auth is a single static bearer token (design doc 5); real auth is Phase 1.
+Auth (docs/sso-integration-design.md B3): ``AUTH_MODE=static`` (default) is the Phase 0 static
+bearer token, unchanged. ``sso`` accepts SSO access tokens and the browser session from ``/login``;
+``both`` accepts either. ``require_auth`` is the dependency; ``require_token`` is kept as its alias.
 """
 
 from __future__ import annotations
 
 import logging
 import secrets
+from urllib.parse import urlencode
 
-from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, UploadFile
-from fastapi.responses import HTMLResponse, PlainTextResponse
+from fastapi import (
+    APIRouter,
+    BackgroundTasks,
+    Depends,
+    File,
+    Form,
+    HTTPException,
+    Request,
+    UploadFile,
+)
+from fastapi.responses import HTMLResponse, PlainTextResponse, RedirectResponse, Response
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, Field, model_validator
 
@@ -45,15 +57,80 @@ def mask(secret: str) -> str:
     return f"{secret[:5]}...{secret[-5:]} ({len(secret)} chars)"
 
 
-def require_token(
-    credentials: HTTPAuthorizationCredentials | None = Depends(_bearer),
-) -> None:
-    """Constant-time check of the static Phase 0 bearer token."""
+#: 401 challenge for AUTH_MODE=sso|both (design B3). static mode keeps its Phase 0 401 unchanged.
+WWW_AUTHENTICATE = {"WWW-Authenticate": 'Bearer error="invalid_token"'}
+
+
+class Forbidden(Exception):
+    """Authenticated but without SSO_REQUIRED_PERMISSION -> 403 (app.py renders the body)."""
+
+    BODY = {"detail": "forbidden", "error": "permission_denied"}
+
+
+def _unauthorized() -> HTTPException:
+    return HTTPException(status_code=401, detail="invalid or missing credentials",
+                         headers=WWW_AUTHENTICATE)
+
+
+def _static_check(credentials: HTTPAuthorizationCredentials | None) -> None:
+    """Constant-time check of the static Phase 0 bearer token (AUTH_MODE=static, as before)."""
     expected = settings.ingest_api_token.get_secret_value()
     supplied = credentials.credentials if credentials else ""
     logger.debug("require_token: expected=%s supplied=%s", mask(expected), mask(supplied))
     if not secrets.compare_digest(supplied, expected):
         raise HTTPException(status_code=401, detail="invalid or missing bearer token")
+
+
+def require_auth(
+    request: Request,
+    credentials: HTTPAuthorizationCredentials | None = Depends(_bearer),
+) -> tools.Principal | None:
+    """The protected-route dependency (design B3).
+
+    * static: exactly the Phase 0 check (returns None).
+    * sso/both: ``Authorization: Bearer`` first - a JWT is verified as an SSO access token plus
+      SSO_REQUIRED_PERMISSION (sso/both), anything else is compared with INGEST_API_TOKEN (both
+      only). Without a header, the browser session (api/session.py). 401 + WWW-Authenticate when
+      missing/invalid, 403 when the permission is missing.
+    """
+    if settings.auth_mode == "static":
+        _static_check(credentials)
+        return None
+    service = tools.auth_service(settings)
+    supplied = credentials.credentials if credentials else ""
+    logger.debug("require_auth: mode=%s supplied=%s", settings.auth_mode, mask(supplied))
+    if supplied:
+        try:
+            return service.authenticate_bearer(supplied)
+        except tools.PermissionDenied as exc:
+            raise Forbidden() from exc
+        except tools.AuthError as exc:
+            logger.info("bearer rejected: %s", exc)
+            raise _unauthorized() from exc
+    principal = getattr(request.state, "auth_principal", None)
+    if principal is not None:
+        return principal
+    if getattr(request.state, "auth_problem", None) == "forbidden":
+        raise Forbidden()
+    raise _unauthorized()
+
+
+#: Kept so routes and callers that name the Phase 0 dependency do not churn.
+require_token = require_auth
+
+
+def require_read_auth(
+    request: Request,
+    credentials: HTTPAuthorizationCredentials | None = Depends(_bearer),
+) -> tools.Principal | None:
+    """Read routes: open unless SSO_PROTECT_READS=true, then the same as :func:`require_auth`."""
+    if not settings.sso_protect_reads:
+        return None
+    return require_auth(request, credentials)
+
+
+#: Dependencies of the read routes: a no-op unless SSO_PROTECT_READS=true.
+READ_AUTH = [Depends(require_read_auth)]
 
 
 class IngestRequest(BaseModel):
@@ -142,29 +219,60 @@ def usage(month: str | None = None, domain: str | None = None) -> CostSummary:
 
 @router.get("/dashboard", response_class=HTMLResponse)
 def dashboard(
+    request: Request,
     month: str | None = None,
     token: str | None = None,
     credentials: HTTPAuthorizationCredentials | None = Depends(_bearer),
-) -> HTMLResponse:
+) -> Response:
     """The usage dashboard (Phase 2). Bearer header, or ``?token=`` for a browser.
 
-    The same static token as every other protected route; the query-parameter
-    form exists only because a browser cannot send the header. Keep it behind
-    TLS, as the deployment already is.
+    AUTH_MODE=static: the same static token as every other protected route; the
+    query-parameter form exists only because a browser cannot send the header.
+    Keep it behind TLS, as the deployment already is.
+
+    sso/both (design B4): the browser session from ``/login`` (unauthenticated
+    browsers get a 303 to ``/login?next=/dashboard``), or a Bearer header. The
+    ``?token=`` form works in ``both`` only (static token); ``sso`` ignores it so
+    tokens stay out of URLs.
     """
-    expected = settings.ingest_api_token.get_secret_value()
-    supplied = token or (credentials.credentials if credentials else "")
-    if not secrets.compare_digest(supplied or "", expected):
-        raise HTTPException(status_code=401, detail="invalid or missing token")
     from llmwiki.api.dashboard import render
 
+    signed_in_as: str | None = None
+    if settings.auth_mode == "static":
+        expected = settings.ingest_api_token.get_secret_value()
+        supplied = token or (credentials.credentials if credentials else "")
+        if not secrets.compare_digest(supplied or "", expected):
+            raise HTTPException(status_code=401, detail="invalid or missing token")
+    elif token and settings.auth_mode == "both":
+        if not tools.auth_service(settings).static_matches(token):
+            raise HTTPException(status_code=401, detail="invalid or missing token")
+    elif credentials:
+        require_auth(request, credentials)
+    else:
+        principal = getattr(request.state, "auth_principal", None)
+        if principal is None:
+            if getattr(request.state, "auth_problem", None) == "forbidden":
+                from llmwiki.api.login import no_access_page
+
+                return no_access_page(request)
+            target = "/dashboard" + (f"?month={month}" if month else "")
+            return RedirectResponse(f"/login?{urlencode({'next': target})}", status_code=303)
+        signed_in_as = principal.username or principal.sub
+
     try:
-        return HTMLResponse(render(month=month))
+        if signed_in_as is None:
+            return HTMLResponse(render(month=month))
+        from llmwiki.api.login import csrf_for
+
+        csrf, set_csrf = csrf_for(request)
+        response = HTMLResponse(render(month=month, signed_in_as=signed_in_as, logout_csrf=csrf))
+        set_csrf(response)
+        return response
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=f"month must be YYYY-MM: {exc}") from exc
 
 
-@router.get("/worker", response_model=WorkerStatus)
+@router.get("/worker", response_model=WorkerStatus, dependencies=READ_AUTH)
 def worker() -> WorkerStatus:
     """What the ingest worker is doing (Phase 2): queued, in flight, parked and why."""
     return tools.worker_status()
@@ -177,13 +285,13 @@ def worker_resume() -> dict:
     return {"ok": True, "resumed": resumed}
 
 
-@router.get("/sources/{source_id}", response_model=SourceStatus)
+@router.get("/sources/{source_id}", response_model=SourceStatus, dependencies=READ_AUTH)
 def source_status(source_id: str) -> SourceStatus:
     """Poll one source through the pipeline."""
     return tools.get_source_status(source_id)
 
 
-@router.get("/search", response_model=list[SearchHit])
+@router.get("/search", response_model=list[SearchHit], dependencies=READ_AUTH)
 def search(q: str, k: int = 5, domain: str | None = None) -> list[SearchHit]:
     """Wiki-first search. ``domain`` (Phase 2) scopes it to one domain."""
     try:
@@ -192,7 +300,7 @@ def search(q: str, k: int = 5, domain: str | None = None) -> list[SearchHit]:
         raise HTTPException(status_code=404, detail=f"no such domain: {exc.args[0]!r}") from exc
 
 
-@router.get("/answer", response_model=Answer)
+@router.get("/answer", response_model=Answer, dependencies=READ_AUTH)
 def answer(q: str, k: int = 5, domain: str | None = None) -> Answer:
     """Answer a question with verified citations.
 
@@ -230,7 +338,7 @@ def feedback(request: FeedbackRequest) -> dict:
     return {"ok": True, "feedback_id": feedback_id, "run_id": request.run_id}
 
 
-@router.get("/concepts", response_model=list[PageGist])
+@router.get("/concepts", response_model=list[PageGist], dependencies=READ_AUTH)
 def concepts(prefix: str | None = None, domain: str | None = None) -> list[PageGist]:
     """List one domain's page gists - one object read regardless of wiki size."""
     try:
@@ -239,7 +347,7 @@ def concepts(prefix: str | None = None, domain: str | None = None) -> list[PageG
         raise HTTPException(status_code=404, detail=f"no such domain: {exc.args[0]!r}") from exc
 
 
-@router.get("/page/{slug}", response_class=PlainTextResponse)
+@router.get("/page/{slug}", response_class=PlainTextResponse, dependencies=READ_AUTH)
 def page(slug: str, domain: str | None = None) -> str:
     """Return a page as raw markdown, so a browser or Obsidian can read it directly."""
     from llmwiki.wiki.pages import render_page
@@ -256,7 +364,7 @@ class DomainRequest(BaseModel):
     description: str = ""
 
 
-@router.get("/domains", response_model=list[Domain])
+@router.get("/domains", response_model=list[Domain], dependencies=READ_AUTH)
 def domains() -> list[Domain]:
     """The domain registry, ``general`` first (Phase 2). Unauthenticated, like ``/concepts``."""
     return tools.list_domains()

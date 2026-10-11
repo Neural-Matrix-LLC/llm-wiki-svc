@@ -58,7 +58,18 @@ def _bars(by_day: dict[str, float]) -> str:
             f"{''.join(bars)}{labels}</svg>")
 
 
-def render(month: str | None = None) -> str:
+def _signed_in_bar(username: str | None, csrf: str | None) -> str:
+    """'Signed in as <username> · Log out' (AUTH_MODE=sso|both, design B4); empty otherwise."""
+    if not username:
+        return ""
+    return (f"<p class='muted'>Signed in as <strong>{escape(username)}</strong> · "
+            "<form method='post' action='/logout' style='display:inline'>"
+            f"<input type='hidden' name='csrf_token' value='{escape(csrf or '')}'>"
+            "<button type='submit' class='linkish'>Log out</button></form></p>")
+
+
+def render(month: str | None = None, signed_in_as: str | None = None,
+           logout_csrf: str | None = None) -> str:
     summary: CostSummary = tools.usage_summary(month=month)
     budget = tools.budget_status()
     worker = tools.worker_status()
@@ -111,7 +122,9 @@ table {{ border-collapse: collapse; width: 100%; }} th, td {{ text-align: left; 
 th {{ font-weight: 600; color: var(--muted); }} td.num, th.num {{ text-align: right; font-variant-numeric: tabular-nums; }}
 .bars rect {{ fill: var(--bar); }} .bars text {{ font-size: 9px; fill: var(--muted); }}
 code {{ font-size: 13px; }} nav a {{ margin-right: 12px; }}
+button.linkish {{ background: none; border: 0; padding: 0; color: var(--bar); cursor: pointer; font: inherit; text-decoration: underline; }}
 </style></head><body>
+{_signed_in_bar(signed_in_as, logout_csrf)}
 <h1>llmwiki usage <span class="muted">{escape(window)}</span></h1>
 <p class="muted">llmwiki {escape(str(health['version']))} · llm {escape(str(health['backends']['llm']))}
  · lexical {escape(str(health['backends']['lexical']))} · reranker {escape(str(health['backends']['reranker']))}
