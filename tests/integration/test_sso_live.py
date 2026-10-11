@@ -51,7 +51,10 @@ mk("wiki_direct").user_permissions.add(p)
 mk("wiki_group").groups.add(g)
 mk("wiki_none")
 mk("wiki_inactive", is_active=False).user_permissions.add(p)
-mk("wiki_super", is_superuser=True, is_staff=True)
+# superusers get no automatic app access (SSO_SUPERUSER_ALL_APPS defaults to false since
+# sso-server e9b0b36): one with an explicit grant, one without
+mk("wiki_super", is_superuser=True, is_staff=True).user_permissions.add(p)
+mk("wiki_super_nogrant", is_superuser=True, is_staff=True)
 mk("wiki_revoke").user_permissions.add(p)
 mk("wiki_throttle").user_permissions.add(p)
 mk("wiki_race").user_permissions.add(p)
@@ -252,6 +255,7 @@ def test_login_by_email(wiki) -> None:
 
 @pytest.mark.parametrize("user,password,status,text", [
     ("wiki_none", PASSWORD, 403, "have access to llm-wiki (application.app1)"),
+    ("wiki_super_nogrant", PASSWORD, 403, "have access to llm-wiki (application.app1)"),
     ("wiki_inactive", PASSWORD, 403, "Please activate your account"),
     ("wiki_direct", "wrong-password", 401, "Wrong username or password"),
     ("nobody", PASSWORD, 401, "Wrong username or password"),
