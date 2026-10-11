@@ -187,6 +187,11 @@ def login_submit(
         logger.error("SSO login returned an unverifiable token (SSO_ISSUER/JWKS?): %s", exc)
         return _login_503(request, target, username, MISCONFIGURED)
     logger.info("login ok: %s (sub %s)", principal.username, principal.sub)
+    # session rotation: the browser's previous session (if any) ends here; the new session has a
+    # new id, cookie and csrf value
+    previous = getattr(request.state, "auth_session", None) or service.get_session(
+        read_cookie(request.scope, service.session_cookie))
+    service.retire(previous, rec)
     response = RedirectResponse(target, status_code=303)
     response.headers.append("set-cookie", cookie_header(
         cfg, service.session_cookie, session_id, service.session_max_age(rec)))

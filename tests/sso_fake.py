@@ -116,6 +116,7 @@ class FakeSSO:
         self.refresh_delay = 0.0  # seconds; widens the window for concurrency tests
         self.client_secret: str | None = None  # set: Basic auth must carry this secret
         self.jwks_fetches = 0
+        self.logout_failure: str | None = None  # "down" (connection error) or "5xx"
         self.issuer = ISSUER
 
     @property
@@ -176,6 +177,10 @@ class FakeSSO:
                 return self._err(401, "token_invalid", "Token is invalid or expired")
             return httpx.Response(200, json=self._pair(name))
         if path == "/api/v1/auth/logout":
+            if self.logout_failure == "down":
+                raise httpx.ConnectError("connection refused", request=request)
+            if self.logout_failure == "5xx":
+                return self._err(502, "bad_gateway")
             self.live_refresh.pop(body.get("refresh_token", ""), None)
             return httpx.Response(204)
         return self._err(404, "not_found")

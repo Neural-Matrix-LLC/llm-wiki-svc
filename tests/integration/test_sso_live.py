@@ -392,6 +392,31 @@ def test_logout_blacklists_the_refresh_token_at_the_sso(wiki, sso) -> None:
     assert r.status_code == 401  # blacklisted by the SSO
 
 
+def test_login_while_signed_in_rotates_the_session_and_blacklists_the_old_refresh(wiki,
+                                                                                sso) -> None:
+    ip = next(_ips)
+    with browser(wiki, ip) as c, browser(wiki, ip) as other_tab:
+        assert form_login(c, "wiki_direct").status_code == 303
+        old_cookie = c.cookies["llmwiki_session"]
+        old_refresh = session_row(wiki, old_cookie)["refresh"]
+        # a login form opened before signing in (GET /login now redirects this browser)
+        page = other_tab.get("/login?next=/dashboard")
+        csrf = re.search(r"name='csrf_token' value='([^']+)'", page.text).group(1)
+        c.cookies.set("llmwiki_login_csrf", other_tab.cookies["llmwiki_login_csrf"])
+        r = c.post("/login", data={"username": "wiki_super", "password": PASSWORD,
+                                   "csrf_token": csrf, "next": "/dashboard"})
+        assert r.status_code == 303
+        new_cookie = c.cookies["llmwiki_session"]
+        assert new_cookie != old_cookie
+        assert session_row(wiki, old_cookie) is None and session_row(wiki, new_cookie)
+        assert "wiki_super" in c.get("/dashboard").text
+    with browser(wiki, ip) as stale:
+        assert stale.get("/dashboard",
+                         headers={"Cookie": f"llmwiki_session={old_cookie}"}).status_code == 303
+    r = httpx.post(f"{sso['base']}/api/v1/auth/refresh", json={"refresh_token": old_refresh})
+    assert r.status_code == 401  # the old refresh token was blacklisted at the SSO
+
+
 def test_wrong_service_secret_is_a_503_misconfigured(sso, tmp_path) -> None:
     """v1.2 C-19: the real SSO answers 401 invalid_client; the wiki logs an error and shows 503."""
     proc, log, port, _ = _start_wiki(sso, tmp_path, SSO_CLIENT_SECRET="wrong-" + "x" * 30)

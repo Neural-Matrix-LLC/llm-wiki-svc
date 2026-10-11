@@ -806,3 +806,76 @@ def test_failed_re_login_keeps_the_existing_session(build, sso, tmp_path, user, 
     assert store_rows(tmp_path) == rows  # the existing session row is untouched
     page = client.get("/dashboard")
     assert page.status_code == 200 and "Signed in as <strong>alice</strong>" in page.text
+
+
+# ---------------------------------------------------------------- session rotation on login
+def _relogin(client: TestClient, old_cookie: str, username="alice", password="alice-pw"):
+    """A login form posted from another tab while the browser still has ``old_cookie``."""
+    token = "r" * 43
+    return client.post("/login", data={"username": username, "password": password,
+                                       "csrf_token": token, "next": "/dashboard"},
+                       headers={"Cookie": f"llmwiki_session={old_cookie}; "
+                                          f"llmwiki_login_csrf={token}"})
+
+
+def _cookie_value(response) -> str:
+    return session_cookie(response).split(";")[0].split("=", 1)[1]
+
+
+@pytest.mark.parametrize("failure", [None, "down", "5xx"])
+@pytest.mark.parametrize("who", [("alice", "alice-pw"), ("dave", "dave-pw")])
+def test_successful_login_rotates_the_session(build, sso, tmp_path, caplog, failure,
+                                              who) -> None:
+    from tests.sso_fake import User
+
+    sso.users["dave"] = User("dave-pw", "45", [PERM])
+    client = build(auth_mode="sso")
+    login(client)
+    old_cookie = client.cookies.get("llmwiki_session")
+    old_csrf = csrf_meta(client)
+    [old_row] = store_rows(tmp_path)
+    sso.logout_failure = failure
+    sso.calls.clear()
+    caplog.set_level(logging.INFO)
+    r = _relogin(client, old_cookie, *who)
+    assert r.status_code == 303  # the login succeeds even when the SSO logout fails
+    new_cookie = _cookie_value(r)
+    assert new_cookie and new_cookie != old_cookie
+    [new_row] = store_rows(tmp_path)  # old row gone, exactly one new one
+    assert new_row["id_hash"] != old_row["id_hash"] and new_row["csrf"] != old_row["csrf"]
+    assert [b.get("refresh_token") for p, b in sso.calls
+            if p == "/api/v1/auth/logout"] == [old_row["refresh"]]  # attempted in every case
+    if failure is None:
+        assert old_row["refresh"] not in sso.live_refresh
+    else:
+        assert "SSO logout failed" in caplog.text
+    sso.logout_failure = None
+    old = TestClient(client.app, base_url="https://testserver", follow_redirects=False)
+    stale = old.get("/dashboard", headers={"Cookie": f"llmwiki_session={old_cookie}"})
+    assert stale.status_code == 303 and stale.headers["location"].startswith("/login")
+    assert any(h.startswith('llmwiki_session=""') for h in set_cookie_headers(stale))
+    fresh = old.get("/dashboard", headers={"Cookie": f"llmwiki_session={new_cookie}"})
+    assert fresh.status_code == 200 and f"Signed in as <strong>{who[0]}</strong>" in fresh.text
+    assert old_csrf not in fresh.text
+
+
+def test_login_with_an_expired_cookie_just_creates_a_session(build, sso, tmp_path) -> None:
+    client = build(auth_mode="sso")
+    r = _relogin(client, "no-such-session-id")
+    assert r.status_code == 303 and len(store_rows(tmp_path)) == 1
+    assert "/api/v1/auth/logout" not in sso.paths()
+
+
+def test_sso_logout_crash_during_rotation_does_not_block_login(build, sso, tmp_path,
+                                                               monkeypatch) -> None:
+    client = build(auth_mode="sso")
+    login(client)
+    old_cookie = client.cookies.get("llmwiki_session")
+    from llmwiki.auth.service import AuthService
+
+    def boom(self, refresh_token):  # an unexpected error type from the client
+        raise RuntimeError("unexpected")
+
+    monkeypatch.setattr(AuthService, "_discard", boom)
+    r = _relogin(client, old_cookie)
+    assert r.status_code == 303 and len(store_rows(tmp_path)) == 1

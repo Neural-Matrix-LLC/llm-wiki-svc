@@ -225,5 +225,21 @@ class AuthService:
             self.store.delete(rec.id_hash)
             self._discard(rec.refresh)
 
+    def retire(self, old: SessionRecord | None, new: SessionRecord) -> None:
+        """Session rotation after a successful login: delete the session the browser had before
+        and discard its refresh token at the SSO, best effort. Never raises - nothing here may
+        block the login that already succeeded."""
+        if old is None or old.id_hash == new.id_hash:
+            return
+        try:
+            self.store.delete(old.id_hash)
+        except Exception:  # pragma: no cover - SQLite failure; the row expires on its own
+            logger.exception("could not delete the previous session of %s", old.username)
+        try:
+            self._discard(old.refresh)  # logs SSOLoginError / SSOUnavailable itself
+        except Exception as exc:
+            logger.warning("SSO logout of the previous session failed (%s)", type(exc).__name__)
+        logger.info("session rotated on login: previous session of %s deleted", old.username)
+
     def session_max_age(self, rec: SessionRecord) -> int:
         return self.store.remaining_s(rec)
