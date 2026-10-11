@@ -240,7 +240,11 @@ def main(argv: list[str] | None = None) -> int:
         return 0 if removed else 1
 
     if args.command == "compile":
-        compiled = tools.compile_update(args.source_id, force=args.force, cfg=cfg)
+        try:
+            compiled = tools.compile_update(args.source_id, force=args.force, cfg=cfg)
+        except tools.InvalidSourceId as exc:
+            print(f"{exc}: {args.source_id!r}", file=sys.stderr)
+            return 1
         _dump(compiled.model_dump(mode="json"))
         return 0
 
@@ -312,7 +316,12 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.command == "source":
-        _dump(tools.get_source_status(args.source_id, cfg=cfg).model_dump(mode="json"))
+        try:
+            source_status = tools.get_source_status(args.source_id, cfg=cfg)
+        except tools.InvalidSourceId as exc:
+            print(f"{exc}: {args.source_id!r}", file=sys.stderr)
+            return 1
+        _dump(source_status.model_dump(mode="json"))
         return 0
 
     if args.command == "serve":

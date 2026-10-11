@@ -96,6 +96,24 @@ class PageNotFound(KeyError):
     """Raised by :func:`get_page` when a slug has no stored page."""
 
 
+INVALID_SOURCE_ID = "not a valid source_id"
+
+
+class InvalidSourceId(ValueError):
+    """A ``source_id`` that is not in either id format (QA PRE-01). The message is the same
+    for every transport: HTTP 404, MCP tool error, CLI exit 1."""
+
+    def __init__(self, source_id: str) -> None:
+        super().__init__(INVALID_SOURCE_ID)
+        self.source_id = source_id
+
+
+def _require_source_id(source_id: str) -> str:
+    if not is_source_id(source_id):
+        raise InvalidSourceId(source_id)
+    return source_id
+
+
 # The LangSmith feedback key a human correction is filed under - the same
 # string scripts/eval_answer.py --promote-feedback looks for.
 FEEDBACK_KEY = "correctness"
@@ -206,9 +224,12 @@ def compile_update(
 ) -> CompileResult:
     """Re-run the incremental compiler for one already-captured source.
 
+    InvalidSourceId for a malformed id (checked before any backend is built).
+
     The source stays in the domain it was routed to (``raw/{id}/routing.json``);
     a source captured before Phase 2 is ``general``.
     """
+    _require_source_id(source_id)
     store, vectors, embedder, llm, cfg = _components(cfg)
     pipeline = _pipeline(cfg)
     meta = pipeline.load_meta(source_id)
@@ -423,7 +444,8 @@ def ingest_now(
 
 
 def get_source_status(source_id: str, cfg: Settings | None = None) -> SourceStatus:
-    """Pipeline state for one source."""
+    """Pipeline state for one source. InvalidSourceId for a malformed id."""
+    _require_source_id(source_id)  # before any backend is built
     return _pipeline(cfg).get_status(source_id)
 
 

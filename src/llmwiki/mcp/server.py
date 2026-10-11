@@ -17,6 +17,7 @@ from llmwiki import tools
 def build_server() -> Any:
     """Construct the FastMCP server and register the seven tools."""
     from fastmcp import FastMCP
+    from fastmcp.exceptions import ToolError
 
     mcp: Any = FastMCP("llmwiki")
 
@@ -61,7 +62,10 @@ def build_server() -> Any:
     @mcp.tool()
     def compile_update(source_id: str, force: bool = False) -> dict:
         """Re-run the incremental compiler for one already-captured source."""
-        return tools.compile_update(source_id, force=force).model_dump(mode="json")
+        try:
+            return tools.compile_update(source_id, force=force).model_dump(mode="json")
+        except tools.InvalidSourceId as exc:  # a clean tool error, not a crash (QA PRE-01)
+            raise ToolError(f"{exc}: {source_id!r}") from exc
 
     @mcp.tool()
     def list_concepts(prefix: str | None = None, domain: str | None = None) -> list[dict]:

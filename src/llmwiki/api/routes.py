@@ -321,9 +321,10 @@ def worker_resume() -> dict:
 @router.get("/sources/{source_id}", response_model=SourceStatus, dependencies=READ_AUTH)
 def source_status(source_id: str) -> SourceStatus:
     """Poll one source through the pipeline."""
-    if not tools.is_source_id(source_id):  # malformed id: 404, not a 500 (QA PRE-01)
-        raise HTTPException(status_code=404, detail="not a valid source_id")
-    return tools.get_source_status(source_id)
+    try:
+        return tools.get_source_status(source_id)
+    except tools.InvalidSourceId as exc:  # malformed id: 404, not a 500 (QA PRE-01)
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
 @router.get("/search", response_model=list[SearchHit], dependencies=READ_AUTH)
