@@ -432,7 +432,10 @@ def delete_domain(name: str, force: bool = False) -> dict:
              dependencies=[Depends(require_token)])
 def compile_source(source_id: str, force: bool = False) -> CompileResult:
     """Re-run the incremental compiler for one source."""
-    return tools.compile_update(source_id, force=force)
+    try:
+        return tools.compile_update(source_id, force=force)
+    except tools.InvalidSourceId as exc:  # malformed id: 404, like /sources (QA F-R2-01)
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
 @router.post("/synthesize/{domain}", response_model=SynthesisResult,
