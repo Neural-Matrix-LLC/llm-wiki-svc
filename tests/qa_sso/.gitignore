@@ -1,0 +1,12 @@
+# QA run state (throw-away DBs, keys, caches, logs, PID files) - never commit
+run/state/
+run/state-py*/
+run/venvs/
+run/junit/
+*.sqlite3
+*.sqlite3-*
+*.pem
+run/pids/
+run/logs/
+run/qa.env
+__pycache__/

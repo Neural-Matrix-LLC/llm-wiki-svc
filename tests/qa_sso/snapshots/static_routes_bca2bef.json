@@ -1,0 +1,208 @@
+{
+ "commit": "bca2bef",
+ "source": "ast of src/llmwiki/api/routes.py + channels/*.py (tests/qa_sso/tools/snapshot_routes.py)",
+ "routes": [
+  {
+   "method": "GET",
+   "path": "/answer",
+   "handler": "answer",
+   "auth": "none",
+   "file": "src/llmwiki/api/routes.py",
+   "line": 196
+  },
+  {
+   "method": "POST",
+   "path": "/compile/{source_id}",
+   "handler": "compile_source",
+   "auth": "require_token",
+   "file": "src/llmwiki/api/routes.py",
+   "line": 289
+  },
+  {
+   "method": "GET",
+   "path": "/concepts",
+   "handler": "concepts",
+   "auth": "none",
+   "file": "src/llmwiki/api/routes.py",
+   "line": 234
+  },
+  {
+   "method": "GET",
+   "path": "/dashboard",
+   "handler": "dashboard",
+   "auth": "dashboard_token",
+   "file": "src/llmwiki/api/routes.py",
+   "line": 144
+  },
+  {
+   "method": "GET",
+   "path": "/domains",
+   "handler": "domains",
+   "auth": "none",
+   "file": "src/llmwiki/api/routes.py",
+   "line": 260
+  },
+  {
+   "method": "DELETE",
+   "path": "/domains/{name}",
+   "handler": "delete_domain",
+   "auth": "require_token",
+   "file": "src/llmwiki/api/routes.py",
+   "line": 275
+  },
+  {
+   "method": "PUT",
+   "path": "/domains/{name}",
+   "handler": "put_domain",
+   "auth": "require_token",
+   "file": "src/llmwiki/api/routes.py",
+   "line": 266
+  },
+  {
+   "method": "POST",
+   "path": "/feedback",
+   "handler": "feedback",
+   "auth": "require_token",
+   "file": "src/llmwiki/api/routes.py",
+   "line": 220
+  },
+  {
+   "method": "GET",
+   "path": "/healthz",
+   "handler": "healthz",
+   "auth": "none",
+   "file": "src/llmwiki/api/routes.py",
+   "line": 77
+  },
+  {
+   "method": "POST",
+   "path": "/ingest",
+   "handler": "ingest",
+   "auth": "require_token",
+   "file": "src/llmwiki/api/routes.py",
+   "line": 83
+  },
+  {
+   "method": "POST",
+   "path": "/lint",
+   "handler": "lint",
+   "auth": "require_token",
+   "file": "src/llmwiki/api/routes.py",
+   "line": 305
+  },
+  {
+   "method": "GET",
+   "path": "/page/{slug}",
+   "handler": "page",
+   "auth": "none",
+   "file": "src/llmwiki/api/routes.py",
+   "line": 243
+  },
+  {
+   "method": "GET",
+   "path": "/search",
+   "handler": "search",
+   "auth": "none",
+   "file": "src/llmwiki/api/routes.py",
+   "line": 187
+  },
+  {
+   "method": "GET",
+   "path": "/sources/{source_id}",
+   "handler": "source_status",
+   "auth": "none",
+   "file": "src/llmwiki/api/routes.py",
+   "line": 181
+  },
+  {
+   "method": "POST",
+   "path": "/synthesize/{domain}",
+   "handler": "synthesize",
+   "auth": "require_token",
+   "file": "src/llmwiki/api/routes.py",
+   "line": 296
+  },
+  {
+   "method": "POST",
+   "path": "/upload",
+   "handler": "upload",
+   "auth": "require_token",
+   "file": "src/llmwiki/api/routes.py",
+   "line": 106
+  },
+  {
+   "method": "GET",
+   "path": "/usage",
+   "handler": "usage",
+   "auth": "require_token",
+   "file": "src/llmwiki/api/routes.py",
+   "line": 135
+  },
+  {
+   "method": "GET",
+   "path": "/worker",
+   "handler": "worker",
+   "auth": "none",
+   "file": "src/llmwiki/api/routes.py",
+   "line": 168
+  },
+  {
+   "method": "POST",
+   "path": "/worker/resume",
+   "handler": "worker_resume",
+   "auth": "require_token",
+   "file": "src/llmwiki/api/routes.py",
+   "line": 174
+  }
+ ],
+ "channel_routes_mounted_only_when_configured": [
+  {
+   "method": "POST",
+   "path": "/channels/telegram/webhook",
+   "handler": "webhook",
+   "file": "src/llmwiki/channels/telegram.py",
+   "line": 59
+  },
+  {
+   "method": "POST",
+   "path": "/channels/email/inbound",
+   "handler": "inbound",
+   "file": "src/llmwiki/channels/email.py",
+   "line": 47
+  }
+ ],
+ "mounts": [
+  {
+   "path": "/mcp",
+   "app": "fastmcp streamable HTTP (src/llmwiki/mcp/server.py)",
+   "auth": "none (no app-level auth; deployment relies on Cloudflare Access)"
+  }
+ ],
+ "static_mode_behaviour": {
+  "require_token": {
+   "missing_or_wrong": [
+    401,
+    {
+     "detail": "invalid or missing bearer token"
+    }
+   ],
+   "www_authenticate_header": false,
+   "order": "auth dependency runs before body/query validation: unauthenticated+invalid body -> 401, authenticated+invalid -> 422"
+  },
+  "dashboard_token": {
+   "missing_or_wrong": [
+    401,
+    {
+     "detail": "invalid or missing token"
+    }
+   ],
+   "accepts": [
+    "Authorization: Bearer <INGEST_API_TOKEN>",
+    "?token=<INGEST_API_TOKEN>"
+   ],
+   "ok": "200 text/html"
+  },
+  "none": "open to everyone, credentials ignored",
+  "mcp": "open: initialize/tools/list without any token succeed"
+ }
+}
