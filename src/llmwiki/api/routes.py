@@ -26,6 +26,7 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, Field, model_validator
 
 from llmwiki import tools
+from llmwiki.api.session import client_ip_of
 from llmwiki.config import settings
 from llmwiki.models.chunk import SearchHit
 from llmwiki.models.page import Domain, LintReport, PageGist
@@ -119,9 +120,15 @@ def require_auth(
     logger.debug("require_auth: mode=%s supplied=%s", settings.auth_mode, mask(supplied))
     if supplied:
         try:
-            return service.authenticate_bearer(supplied)
+            return service.authenticate_bearer(supplied, client_ip_of(request.scope, settings))
         except tools.PermissionDenied as exc:
             raise Forbidden() from exc
+        except tools.SSOMisconfigured as exc:
+            logger.error("bearer check impossible: %s", exc)
+            raise _sso_misconfigured() from exc
+        except tools.SSOUnavailable as exc:  # fail closed (sso-client decision 14)
+            logger.warning("bearer check impossible, SSO unavailable: %s", exc)
+            raise _sso_unavailable() from exc
         except tools.AuthError as exc:
             logger.info("bearer rejected: %s", exc)
             raise _unauthorized() from exc

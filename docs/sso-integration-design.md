@@ -228,3 +228,25 @@ dedicated ports, users with and without `application.app1` (direct and via group
   `user_permissions` plus their groups' permissions, filtered to the `application` app. This replaces A2's
   `get_all_permissions()` formula, which (like `has_perm()`) returns everything for a superuser; no app-access
   check uses either. Normal users get the same result as before; inactive users still get `[]`.
+
+## v1.2b: migration to `sso-client` (branch feat/sso-client)
+
+* **Introspect decides.** `/mcp` bearers, API bearers and browser sessions keep the local JWKS
+  check as a cheap pre-check. After it, `sso_client.SSOClient.check(token, client_ip)` asks the SSO
+  (`POST /api/v1/auth/introspect`) for the *current* permissions, revocation and IP binding.
+  `SSO_REQUIRED_PERMISSION` is matched against that answer, not against the token's `perms` claim.
+  Active answers are cached for 30 s.
+* **Fail closed.** If the SSO is down, the request gets a 503 and the session row is kept, even
+  when the access token is still valid locally. Before v1.2b the session carried on. A 401
+  `invalid_client` from introspect is treated as "Login service misconfigured". A 400 means the
+  token is malformed (for example over the size limit) and gives a 401.
+* **Revocation is immediate.** An inactive user, a revoked token or session, or an IP mismatch under
+  ENFORCE ends the browser session on the next request (subject to the 30 s cache). This used to
+  happen only at the next refresh.
+* **Client IP.** `client_ip_of` now uses `sso_client.get_client_ip`, the same right-to-left walk as
+  the SSO server. `CLIENT_IP_HEADER` behaviour is unchanged: no header is read unless it is
+  configured, and then only from `TRUSTED_PROXIES` peers. The client IP is sent with login, refresh
+  and logout (SSO D11) and with every introspect.
+* **Dependency.** `sso-client @ git+https://github.com/Neural-Matrix-LLC/SSO-server.git@sso-client-v0.1.0#subdirectory=clients/python`.
+  For local development, run `uv pip install <sso-server>/clients/python`.
+* **Unchanged.** `AUTH_MODE=static` does not change and never calls the SSO.

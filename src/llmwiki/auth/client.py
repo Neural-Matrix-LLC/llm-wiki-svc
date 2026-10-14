@@ -77,8 +77,9 @@ class SSOClient:
         """``POST /api/v1/auth/refresh`` -> a rotated token pair."""
         return self._json(self._post(REFRESH_PATH, {"refresh_token": refresh_token}, client_ip))
 
-    def logout(self, refresh_token: str) -> None:
-        """``POST /api/v1/auth/logout``: blacklists the refresh token. Best effort."""
-        response = self._post(LOGOUT_PATH, {"refresh_token": refresh_token})
+    def logout(self, refresh_token: str, client_ip: str | None = None) -> None:
+        """``POST /api/v1/auth/logout``: blacklists the refresh token. Best effort. Passes the
+        browser's ``client_ip`` like login/refresh (SSO ARCHITECTURE D11)."""
+        response = self._post(LOGOUT_PATH, {"refresh_token": refresh_token}, client_ip)
         if response.status_code not in (200, 204):
             raise self._error(response)

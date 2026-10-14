@@ -16,6 +16,7 @@ from tests.sso_fake import FakeSSO, Key, access_claims
 from tests.unit import test_auth_routes as _routes
 from tests.unit.test_auth_routes import BROWSER_IP, STATIC, bearer, csrf_meta, login, make_settings
 
+from llmwiki.auth.principal import AuthError, SSOMisconfigured, SSOUnavailable
 from llmwiki.auth.service import AuthService
 from llmwiki.auth.session import PRUNE_INTERVAL_S, SessionStore
 
@@ -213,16 +214,21 @@ def test_concurrent_refresh_from_threads_without_the_asyncio_lock(tmp_path) -> N
     assert len(set(seen)) == 1
 
 
-def test_refresh_with_sso_down_but_valid_token_keeps_going(tmp_path, caplog) -> None:
+def test_sso_down_with_a_valid_token_fails_closed_and_keeps_the_session(tmp_path) -> None:
+    """v1.2b (sso-client): introspect decides; an outage is SSOUnavailable (503), the session
+    row stays for when the SSO is back (was: carried on with the local token check)."""
     fake = FakeSSO(Key.generate())
     fake.access_ttl = 30
     cfg = make_settings(tmp_path, auth_mode="sso")
     svc = AuthService(cfg, fake.transport)
     sid, rec, _ = svc.login("alice", "alice-pw")
     fake.down = True
+    with pytest.raises(SSOUnavailable):
+        svc.session_principal(rec)
+    assert svc.get_session(sid) is not None
+    fake.down = False
     new, principal = svc.session_principal(rec)
-    assert new == rec and principal.username == "alice" and principal.via == "session"
-    assert "SSO unreachable" in caplog.text
+    assert principal.username == "alice" and principal.via == "session"
 
 
 # ---------------------------------------------------------------- /mcp guard (v1.1 item 1)
@@ -436,3 +442,70 @@ def test_sso_mcp_bodies_are_compact_json(build, key) -> None:
         assert mcp(client).content == b'{"detail":"invalid or missing credentials"}'
         r = mcp(client, bearer(key.sign(access_claims(perms=[]))))
         assert r.content == b'{"detail":"forbidden","error":"permission_denied"}'
+
+
+# ---------------------------------------------------------------- v1.2b: sso-client introspect
+def test_mcp_bearer_is_introspected_with_the_client_ip(build, key, sso) -> None:
+    with build(auth_mode="sso") as client:
+        r = mcp(client, bearer(key.sign(access_claims())))
+        assert r.status_code == 200, r.text
+    calls = [body for path, body in sso.calls if path == "/api/v1/auth/introspect"]
+    assert calls and calls[-1]["ip"] == BROWSER_IP
+
+
+def test_mcp_bearer_with_the_sso_down_is_503(build, key, sso) -> None:
+    with build(auth_mode="sso") as client:
+        token = key.sign(access_claims())
+        mcp(client, bearer(key.sign(access_claims())))  # JWKS fetched while the SSO is up
+        sso.down = True
+        r = mcp(client, bearer(token))
+        assert r.status_code == 503 and r.json() == {"detail": "Login service unavailable"}
+
+
+def test_revoked_token_is_401_although_its_signature_is_valid(tmp_path) -> None:
+    fake = FakeSSO(Key.generate())
+    svc = AuthService(make_settings(tmp_path, auth_mode="sso"), fake.transport)
+    claims = access_claims()
+    fake.revoked_jti.add(claims["jti"])
+    with pytest.raises(AuthError):
+        svc.authenticate_bearer(fake.key.sign(claims), "203.0.113.5")
+    body = next(b for p, b in fake.calls if p == "/api/v1/auth/introspect")
+    assert body["ip"] == "203.0.113.5" and body["token"]
+
+
+def test_suspended_user_ends_the_browser_session(tmp_path) -> None:
+    fake = FakeSSO(Key.generate())
+    svc = AuthService(make_settings(tmp_path, auth_mode="sso"), fake.transport)
+    sid, rec, _ = svc.login("alice", "alice-pw", "203.0.113.5")
+    fake.users["alice"].active = False
+    with pytest.raises(AuthError):
+        svc.session_principal(rec, "203.0.113.5")
+    assert svc.get_session(sid) is None
+
+
+def test_introspect_invalid_client_is_misconfigured(tmp_path) -> None:
+    fake = FakeSSO(Key.generate())
+    svc = AuthService(make_settings(tmp_path, auth_mode="sso"), fake.transport)
+    fake.introspect_failure = "401"
+    with pytest.raises(SSOMisconfigured):
+        svc.authenticate_bearer(fake.key.sign(access_claims()), "203.0.113.5")
+
+
+def test_logout_and_rotation_carry_the_client_ip(tmp_path) -> None:
+    """D11: login, refresh and logout all tell the SSO the browser's IP."""
+    fake = FakeSSO(Key.generate())
+    svc = AuthService(make_settings(tmp_path, auth_mode="sso"), fake.transport)
+    _, old, _ = svc.login("alice", "alice-pw", "203.0.113.5")
+    _, new, _ = svc.login("alice", "alice-pw", "203.0.113.5")
+    svc.retire(old, new, "203.0.113.5")
+    svc.logout(new, "203.0.113.5")
+    logouts = [b for p, b in fake.calls if p == "/api/v1/auth/logout"]
+    assert len(logouts) == 2 and all(b["client_ip"] == "203.0.113.5" for b in logouts)
+
+
+def test_introspect_400_is_an_invalid_token_not_an_outage(tmp_path) -> None:
+    fake = FakeSSO(Key.generate())
+    svc = AuthService(make_settings(tmp_path, auth_mode="sso"), fake.transport)
+    fake.introspect_failure = "400"
+    with pytest.raises(AuthError):
+        svc.authenticate_bearer(fake.key.sign(access_claims()), "203.0.113.5")

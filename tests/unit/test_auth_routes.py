@@ -637,14 +637,20 @@ def test_refresh_failure_on_a_json_route_is_401(build, sso) -> None:
     assert r.status_code == 401 and r.headers["www-authenticate"]
 
 
-def test_sso_down_during_refresh_keeps_a_still_valid_session(build, sso) -> None:
+def test_sso_down_with_a_still_valid_token_is_503_and_keeps_the_session(build, sso,
+                                                                         tmp_path) -> None:
+    """v1.2b (sso-client): the SSO's introspect answer decides, so an outage fails closed even
+    while the access token is still valid locally (was 200 before the migration)."""
     sso.access_ttl = 30
     client = build(auth_mode="sso")
     login(client)
     sso.down = True
     r = client.get("/dashboard")
-    assert r.status_code == 200  # access token still valid for ~30 s
+    assert r.status_code == 503 and "Login service unavailable" in r.text
     assert not any(h.startswith("llmwiki_session=") for h in set_cookie_headers(r))
+    assert len(store_rows(tmp_path)) == 1
+    sso.down = False
+    assert client.get("/dashboard").status_code == 200
 
 
 def test_sso_down_with_an_expired_access_token_is_503_and_keeps_the_session(build, sso,
@@ -675,7 +681,9 @@ def test_logout_calls_the_sso_and_clears_the_cookie(build, sso) -> None:
     csrf = re.search(r"name='csrf_token' value='([^']+)'", page.text).group(1)
     r = client.post("/logout", data={"csrf_token": csrf})
     assert r.status_code == 303 and r.headers["location"] == "/login"
-    assert ("/api/v1/auth/logout", {"refresh_token": refresh_token}) in sso.calls
+    # D11: the browser's IP travels on logout like on login/refresh
+    assert ("/api/v1/auth/logout", {"refresh_token": refresh_token,
+                                    "client_ip": "203.0.113.9"}) in sso.calls
     assert refresh_token not in sso.live_refresh
     assert any(h.startswith('llmwiki_session=""') and "Max-Age=0" in h
                for h in set_cookie_headers(r))

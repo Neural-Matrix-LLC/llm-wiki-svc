@@ -191,7 +191,7 @@ def login_submit(
     # new id, cookie and csrf value
     previous = getattr(request.state, "auth_session", None) or service.get_session(
         read_cookie(request.scope, service.session_cookie))
-    service.retire(previous, rec)
+    service.retire(previous, rec, client_ip_of(request.scope, cfg))
     response = RedirectResponse(target, status_code=303)
     response.headers.append("set-cookie", cookie_header(
         cfg, service.session_cookie, session_id, service.session_max_age(rec)))
@@ -247,7 +247,7 @@ def logout(request: Request, csrf_token: str = Form("")) -> Response:
         if not service.csrf_ok(rec.csrf, supplied):
             return HTMLResponse(_page("llmwiki", "<p class='bad'>Invalid logout form. Go back "
                                                  "and try again.</p>"), status_code=403)
-        service.logout(rec)
+        service.logout(rec, client_ip_of(request.scope, cfg))  # D11: browser IP on logout too
     response = RedirectResponse("/login", status_code=303)
     response.headers.append("set-cookie", clear_cookie_header(cfg, service.session_cookie))
     return response

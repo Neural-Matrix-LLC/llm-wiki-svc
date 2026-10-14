@@ -19,6 +19,10 @@ dependencies = [
     # tokens (llmwiki/auth/sso.py). Sessions are server-side SQLite since design v1.1, so
     # itsdangerous (v1.0's signed cookie) is not needed.
     "pyjwt[crypto]>=2.8",
+    # v1.2b: SSO introspect, IP binding, client-IP walk (sso-server clients/python). Pinned to
+    # the sso-client-v0.1.0 tag, which must exist on the SSO-server remote before a clean
+    # install/Docker build; local dev: uv pip install <sso-server>/clients/python
+    "sso-client @ git+https://github.com/Neural-Matrix-LLC/SSO-server.git@sso-client-v0.1.0#subdirectory=clients/python",
     "langchain-core>=0.3",
     "langchain-openai",
     "langchain-google-genai",

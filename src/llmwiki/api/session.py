@@ -22,14 +22,14 @@ SSO_PROTECT_READS=true (v1.2 C-12): the static token, with the Phase 0 401 body.
 not browsers, so the session cookie is deliberately not accepted there (no CSRF surface on /mcp).
 
 :func:`client_ip_of`: the browser IP sent to the SSO (v1.2 C-11): the TCP peer, or
-``CLIENT_IP_HEADER`` when the peer is one of ``TRUSTED_PROXY_IPS``.
+``CLIENT_IP_HEADER`` when the peer is one of ``TRUSTED_PROXY_IPS``; derived by
+``sso_client.get_client_ip`` (SSO design v1.2 §4.5, the same algorithm as the SSO).
 """
 
 from __future__ import annotations
 
 import asyncio
 import hashlib
-import ipaddress
 import json
 import logging
 from collections.abc import Mapping
@@ -37,6 +37,7 @@ from http.cookies import SimpleCookie
 from typing import Any
 
 import anyio
+from sso_client import get_client_ip, normalize_ip
 
 from llmwiki import tools
 from llmwiki.config import Settings
@@ -72,13 +73,6 @@ def read_header(scope: Mapping[str, Any], name: str) -> str:
     return ""
 
 
-def _ip(value: str) -> ipaddress.IPv4Address | ipaddress.IPv6Address | None:
-    try:
-        return ipaddress.ip_address(value.strip())
-    except ValueError:
-        return None
-
-
 def client_ip_of(scope: Mapping[str, Any], cfg: Settings) -> str | None:
     """The browser IP to pass to the SSO (design v1.2 C-11/Q-25).
 
@@ -86,20 +80,17 @@ def client_ip_of(scope: Mapping[str, Any], cfg: Settings) -> str | None:
     ``TRUSTED_PROXY_IPS``: then that header. A comma list (``X-Forwarded-For``) is read right to
     left, skipping trusted proxies; the first other valid IP wins. A missing or malformed header
     falls back to the peer. None (the SSO then uses our own address) for a non-IP peer.
+
+    Implemented by ``sso_client.get_client_ip``. Without ``CLIENT_IP_HEADER`` no header is read
+    at all (unchanged behaviour), so the trusted list is only passed when a header is configured.
+    IPs are normalised the SSO's way (``::ffff:a.b.c.d`` -> ``a.b.c.d``, IPv6 compressed).
     """
     client = scope.get("client")
-    peer = _ip(str(client[0])) if client else None
+    peer = client[0] if client else None
     header = cfg.client_ip_header.strip()
-    if peer is not None and header:
-        trusted = cfg.trusted_proxy_networks
-        if any(peer in net for net in trusted):
-            for part in reversed(read_header(scope, header).split(",")):
-                ip = _ip(part)
-                if ip is None:
-                    break  # malformed: do not guess further left
-                if not any(ip in net for net in trusted):
-                    return str(ip)
-    return str(peer) if peer is not None else None
+    if not header:
+        return normalize_ip(peer)
+    return get_client_ip(peer, scope.get("headers", []), tuple(cfg.trusted_proxy_networks), header)
 
 
 def cookie_header(cfg: Settings, name: str, value: str, max_age: int,
@@ -220,10 +211,15 @@ class MCPAuthMiddleware:
         if scheme.lower() == "bearer" and token.strip():
             service = tools.auth_service(self.cfg)
             try:
-                await anyio.to_thread.run_sync(service.authenticate_bearer, token.strip())
+                await anyio.to_thread.run_sync(service.authenticate_bearer, token.strip(),
+                                               client_ip_of(scope, self.cfg))
             except tools.PermissionDenied:
                 status, headers = 403, []
                 body = {"detail": "forbidden", "error": "permission_denied"}
+            except tools.SSOUnavailable as exc:  # fail closed (sso-client decision 14)
+                logger.warning("MCP bearer check impossible, SSO unavailable: %s", exc)
+                status, headers = 503, [(b"retry-after", b"5")]
+                body = {"detail": "Login service unavailable"}
             except tools.AuthError as exc:
                 logger.info("MCP bearer rejected: %s", exc)
             else:

@@ -118,6 +118,8 @@ class FakeSSO:
         self.jwks_fetches = 0
         self.logout_failure: str | None = None  # "down" (connection error) or "5xx"
         self.issuer = ISSUER
+        self.introspect_failure: str | None = None  # "5xx", "400" or "401" (invalid_client)
+        self.revoked_jti: set[str] = set()
 
     @property
     def transport(self) -> httpx.MockTransport:
@@ -183,7 +185,35 @@ class FakeSSO:
                 return self._err(502, "bad_gateway")
             self.live_refresh.pop(body.get("refresh_token", ""), None)
             return httpx.Response(204)
+        if path == "/api/v1/auth/introspect":
+            return self._introspect(body)
         return self._err(404, "not_found")
+
+    def _introspect(self, body: dict) -> httpx.Response:
+        """SSO design v1.2 §4.4: current state of the token's user, as of now."""
+        if self.introspect_failure == "5xx":
+            return self._err(503, "unavailable")
+        if self.introspect_failure == "400":
+            return self._err(400, "invalid_request", "token: too long")
+        if self.introspect_failure == "401":
+            return self._err(401, "invalid_client", "Service client authentication failed.")
+        try:
+            claims = jwt.decode(body.get("token", ""), self.key.public_pem, algorithms=["RS256"],
+                                audience=AUDIENCE, issuer=self.issuer)
+        except jwt.PyJWTError:
+            return httpx.Response(200, json={"active": False})
+        if claims.get("jti") in self.revoked_jti:
+            return httpx.Response(200, json={"active": False})
+        name = next((n for n, u in self.users.items() if u.sub == str(claims.get("sub"))), None)
+        if name is None or not self.users[name].active:
+            return httpx.Response(200, json={"active": False})
+        u = self.users[name]
+        # the user's current permissions; a test-minted token narrows them via its perms claim
+        perms = [p for p in u.perms if p in (claims.get("perms") or [])]
+        return httpx.Response(200, json={
+            "active": True, "sub": u.sub, "username": name, "perms": perms,
+            "exp": claims.get("exp"), "sid": claims.get("sid"), "ip_binding": "NOIP",
+            "ip_match": None})
 
     def paths(self) -> list[str]:
         return [p for p, _ in self.calls]
