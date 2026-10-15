@@ -69,7 +69,6 @@ def test_V12B_02_sso_down_503_session_kept(stub, stubbed, browser_factory, sessi
 
 
 @pytest.mark.needs_stub
-@pytest.mark.xfail(strict=True, reason="D-18: API/page 503 (routes.py:81) has no Retry-After; /mcp sends 5, /login 30")
 def test_V12B_02b_503_carries_retry_after(stub, stubbed, browser_factory):
     stub.config(login="mint", refresh="mint", logout="mint", access_ttl=600, username="qa_wiki_sess")
     b = browser_factory(stubbed)
@@ -81,7 +80,6 @@ def test_V12B_02b_503_carries_retry_after(stub, stubbed, browser_factory):
 
 
 @pytest.mark.needs_stub
-@pytest.mark.xfail(strict=True, reason="D-17: hung SSO -> 503 only after ~30 s (timeout 10 s x 3 attempts)")
 def test_V12B_03_sso_hang_bounded(stub, stubbed, browser_factory, session_db):
     """SSO accepts the connection and never answers: the request ends with 503 (session kept). Records the time."""
     stub.config(login="mint", refresh="mint", logout="mint", access_ttl=600, username="qa_wiki_sess",
@@ -232,8 +230,6 @@ def test_V12B_13_header_ignored_on_instances_without_it(cfg, tokens):
 
 @enforce
 @pytest.mark.needs_wiki
-@pytest.mark.xfail(strict=True, reason="D-19: uvicorn --proxy-headers (default on, forwarded_allow_ips=127.0.0.1) "
-                   "rewrites the peer from X-Forwarded-For before llm-wiki's own trusted-proxy logic")
 @pytest.mark.parametrize("name,hdrs", [
     ("both", {"X-Forwarded-For": "203.0.113.61"}),                         # no CLIENT_IP_HEADER configured
     ("sso", {"X-Real-IP": "127.0.0.1", "X-Forwarded-For": "203.0.113.62"}),  # header must win over XFF
