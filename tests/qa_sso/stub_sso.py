@@ -16,6 +16,10 @@ Per-endpoint modes (POST /__qa/config {"login": "...", "refresh": "...", "logout
   forged                login/refresh: 200 with tokens signed by a random attacker key
   token_401 | token_403 refresh: 401 token_invalid / 403 account_inactive
   invalid_client        401 invalid_client (v1.2 C-19: wrong ServiceClient credentials)
+  introspect (v1.2b, sso-client): "auto" (default) answers active for tokens this stub minted (current
+                        "perms" knob, so a perm change is "current") and proxies everything else to the real SSO;
+                        "inactive" -> {"active": false}; also proxy | server_error | hang | close | garbage |
+                        bad_request | invalid_client | rate_limited
 Other knobs: access_ttl (s), refresh_ttl (s), perms (list), retry_after (s), username.
 GET /__qa/calls -> {"counts": {path: n}, "last": {path: body}, "auth": {path: {"scheme", "client_id"}}};
 POST /__qa/reset clears counters + config. "auth" records how llm-wiki authenticated (v1.1 item 4: HTTP Basic as
@@ -34,10 +38,11 @@ import urllib.request
 import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-DEFAULTS = {"login": "proxy", "refresh": "proxy", "logout": "proxy", "access_ttl": 900,
+DEFAULTS = {"login": "proxy", "refresh": "proxy", "logout": "proxy", "introspect": "auto", "access_ttl": 900,
             "refresh_ttl": 7 * 86400, "perms": ["application.app1"], "retry_after": 42,
             "hang_seconds": 15, "username": None}
-STATE = {"config": dict(DEFAULTS), "counts": {}, "last": {}, "auth": {}, "used_refresh": set(), "minted_refresh": set()}
+STATE = {"config": dict(DEFAULTS), "counts": {}, "last": {}, "auth": {}, "used_refresh": set(), "minted_refresh": set(),
+         "minted_access": set()}
 LOCK = threading.Lock()
 ARGS = None
 KEY = None
@@ -56,7 +61,10 @@ def _mint(username, attacker=False):
     base = {"iss": ARGS.issuer, "aud": ARGS.audience, "sub": "990001", "username": username,
             "email": f"{username}@example.invalid", "is_staff": False, "groups": [], "perms": cfg["perms"]}
     key = rsa.generate_private_key(public_exponent=65537, key_size=2048) if attacker else KEY
-    access = jwt.encode({**base, "token_type": "access", "jti": uuid.uuid4().hex, "iat": now,
+    ajti = uuid.uuid4().hex
+    if not attacker:
+        STATE["minted_access"].add(ajti)
+    access = jwt.encode({**base, "token_type": "access", "jti": ajti, "iat": now,
                          "exp": now + int(cfg["access_ttl"])}, key, algorithm="RS256", headers={"kid": KID})
     rjti = uuid.uuid4().hex
     refresh = jwt.encode({"iss": ARGS.issuer, "aud": ARGS.audience, "sub": "990001", "token_type": "refresh",
@@ -146,17 +154,23 @@ class H(BaseHTTPRequestHandler):
                 return self._send(200, STATE["config"])
         if path == "/__qa/reset":
             with LOCK:
-                STATE.update(config=dict(DEFAULTS), counts={}, last={}, auth={}, used_refresh=set(), minted_refresh=set())
+                STATE.update(config=dict(DEFAULTS), counts={}, last={}, auth={}, used_refresh=set(), minted_refresh=set(),
+                         minted_access=set())
             return self._send(200, {"ok": True})
         self._count(raw)
         endpoint = {"/api/v1/auth/login": "login", "/api/v1/auth/refresh": "refresh",
-                    "/api/v1/auth/logout": "logout"}.get(path)
+                    "/api/v1/auth/logout": "logout", "/api/v1/auth/introspect": "introspect"}.get(path)
         mode = STATE["config"].get(endpoint, "proxy") if endpoint else "proxy"
         cfg = STATE["config"]
         try:
             body = json.loads(raw or b"{}")
         except ValueError:
             body = {}
+        if mode == "auto":  # introspect: answer for our own minted tokens, else ask the real SSO
+            answer = self._introspect_minted(body.get("token"))
+            return self._send(200, answer) if answer is not None else self._proxy("POST", raw)
+        if mode == "inactive":
+            return self._send(200, {"active": False})
         if mode == "proxy":
             return self._proxy("POST", raw)
         if mode == "hang":
@@ -209,6 +223,26 @@ class H(BaseHTTPRequestHandler):
                 return self._send(*_mint(cfg.get("username") or "qa_wiki_stub"))
             return self._send(*_mint(cfg.get("username") or body.get("username") or "qa_wiki_stub"))
         return self._send(500, {"error": "stub", "detail": f"unknown mode {mode}"})
+
+
+def _introspect_minted_impl(token):
+    import jwt
+    try:
+        pl = jwt.decode(token or "", KEY.public_key(), algorithms=["RS256"], audience=ARGS.audience,
+                        issuer=ARGS.issuer)
+    except Exception:  # noqa: BLE001
+        return None
+    with LOCK:
+        if pl.get("jti") not in STATE["minted_access"]:
+            return None
+        perms = list(STATE["config"]["perms"])
+    return {"active": True, "sub": pl["sub"], "username": pl.get("username"), "email": pl.get("email", ""),
+            "is_staff": False, "groups": [], "perms": perms, "sid": None, "ip_binding": "NOIP", "ip_match": None,
+            "token_type": "access", "iat": pl["iat"], "exp": pl["exp"], "iss": ARGS.issuer, "aud": ARGS.audience,
+            "client_id": "stub"}
+
+
+H._introspect_minted = staticmethod(_introspect_minted_impl)
 
 
 def main():

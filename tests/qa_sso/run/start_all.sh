@@ -6,6 +6,9 @@
 set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/common.sh"
 THROTTLE=0; [[ "${1:-}" == "--throttle" ]] && THROTTLE=1
+#   tests/qa_sso/run/start_all.sh --enforce   v1.2b binding-ON phase: both SSOs SSO_IP_BINDING_MODE=ENFORCE and
+#     SSO_TRUSTED_PROXIES=127.0.0.1; wiki-sso also trusts 127.0.0.1 with CLIENT_IP_HEADER=x-real-ip (use QA_PHASE=enforce)
+ENFORCE=0; [[ "${1:-}" == "--enforce" ]] && ENFORCE=1
 mkdir -p "$PIDS"
 if compgen -G "$PIDS/*.pid" > /dev/null; then
   echo "PID files exist in $PIDS - run stop_all.sh first" >&2; exit 1
@@ -66,6 +69,10 @@ export SSO_THROTTLE_LOGIN_USER='$RATE_USER'
 export SSO_THROTTLE_REFRESH='$RATE_REFRESH'
 export PYTHONDONTWRITEBYTECODE='1'
 ENV
+if [[ $ENFORCE == 1 ]]; then
+  printf "export SSO_IP_BINDING_MODE='ENFORCE'\nexport SSO_TRUSTED_PROXIES='127.0.0.1'\n" >> "$STATE/sso.env"
+  WIKI_SSO_EXTRA=(TRUSTED_PROXY_IPS=127.0.0.1 CLIENT_IP_HEADER=x-real-ip)
+else WIKI_SSO_EXTRA=(); fi
 cat > "$STATE/sso-manage.sh" <<SH
 #!/usr/bin/env bash
 # manage.py of the QA SSO (used as SSO_MANAGE_CMD). Runs in the sso-server checkout with the QA env.
@@ -88,10 +95,19 @@ wait_http "http://127.0.0.1:$PORT_SSO/healthz" 60
 wait_http "http://127.0.0.1:$PORT_SSO_ALLAPPS/healthz" 60
 
 # ---- llm-wiki venv (outside the repo's own .venv; never touches uv.lock) ----------------------------------
+# sso-client (v1.2b) comes from the local sso-server checkout (SSO_CLIENT_SRC), not from the git tag in pyproject.toml
+SSO_CLIENT_SRC="${SSO_CLIENT_SRC:-$SSO_REPO/clients/python}"
+echo "sso-client @ file://$SSO_CLIENT_SRC" > "$RUN_DIR/venvs/sso-client-override.txt"
 if [[ ! -x "$WIKI_VENV/bin/python" ]]; then
   uv venv -q --python "$QA_PY" "$WIKI_VENV"
-  VIRTUAL_ENV="$WIKI_VENV" uv pip install -e "$WIKI_REPO" pytest pytest-asyncio httpx "pyjwt[crypto]" itsdangerous
+  VIRTUAL_ENV="$WIKI_VENV" uv pip install --override "$RUN_DIR/venvs/sso-client-override.txt" \
+    -e "$WIKI_REPO" pytest pytest-asyncio httpx "pyjwt[crypto]" itsdangerous
 fi
+# always refresh from the checkout (the SSO under test and the library must be the same commit) + llm-wiki deps
+VIRTUAL_ENV="$WIKI_VENV" uv pip install -q --reinstall-package sso-client \
+  --override "$RUN_DIR/venvs/sso-client-override.txt" "$SSO_CLIENT_SRC" -e "$WIKI_REPO"
+"$WIKI_VENV/bin/python" -c "import sso_client,sys;print('sso-client',sso_client.__version__ if hasattr(sso_client,'__version__') else '?',sso_client.__file__)" \
+  | tee "$STATE/sso_client_version"
 "$WIKI_VENV/bin/python" --version | tee "$STATE/wiki_python"
 
 # ---- stub SSO ---------------------------------------------------------------------------------------------
@@ -128,7 +144,7 @@ start_wiki static     "$PORT_WIKI_STATIC"
 start_wiki static_reads "$PORT_WIKI_STATIC_READS" SSO_PROTECT_READS=true
 start_wiki dotted     "$PORT_WIKI_DOTTED"    AUTH_MODE=both INGEST_API_TOKEN="$DOTTED_TOKEN"
 start_wiki both       "$PORT_WIKI_BOTH"      AUTH_MODE=both
-start_wiki sso        "$PORT_WIKI_SSO"       AUTH_MODE=sso
+start_wiki sso        "$PORT_WIKI_SSO"       AUTH_MODE=sso "${WIKI_SSO_EXTRA[@]}"
 start_wiki sso_reads  "$PORT_WIKI_SSO_READS" AUTH_MODE=sso SSO_PROTECT_READS=true
 start_wiki app2       "$PORT_WIKI_APP2"      AUTH_MODE=sso SSO_REQUIRED_PERMISSION=application.qa_app2
 # 2 workers: the refresh-race case (SESS-08) must hold across processes (v1.1 item 2: the DB transaction is the guard)
@@ -173,6 +189,7 @@ export LLM_WIKI_LOG_FILES='$(ls "$LOGS"/wiki-*.log | paste -sd, -)'
 export LLM_WIKI_START_CMD='$WIKI_VENV/bin/python -m uvicorn llmwiki.api.app:app --host 127.0.0.1 --port {port}'
 export QA_SSO_STARTUP_PORT='$PORT_STARTUP'
 export QA_SSO_THROTTLE_PHASE='$THROTTLE'
+export QA_SSO_ENFORCE_PHASE='$ENFORCE'
 ENV
 # ---- which interpreter does each server process really run? (/proc/PID/exe of the recorded PIDs) --------------
 sleep 2

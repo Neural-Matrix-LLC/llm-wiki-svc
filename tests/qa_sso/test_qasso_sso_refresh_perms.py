@@ -15,7 +15,7 @@ def _refresh(sso_http, refresh_token):
 
 
 def _introspect(sso_http, token, auth):
-    return sso_http.post("/api/v1/auth/introspect", json={"token": token}, auth=auth).json()
+    return sso_http.post("/api/v1/auth/introspect", json={"token": token, "ip": "127.0.0.1"}, auth=auth).json()
 
 
 def _login(sso_http, u):

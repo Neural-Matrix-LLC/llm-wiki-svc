@@ -414,41 +414,51 @@ def test_SESS_30_real_refresh_rotation(wiki, logged_in, cfg, sso_http, session_d
     assert sso_http.post(REFRESH, json={"refresh_token": old_refresh}).status_code == 401, "old refresh blacklisted"
 
 
-@pytest.mark.slow
+INTROSPECT_CACHE_S = 30      # sso-client: active answers cached <= 30 s (SSO design v1.2 §4.4)
+
+
+def _until_not_200(fn, limit=INTROSPECT_CACHE_S + 8, step=1.0):
+    """Poll fn() until it stops returning 200; return (response, seconds). Fails after ``limit`` s."""
+    t0 = time.monotonic()
+    while True:
+        r = fn()
+        if r.status_code != 200:
+            return r, time.monotonic() - t0
+        assert time.monotonic() - t0 < limit, f"still 200 after {limit}s: introspect cache bound not honoured"
+        time.sleep(step)
+
+
 @pytest.mark.grey
 @pytest.mark.needs_wiki
 @pytest.mark.needs_sso
-def test_SESS_31_logout_all_at_sso_ends_session_after_refresh_window(wiki, logged_in, cfg, sso_http, session_db):
-    """SSO logout-all revokes refresh tokens; the llm-wiki session lives until its next refresh fails (D-10:
-    up to the access lifetime, accepted) and the row is then deleted."""
+def test_SESS_31_logout_all_at_sso_ends_session_within_cache_bound(wiki, logged_in, cfg, sso_http, session_db):
+    """v1.2b (accepted change, was D-10 'until the next refresh'): the SSO's introspect answer is authoritative, so
+    an SSO logout-all ends the llm-wiki session within the 30 s introspect cache; the row is then deleted."""
     from conftest import instance_name_of
-    if cfg.access_ttl > 180:
-        pytest.skip("needs SSO_ACCESS_TTL_SECONDS <= 180")
     b = logged_in("qa_wiki_logoutall")
     store = session_db(instance_name_of(cfg, wiki))
+    assert b.get("/dashboard").status_code == 200        # warms the 30 s cache
     access = store.value(store.row_for_cookie(b.session_value), "access")
     r = sso_http.post("/api/v1/auth/logout-all", headers={"Authorization": f"Bearer {access}"})
     assert r.status_code == 204, r.text
-    assert b.get("/dashboard").status_code == 200, "still valid until the refresh window (D-10 accepted)"
-    time.sleep(max(cfg.access_ttl - 55, 1))
     cookie = b.session_value
-    r = b.get("/dashboard")
-    assert r.status_code == 303 and r.headers["location"].startswith("/login")
+    r, secs = _until_not_200(lambda: b.get("/dashboard"))
+    assert r.status_code == 303 and r.headers["location"].startswith("/login"), r.status_code
+    assert secs <= INTROSPECT_CACHE_S + 3, secs
     assert store.row_for_cookie(cookie) is None
 
 
-@pytest.mark.slow
 @pytest.mark.needs_wiki
 @pytest.mark.needs_manage
-def test_SESS_32_revoked_grant_takes_effect_on_refresh(wiki, logged_in, cfg, sso_admin, reset_user):
-    """D-10 (accepted): revocation takes effect at the next refresh; then 403 and the session is deleted (Q-06)."""
-    if cfg.access_ttl > 180:
-        pytest.skip("needs SSO_ACCESS_TTL_SECONDS <= 180")
+def test_SESS_32_revoked_grant_takes_effect_within_cache_bound(wiki, logged_in, cfg, sso_admin, reset_user):
+    """v1.2b (accepted change): a revoked grant takes effect within the 30 s introspect cache (not at the next
+    refresh); then 403 and the session is deleted (Q-06)."""
     reset_user("qa_wiki_mut_revoke")
     b = logged_in("qa_wiki_mut_revoke")
+    assert b.get("/usage", headers={"Accept": "application/json"}).status_code == 200
     sso_admin.call("revoke", "qa_wiki_mut_revoke", D.APP_PERM)
-    assert b.get("/usage", headers={"Accept": "application/json"}).status_code == 200, "old access token still has perm"
-    time.sleep(max(cfg.access_ttl - 55, 1))
     cookie = b.session_value
-    assert b.get("/usage", headers={"Accept": "application/json"}).status_code == 403
+    r, secs = _until_not_200(lambda: b.get("/usage", headers={"Accept": "application/json"}))
+    assert r.status_code == 403, r.status_code
+    assert secs <= INTROSPECT_CACHE_S + 3, secs
     assert _get(wiki.url, cookie).status_code == 401, "session deleted after the 403 (Q-06)"

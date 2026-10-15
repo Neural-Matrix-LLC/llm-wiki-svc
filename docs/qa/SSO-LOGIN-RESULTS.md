@@ -480,3 +480,97 @@ Superuser behaviour verified:
 
 Existing llm-wiki suite @ c7dbbe1, py3.11.14 (clean worktree, removed): `4 failed, 1096 passed, 1 skipped,
 33 deselected`. Only the 4 known R2_* factory-isolation failures.
+
+# v1.2b: llm-wiki on sso-client (feat/sso-client @ a91ac2e)
+
+## State
+- llm-wiki feat/sso-client @ a91ac2e. SSO: sso-server feat/v1.2b @ b7570cf (its own v1.2b QA is committed there as 6368b20).
+- sso-client 0.1.0 is installed from `<sso-server>/clients/python`. `start_all.sh` writes a uv `--override` for it and
+  reinstalls it at every start. The git-tag dependency in pyproject.toml is not used.
+- The SSO venvs were refreshed from the v1.2b requirements.lock.
+- Python 3.13.16 is primary. Every server process runs on 3.13 (see interpreters.txt).
+- Test plan: SSO-LOGIN-TEST-PLAN.md §9.
+
+## Harness changes (tests/qa_sso only)
+- `stub_sso.py` answers `/api/v1/auth/introspect`.
+  - Mode `auto` (default): active, with the current `perms` knob, for tokens the stub minted. Everything else is
+    proxied to the real SSO.
+  - Other modes: `inactive` and all the existing failure modes.
+  - This fixes the 25 earlier failures: LOGIN_15b, LOGOUT_04/05, ROT_03, SESS_05/06/08/08b/10-13/16.
+- New phase `start_all.sh --enforce`:
+  - both SSOs run with `SSO_IP_BINDING_MODE=ENFORCE` and `SSO_TRUSTED_PROXIES=127.0.0.1`;
+  - wiki-sso runs with `TRUSTED_PROXY_IPS=127.0.0.1` and `CLIENT_IP_HEADER=x-real-ip`.
+- Accepted expectation changes, because the SSO's introspect answer is authoritative:
+  - JWTV-10 x11: 200 for a holder of the permission, plus a new 403 check for qa_wiki_none;
+  - JWTV-11: a forged claim does not grant (403);
+  - JWTV-12: 401;
+  - JWTV-15: 401;
+  - SESS-31/32: effective within 30 s, measured;
+  - SU-04: 403.
+- PERM-12/16/17/18 and PREF-01/02 now send `ip` with their direct introspect calls. Under ENFORCE, a call without `ip`
+  is a mismatch: the session becomes inactive and is revoked (sso §11). This is a test adjustment, not a defect.
+- New file `test_qasso_v12b_introspect.py`: V12B-01..14.
+
+## Results (Python 3.13.16)
+| Run | Result |
+|---|---|
+| Baseline: stub introspect in place, old expectations | 1231 passed / 16 failed / 169 skipped. The 16 failures are exactly the accepted list. The 25 stub failures are fixed. |
+| Functional, updated tests (binding OFF) | **1259 passed / 0 failed / 172 skipped + 2 xfail (D-17, D-18)** |
+| Throttle phase | 22 passed / 0 failed |
+| ENFORCE phase, full suite, before the adjustments | 1241 passed / 21 failed. 19 failures are introspect calls without `ip` (legit, now adjusted). 2 are D-19 (XFF). |
+| ENFORCE phase, full suite, after the adjustments (rerun after a box restart) | **1262 passed / 0 failed / 169 skipped + 4 xfail (D-17, D-18, D-19 x2)** |
+| Existing llm-wiki suite, py3.13 | 1103 passed / 4 failed / 1 skipped. The 4 failures are the known R2_* factory-isolation failures, unchanged since 6520890. |
+
+Measured behaviour:
+- **30 s bound:** the bound holds.
+  - V12B-01: after deactivation the user still gets 200 from the cache, then 401 at 20-33 s after the first introspect.
+  - SESS-31 (logout-all) and SESS-32 (revoked grant) take effect within 33 s.
+- **SSO down:**
+  - introspect 500, connection close, garbage or 429 → 503 in under 15 s;
+  - the session row is kept, and the same session works again once the SSO is back.
+- **Other introspect answers:**
+  - introspect 400 → 401;
+  - inactive → 401 and the row is deleted;
+  - a perm change at the SSO → 403 although the token still claims the permission.
+- **D11:** login, refresh, logout and session rotation all send `client_ip`=127.0.0.1. Introspect sends `ip` and HTTP
+  Basic with the login ServiceClient.
+- **CLIENT_IP_HEADER + ENFORCE:**
+  - X-Real-IP from the trusted peer is bound at login; the same IP → 200;
+  - another IP → 401, the row is deleted, and the SSO revokes the whole sid (introspect from the old IP is
+    inactive);
+  - no header → the peer IP is bound;
+  - instances without the setting ignore X-Real-IP.
+
+## Defects (new)
+- **D-17 (Medium)**, src/llmwiki/auth/service.py:47 and :105-109.
+  - A hung SSO introspect makes every authenticated request wait about 30.5 s before the 503: 10 s timeout × 3
+    attempts (sso-client's default retries). Under load this ties up the thread pool. Fail-closed still holds.
+  - Repro: V12B-03 (stub `introspect=hang`).
+  - Suggested fix: a 2-3 s timeout and/or `retries=0` for introspect.
+- **D-18 (Low)**, src/llmwiki/api/routes.py:81-82.
+  - The API and page 503 "Login service unavailable" has no Retry-After. /mcp sends 5 (session.py:221) and /login
+    sends 30. The design doesn't require the header, but the routes are inconsistent.
+  - Repro: V12B-02b.
+- **D-19 (Medium, security/robustness under ENFORCE)**, Dockerfile:68/126 (uvicorn without `--no-proxy-headers` or
+  `--forwarded-allow-ips`) together with src/llmwiki/api/session.py:93-96 (trusts `scope["client"]`).
+  - uvicorn's proxy-headers are on by default and trust 127.0.0.1. uvicorn rewrites the peer from X-Forwarded-For
+    before llm-wiki's own trusted-proxy logic runs.
+  - A loopback client therefore chooses the client IP that is sent to the SSO, even when CLIENT_IP_HEADER is unset,
+    and XFF beats the configured header. This breaks the design statement "no header is read unless configured".
+  - Consequences:
+    - a stolen-token holder can claim the bound IP behind a same-host proxy that passes XFF through;
+    - a client can forge a mismatch, which revokes the sid;
+    - the SSO's per-IP login throttle sees a client-chosen IP.
+  - Evidence: an SSO log line `ip_mismatch` with ip=203.0.113.61 (the XFF value), and wiki-both access log
+    `203.0.113.61:0`.
+  - Repro: V12B-14 (strict xfail, 2 cases).
+
+## Notes
+- Python 3.11 was not run this round. It was optional, and the box restarted twice. 3.13 is the primary target.
+- Redone after the interruptions: the ENFORCE run of the affected files, started on a fresh stack. The baseline,
+  functional and throttle runs had intact junit and were not repeated.
+- All QA processes were stopped by their recorded PIDs. Ports 8030-8042 are free.
+
+## Verdict
+**PASS with defects:** 0 failures in both binding modes. D-17 (Medium), D-19 (Medium) and D-18 (Low) are open,
+each pinned by a strict xfail. D-19 should be fixed before ENFORCE is enabled for llm-wiki.

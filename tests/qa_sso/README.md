@@ -13,7 +13,7 @@ any URL on port 8000 aborts the run.
 
 | port | process | config |
 |---|---|---|
-| 8030 | SSO (sso-server checkout, gunicorn, SQLite under `run/state-pyX.Y/`) | branch `feat/app-permissions` |
+| 8030 | SSO (sso-server checkout, gunicorn, SQLite under `run/state-pyX.Y/`) | branch `feat/v1.2b` (v1.2b introspect / IP binding) |
 | 8031 | llm-wiki `both` | primary `LLM_WIKI_BASE_URL` |
 | 8032 | llm-wiki `sso` with `SSO_BASE_URL` set to the stub | failure-mode cases |
 | 8033 | `stub_sso.py` | proxies to 8030 or mints/fails on request |
@@ -54,6 +54,12 @@ tests/qa_sso/run/stop_all.sh             # stops exactly the recorded PIDs
 # throttle phase (SSO at spec rates: 10/min per IP, 5/min per username), run separately
 QA_PHASE=throttle tests/qa_sso/run/start_all.sh --throttle && QA_PHASE=throttle tests/qa_sso/run/pytest.sh
 tests/qa_sso/run/stop_all.sh
+
+# v1.2b binding-ON phase: both SSOs ENFORCE + SSO_TRUSTED_PROXIES=127.0.0.1, wiki-sso CLIENT_IP_HEADER=x-real-ip
+QA_PHASE=enforce tests/qa_sso/run/start_all.sh --enforce && QA_PHASE=enforce tests/qa_sso/run/pytest.sh
+tests/qa_sso/run/stop_all.sh
+# sso-client is installed into the wiki venv from SSO_CLIENT_SRC (default $SSO_REPO_DIR/clients/python) at every start,
+# overriding the git-tag dependency in pyproject.toml; the stub answers /introspect itself for tokens it minted.
 
 # Python version: QA_PY=3.11 (default) or QA_PY=3.13 selects the interpreter of EVERY process (SSO gunicorn,
 # stub, llm-wiki uvicorn, pytest). Venvs: run/venvs/{sso,wiki}-pyX.Y (built on first use; the SSO venv from

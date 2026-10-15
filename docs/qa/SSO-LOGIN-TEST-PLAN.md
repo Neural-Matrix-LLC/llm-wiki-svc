@@ -778,3 +778,34 @@ Decided at the regression round @ 6520890 (Philip, 2026-10-10): Q-08, Q-10, Q-12
 - **Exit:** no failing High/Medium case without an accepted waiver (currently D-08, D-16, C-11 need a decision);
   REG green; every open question answered or deferred; manual checklist done; results in
   `docs/qa/SSO-LOGIN-RESULTS.md` (to be created in the test round).
+
+## 9. v1.2b: llm-wiki on sso-client (branch feat/sso-client @ a91ac2e)
+
+The SSO's introspect answer decides permissions and revocation (active answers cached ≤ 30 s), the service fails
+closed (503, session kept), introspect 400 → 401, and client_ip is sent with login / refresh / logout (D11).
+The SSO under test is sso-server feat/v1.2b @ b7570cf. sso-client is installed from its `clients/python`.
+
+Harness: `stub_sso.py` answers `/api/v1/auth/introspect` (mode `auto`: active with the current `perms` knob for tokens
+it minted, proxy otherwise; `inactive` and the failure modes). `start_all.sh --enforce` adds the binding-ON phase.
+
+| ID | Case | Expected |
+|---|---|---|
+| JWTV-10 (changed, x11) | malformed `perms` claims on a validly signed token | claim ignored: 200 for a user holding app1, 403 for qa_wiki_none |
+| JWTV-11 (changed) | qa_wiki_staff token re-signed with perms=[app1], is_staff, app group | 403 |
+| JWTV-12 (changed) | well-signed token of a user the SSO does not know | 401 (was 200) |
+| JWTV-15 (changed) | 12 kB token (SSO introspect 400) | 401 |
+| SESS-31 (changed) | SSO logout-all | session ends within 30 s (+3 s), row deleted |
+| SESS-32 (changed) | grant revoked at the SSO | 403 within 30 s (+3 s), session deleted |
+| SU-04 (changed) | all-apps token minted by the flag-true SSO | 403 (llm-wiki's own SSO answers) |
+| V12B-01 | user deactivated after a 200 | still 200 from the cache, 401 between 20 and 33 s after the first introspect |
+| V12B-02 (x4) | introspect 500 / connection close / garbage / 429 | 503 in < 15 s, session row kept, 200 again once the SSO is back |
+| V12B-02b | 503 carries Retry-After | xfail strict: D-18 |
+| V12B-03 | introspect hangs | 503 in < 15 s, session kept (xfail strict: D-17) |
+| V12B-04 | introspect 400 | 401 |
+| V12B-05 | introspect `{"active": false}` | 401, row deleted |
+| V12B-06 | perms changed at the SSO (stub knob) | 403 although the token claims app1 |
+| V12B-07 | introspect request | `ip` = 127.0.0.1, HTTP Basic with the login ServiceClient |
+| V12B-08/09/10 | logout / rotation (login while signed in) / refresh | body carries `client_ip` = 127.0.0.1 (D11) |
+| V12B-11 (enforce) | X-Real-IP from a trusted peer → bound at login; same IP, header + XFF, XFF only, other IP | 200, 200 (header wins), 200 (XFF fallback), 401 + row deleted + SSO session revoked (introspect from the old IP inactive) |
+| V12B-12 (enforce) | no header → peer IP bound; then a header claiming another IP | 200 then 401 |
+| V12B-13 (enforce) | an instance without CLIENT_IP_HEADER (wiki-both) gets X-Real-IP / XFF | ignored: 200 each |

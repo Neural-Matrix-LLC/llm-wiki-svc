@@ -109,7 +109,7 @@ def test_PERM_11_me_has_perms(sso_http, tokens, username):
 @pytest.mark.parametrize("username", ["qa_wiki_direct", "qa_wiki_group", "qa_wiki_none", "qa_wiki_super"])
 def test_PERM_12_introspect_has_perms(sso_http, tokens, service_auth, username):
     body = tokens(username)
-    r = sso_http.post("/api/v1/auth/introspect", json={"token": body["access_token"]}, auth=service_auth)
+    r = sso_http.post("/api/v1/auth/introspect", json={"token": body["access_token"], "ip": "127.0.0.1"}, auth=service_auth)
     assert r.status_code == 200, r.text
     j = r.json()
     assert j["active"] is True
@@ -149,7 +149,7 @@ def test_PERM_16_empty_perms_is_empty_list_everywhere(sso_http, tokens, service_
     assert body["user"]["perms"] == expected
     me = sso_http.get("/api/v1/auth/me", headers={"Authorization": f"Bearer {body['access_token']}"}).json()
     assert me.get("user", me)["perms"] == expected
-    intro = sso_http.post("/api/v1/auth/introspect", json={"token": body["access_token"]}, auth=service_auth).json()
+    intro = sso_http.post("/api/v1/auth/introspect", json={"token": body["access_token"], "ip": "127.0.0.1"}, auth=service_auth).json()
     assert intro["perms"] == expected
 
 
@@ -170,7 +170,7 @@ def _all_views(http, service_auth, username):
     assert r.status_code == 200, r.text
     body = r.json()
     me = http.get("/api/v1/auth/me", headers={"Authorization": f"Bearer {body['access_token']}"}).json()
-    intro = http.post("/api/v1/auth/introspect", json={"token": body["access_token"]}, auth=service_auth).json()
+    intro = http.post("/api/v1/auth/introspect", json={"token": body["access_token"], "ip": "127.0.0.1"}, auth=service_auth).json()
     return {"token": jwt_forge.payload(body["access_token"])["perms"], "user": body["user"]["perms"],
             "me": me.get("user", me)["perms"], "introspect": intro["perms"]}
 

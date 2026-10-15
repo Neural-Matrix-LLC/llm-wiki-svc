@@ -121,24 +121,30 @@ def test_JWTV_09_missing_kid_and_header_injection(wiki, signing_key, base):
     ([], "empty"),
     (None, "claim absent"),
 ])
-def test_JWTV_10_perm_check_is_exact_list_membership(wiki, forge, base, perms, why):
-    """B2: SSO_REQUIRED_PERMISSION in principal.perms. Validly signed tokens with malformed perms -> 403 (or 401
-    when the token is rejected as malformed), NEVER 200."""
+def test_JWTV_10_perm_claim_is_ignored_sso_answer_decides(wiki, forge, base, tokens, perms, why):
+    """v1.2b (sso-client, accepted change): the token's ``perms`` claim no longer decides anything; the SSO's
+    introspect answer (DB permissions) does. Malformed claims on a user who HAS application.app1 -> 200;
+    the same malformed claims on a user WITHOUT it (qa_wiki_none) -> 403, never 200. Never 500."""
     r = _get(wiki, forge(base, perms=perms) if perms is not None else forge(base, _drop=("perms",)))
-    assert r.status_code in (401, 403), (why, r.status_code)
-    if r.status_code == 403:
-        assert r.json() == {"detail": "forbidden", "error": "permission_denied"}
+    assert r.status_code == 200, (why, r.status_code)
+    none = tokens("qa_wiki_none")["access_token"]
+    r = _get(wiki, forge(none, perms=perms) if perms is not None else forge(none, _drop=("perms",)))
+    assert r.status_code == 403, (why, r.status_code)
+    assert r.json() == {"detail": "forbidden", "error": "permission_denied"}
 
 
-def test_JWTV_11_staff_flag_does_not_grant(wiki, forge, base):
-    r = _get(wiki, forge(base, perms=[], is_staff=True, groups=["admins", D.APP_GROUP]))
-    assert r.status_code == 403
+def test_JWTV_11_forged_claims_do_not_grant(wiki, forge, tokens):
+    """v1.2b: a validly signed token of qa_wiki_staff (no grant) carrying perms=[app1], is_staff and the app group
+    is refused (403): the SSO answers with the DB permissions."""
+    staff = tokens("qa_wiki_staff")["access_token"]
+    r = _get(wiki, forge(staff, perms=[D.APP_PERM], is_staff=True, groups=["admins", D.APP_GROUP]))
+    assert r.status_code == 403, r.status_code
 
 
-def test_JWTV_12_valid_token_of_deleted_or_inactive_user_still_accepted(wiki, forge, base):
-    """Stateless verification: llm-wiki does not introspect, so a well-signed unexpired token is honoured until
-    exp (<= access TTL). Documents the revocation window (see SESS-11 / PREF-02)."""
-    assert _get(wiki, forge(base, sub="999999999", username="qa_deleted_user")).status_code == 200
+def test_JWTV_12_valid_token_of_unknown_user_rejected(wiki, forge, base):
+    """v1.2b (accepted change): llm-wiki introspects, so a well-signed unexpired token of a user the SSO does not
+    know is inactive -> 401 (was 200 under stateless verification)."""
+    assert _get(wiki, forge(base, sub="999999999", username="qa_deleted_user")).status_code == 401
 
 
 def test_JWTV_13_unknown_kid_refetch_limited(wiki, signing_key, base, cfg):
@@ -159,8 +165,10 @@ def test_JWTV_14_bearer_scheme_parsing(wiki, base, hdr):
 
 
 def test_JWTV_15_oversized_token_no_500(wiki, forge, base):
+    """v1.2b: the SSO's introspect answers 400 for a token over its size limit; llm-wiki maps that to 401
+    (not a credential), never 503 or 500."""
     r = _get(wiki, forge(base, pad="A" * 12000))
-    assert r.status_code in (200, 400, 401, 413, 431), r.status_code
+    assert r.status_code == 401, r.status_code
 
 
 def test_JWTV_16_two_dot_static_token_lookalike(wiki, cfg):

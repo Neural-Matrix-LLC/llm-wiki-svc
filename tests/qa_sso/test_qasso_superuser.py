@@ -81,7 +81,9 @@ def test_SU_04_flag_true_same_superuser_gets_access(cfg, wiki, sso_admin, seeded
     with httpx.Client(base_url=cfg.sso_allapps_url, timeout=30) as c:
         tok = sso_login(c, "qa_wiki_super").json()["access_token"]
     assert jwt_forge.payload(tok)["perms"] == sso_admin.json("all_app_perms")
-    assert _json_get(wiki.url, tok).status_code == 200      # same keys/issuer: llm-wiki trusts it
+    # v1.2b (accepted change): llm-wiki asks ITS SSO (the primary, flag false) via introspect; that answer is
+    # authoritative, so the all-apps claim minted by the flag-true SSO does not grant access -> 403 (was 200).
+    assert _json_get(wiki.url, tok).status_code == 403
     with httpx.Client(base_url=cfg.sso_allapps_url, timeout=30) as c:
         r = sso_login(c, "qa_wiki_inactive_super")
     assert r.status_code == 403 and r.json().get("error") == "account_inactive"
