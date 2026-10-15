@@ -65,8 +65,10 @@ EXPOSE 8000
 # --reload-dir keeps the watcher off .git/, .data/ and .venv/, which the
 # whole-tree bind mount also exposes. watchfiles is already in requirements.txt,
 # so this is a real inotify watcher, not uvicorn's stat-polling fallback.
+# --no-proxy-headers (D-19): the client IP is llm-wiki's decision (CLIENT_IP_HEADER /
+# TRUSTED_PROXY_IPS), never uvicorn's X-Forwarded-For rewrite.
 CMD ["uvicorn", "llmwiki.api.app:app", "--host", "0.0.0.0", "--port", "8000", \
-     "--reload", "--reload-dir", "/app/src"]
+     "--no-proxy-headers", "--reload", "--reload-dir", "/app/src"]
 
 
 FROM python:3.11-slim AS runtime
@@ -123,4 +125,5 @@ VOLUME ["/data"]
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
     CMD python -c "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/healthz', timeout=4).status==200 else 1)"
 
-CMD ["uvicorn", "llmwiki.api.app:app", "--host", "0.0.0.0", "--port", "8000"]
+# --no-proxy-headers (D-19): see the dev stage
+CMD ["uvicorn", "llmwiki.api.app:app", "--host", "0.0.0.0", "--port", "8000", "--no-proxy-headers"]

@@ -44,7 +44,7 @@ logger = logging.getLogger(__name__)
 
 #: Refresh the access token server-side when it expires within this many seconds (design B4).
 REFRESH_MARGIN_S = 60
-SSO_TIMEOUT_S = 10.0
+SSO_TIMEOUT_S = 10.0  # login / refresh / logout / JWKS (interactive, rare)
 
 
 class AuthService:
@@ -105,7 +105,11 @@ class AuthService:
             config = sso_client.SSOConfig(
                 base_url=base, client_id=self.cfg.sso_client_id,
                 client_secret=self.cfg.sso_client_secret.get_secret_value(),
-                allow_http=base.startswith("http://"), timeout=SSO_TIMEOUT_S)
+                allow_http=base.startswith("http://"),
+                # D-17: every request waits on this; bounded by SSO_INTROSPECT_TIMEOUT_S/_RETRIES
+                timeout=self.cfg.sso_introspect_timeout_s,
+                connect_timeout=min(1.0, self.cfg.sso_introspect_timeout_s),
+                retries=self.cfg.sso_introspect_retries)
             self._introspector = sso_client.SSOClient(config, http=self.http)
         return self._introspector
 

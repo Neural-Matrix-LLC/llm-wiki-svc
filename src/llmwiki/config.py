@@ -278,7 +278,7 @@ class Settings(BaseSettings):
     # Idle timeout (design v1.2 Q-27): a session unused this long ends.
     session_idle_hours: float = 12.0
     # Browser IP passed to the SSO (design v1.2 C-11/Q-25): blank = the TCP peer
-    # (uvicorn's view, i.e. after --proxy-headers). e.g. "cf-connecting-ip" or
+    # (uvicorn proxy headers are ignored, D-19). e.g. "cf-connecting-ip" or
     # "x-forwarded-for"; honoured ONLY when the peer is in TRUSTED_PROXY_IPS (CIDRs).
     client_ip_header: str = ""
     trusted_proxy_ips: str = ""  # comma-separated IPs/CIDRs, e.g. "127.0.0.1/32,::1/128"
@@ -286,6 +286,10 @@ class Settings(BaseSettings):
     # true: read routes (/search, /answer, /concepts, /page, GET /domains,
     # /worker, /sources) need auth too. /healthz and /login stay public.
     sso_protect_reads: bool = False
+    # D-17: the per-request SSO introspect bound. A hung SSO costs at most
+    # timeout x (1 + retries) seconds (+ ~0.1 s backoff) before the 503.
+    sso_introspect_timeout_s: float = 2.5
+    sso_introspect_retries: int = 0  # 0 or 1
 
     # --- Capture channels (Phase 1, KB design §5): each is optional and
     # independently disabled by leaving its secret unset - api/app.py mounts
@@ -508,6 +512,10 @@ class Settings(BaseSettings):
                 f"AUTH_MODE={self.auth_mode} refuses a weak INGEST_API_TOKEN: it {weak}. Use e.g. "
                 "python -c 'import secrets; print(secrets.token_urlsafe(32))'"
             )
+        if not 0 < self.sso_introspect_timeout_s <= 30:
+            raise RuntimeError("SSO_INTROSPECT_TIMEOUT_S must be > 0 and <= 30")
+        if self.sso_introspect_retries not in (0, 1):
+            raise RuntimeError("SSO_INTROSPECT_RETRIES must be 0 or 1")
         if self.session_max_age_hours <= 0 or self.session_idle_hours <= 0:
             raise RuntimeError("SESSION_MAX_AGE_HOURS and SESSION_IDLE_HOURS must be positive")
         try:

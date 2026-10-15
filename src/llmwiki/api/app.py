@@ -14,6 +14,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
 from llmwiki import __version__
+from llmwiki.api.proxyguard import disable_uvicorn_proxy_headers
 from llmwiki.api.routes import CSRFFailed, Forbidden, router
 from llmwiki.config import configure_logging
 from llmwiki.config import settings as default_settings
@@ -197,4 +198,6 @@ def _build_mcp_app():  # type: ignore[no-untyped-def]
         return None
 
 
+# D-19: before uvicorn wraps the app (Config.load imports it first); see api/proxyguard.py
+disable_uvicorn_proxy_headers()
 app = create_app()

@@ -252,8 +252,9 @@ email subject starting with `[ml-systems]`, files the source there.
   login and refresh are sent with it plus the browser's IP, so the SSO throttles per user. A wrong
   secret makes the SSO answer 401 `invalid_client`: logged as an ERROR here, users see a 503
   "Login service misconfigured".
-* Browser IP: by default the TCP peer as uvicorn reports it (uvicorn's `--proxy-headers` trusts
-  `X-Forwarded-For` only from `--forwarded-allow-ips`, default 127.0.0.1). Behind cloudflared
+* Browser IP: by default the TCP peer. uvicorn's own `--proxy-headers` rewriting is disabled
+  (`--no-proxy-headers` in the Dockerfile, and neutralised when the app is imported whatever the
+  launch flags, D-19), so `X-Forwarded-For` / `FORWARDED_ALLOW_IPS` never choose the IP. Behind cloudflared
   (Cloudflare Tunnel) set `CLIENT_IP_HEADER=cf-connecting-ip` and `TRUSTED_PROXY_IPS` to the
   address(es) cloudflared connects from: the header is honoured only from those peers; an
   `X-Forwarded-For` list is read right to left, skipping trusted proxies.

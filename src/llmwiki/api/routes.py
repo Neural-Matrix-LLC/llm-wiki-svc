@@ -78,12 +78,18 @@ class CSRFFailed(Exception):
     BODY = {"error": "csrf_failed"}
 
 
+#: D-18: seconds a client should wait after a 503 from the auth layer (pages and /login use 30)
+SSO_RETRY_AFTER_S = "30"
+
+
 def _sso_unavailable() -> HTTPException:
-    return HTTPException(status_code=503, detail="Login service unavailable")
+    return HTTPException(status_code=503, detail="Login service unavailable",
+                         headers={"Retry-After": SSO_RETRY_AFTER_S})
 
 
 def _sso_misconfigured() -> HTTPException:
-    return HTTPException(status_code=503, detail="Login service misconfigured")
+    return HTTPException(status_code=503, detail="Login service misconfigured",
+                         headers={"Retry-After": SSO_RETRY_AFTER_S})
 
 
 def _unauthorized() -> HTTPException:

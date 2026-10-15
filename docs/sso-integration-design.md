@@ -250,3 +250,16 @@ dedicated ports, users with and without `application.app1` (direct and via group
 * **Dependency.** `sso-client @ git+https://github.com/Neural-Matrix-LLC/SSO-server.git@sso-client-v0.1.0#subdirectory=clients/python`.
   For local development, run `uv pip install <sso-server>/clients/python`.
 * **Unchanged.** `AUTH_MODE=static` does not change and never calls the SSO.
+
+### QA round on a9b744e (D-17 .. D-19)
+
+* **D-17:** introspect is bounded by `SSO_INTROSPECT_TIMEOUT_S` (default 2.5 s) and
+  `SSO_INTROSPECT_RETRIES` (default 0, at most 1). With the defaults, a hung SSO gives a 503 after
+  about 2.5 s; before this fix it took about 30.5 s. Login, refresh, logout and JWKS keep the 10 s
+  timeout.
+* **D-18:** every 503 from the auth layer carries `Retry-After`: 30 on API, page and login responses,
+  5 on `/mcp`.
+* **D-19:** uvicorn's proxy-header rewriting is off. The Dockerfile passes `--no-proxy-headers`, and
+  `api/proxyguard.py` turns uvicorn's ProxyHeadersMiddleware into a no-op when the app is imported,
+  so any other launch path (a plain `uvicorn ...`, `python -m uvicorn`, `FORWARDED_ALLOW_IPS`) cannot
+  bring it back. Only `CLIENT_IP_HEADER` and `TRUSTED_PROXY_IPS` decide the client IP.
